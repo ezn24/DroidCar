@@ -259,22 +259,41 @@ class DockActivity : AppCompatActivity() {
 
     private var lastRendered: List<String> = emptyList()
 
+    /** 上次渲染用的图标表（桌面扫描换新后需重绘：dock 常比扫描先完成首绘）。 */
+    private var lastIconCache: Map<android.content.ComponentName, android.graphics.drawable.Drawable>? = null
+
+    /**
+     * 运行中应用的图标。缓存键是桌面扫描出的启动组件，而地图/媒体区是按 resolveActivity
+     * 解析出的组件启动的——启动入口是 activity-alias 时（如高德）两者类名不同，精确查找
+     * 落空就成了默认机器人图标。依次退到：同包名的缓存项 → 系统组件图标 → 应用图标。
+     */
+    private fun iconFor(
+        component: android.content.ComponentName,
+        cache: Map<android.content.ComponentName, android.graphics.drawable.Drawable>,
+    ): android.graphics.drawable.Drawable =
+        cache[component]
+            ?: cache.entries.firstOrNull { it.key.packageName == component.packageName }?.value
+            ?: runCatching { packageManager.getActivityIcon(component) }.getOrNull()
+            ?: runCatching { packageManager.getApplicationIcon(component.packageName) }.getOrNull()
+            ?: packageManager.defaultActivityIcon
+
     private fun refresh() {
         val container = appsContainer ?: return
         val current =
             synchronized(VirtualLauncher.runningApps) {
                 VirtualLauncher.runningApps.map { it.flattenToString() }
             }
-        if (current == lastRendered) return
+        val iconCache = VirtualLauncher.iconCache
+        if (current == lastRendered && iconCache === lastIconCache) return
         lastRendered = current
+        lastIconCache = iconCache
         container.removeAllViews()
         val density = resources.displayMetrics.density
         val iconPx = ((if (barForm) 32 else 30) * density).toInt()
         val pad = (6 * density).toInt()
         val apps = synchronized(VirtualLauncher.runningApps) { VirtualLauncher.runningApps.toList() }
-        val iconCache = VirtualLauncher.iconCache
         apps.forEach { component ->
-            val drawable = iconCache[component] ?: packageManager.defaultActivityIcon
+            val drawable = iconFor(component, iconCache)
             // 位图化渲染（与桌面网格同一路径）：直接 setImageDrawable 会让 ImageView
             // 长期持有共享 Drawable 实例，其 bounds 被网格重绑改写后渲染错位
             // （实机故障：点 home 后 dock 图标变小且偏左）
