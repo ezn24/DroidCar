@@ -3,6 +3,14 @@ name: Build Signed Neo APK
 on:
   push:
     branches: [neo]
+    # 只改文件/设计稿不出包：推送里的文件**全部**命中下列规则才跳过，
+    # 夹带任何代码/资源改动照常构建。需要时可手动 workflow_dispatch。
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'design/**'
+      - 'LICENSE'
+      - 'keystore.properties.example'
   workflow_dispatch:
 
 permissions:
