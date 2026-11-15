@@ -162,6 +162,8 @@ object VirtualLauncher {
     /** 桌面扫描完成后整表替换图标缓存。 */
     fun replaceIconCache(fresh: Map<ComponentName, Drawable>) {
         iconCacheRef = fresh
+        // dock 可能早于桌面扫描完成首绘（那时只能画默认图标）：换表后通知它重绘
+        notifyRunningAppsChanged()
     }
 
     @Volatile
