@@ -48,29 +48,13 @@
         android:textStyle="bold"
         android:includeFontPadding="false" />
 
-    <TextView
-        android:id="@+id/dockBatteryText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2.29dp"
-        android:gravity="center"
-        android:maxLines="1"
-        android:textColor="#B0B0B8"
-        android:includeFontPadding="false" />
-
-    <FrameLayout
-        android:id="@+id/dockBatteryBar"
-        android:layout_width="17.52dp"
-        android:layout_height="1.52dp"
-        android:layout_marginTop="1.90dp"
-        android:background="#3A3A3C">
-
-        <View
-            android:id="@+id/dockBatteryFill"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:background="#34C759" />
-    </FrameLayout>
+    <!-- CarPlay 风格电池图标（高度由 DockActivity 按 designScale 设定） -->
+    <io.github.shaonialife.cardeck.ui.BatteryGlyphView
+        android:id="@+id/dockBattery"
+        android:layout_width="wrap_content"
+        android:layout_height="12dp"
+        android:layout_marginTop="4dp"
+        android:layout_gravity="center_horizontal" />
 
     <ScrollView
         android:layout_width="match_parent"

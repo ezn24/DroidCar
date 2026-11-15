@@ -41,6 +41,25 @@ object DisplayPrefs {
         }
     }
 
+    /** 语音助理上车（实验）：默认关——要额外镜像手机主屏，且只在真机验证过的 ROM 上可靠。 */
+    fun showAssistOverlay(context: Context): Boolean =
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getBoolean("showAssistOverlay", false)
+
+    fun setShowAssistOverlay(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("showAssistOverlay", enabled)
+            .apply()
+        io.github.shaonialife.cardeck.assist.AssistOverlayController
+            .onPrefChanged(context, enabled)
+    }
+
     /** 部分 ROM 的播放捕获受媒体流音量影响，默认不全局静音。 */
     fun mutePhoneAudio(context: Context): Boolean =
         context

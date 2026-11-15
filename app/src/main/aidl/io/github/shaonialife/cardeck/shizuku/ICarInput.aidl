@@ -52,4 +52,9 @@ interface ICarInput {
     // 仅系统输出 REMOTE_SUBMIX；不采集麦克风。
     ParcelFileDescriptor startAudioCapture(int sampleRate, int channels);
     void stopAudioCapture();
+
+    // 语音助理是否正在开麦：查 Google 应用 / Gemini 的 RECORD_AUDIO 与 RECORD_AUDIO_HOTWORD
+    // 两个 AppOp 是否 active（AppOpsManager.isOpActive，shell 持有 WATCH_APPOPS）。
+    // 2026-11-15 S24 实测：录音配置列表看不到 Gemini 的 HOTWORD 录音，但这两个 op 可靠。
+    boolean isAssistantListening();
 }

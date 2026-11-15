@@ -87,12 +87,21 @@ class MediaListenerService : NotificationListenerService() {
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
-    /** 兜底轮询：部分播放器不触发回调/回调丢失时保证卡片信息更新。 */
+    /**
+     * 兜底轮询：部分播放器不触发回调/回调丢失时保证卡片信息更新。
+     *
+     * 只在**车机会话期间**每秒真轮询（音乐卡只在车机上显示）。此前只要有通知使用权就
+     * 全天每秒 getActiveSessions + 反序列化 metadata（含封面），没连车也照跑；
+     * 会话外改为每 5s 只看一眼会话是否开始（不碰 binder），播放回调照常推送。
+     */
     private val periodicRefresh =
         object : Runnable {
             override fun run() {
-                refresh()
-                mainHandler.postDelayed(this, 1_000)
+                val inSession =
+                    io.github.shaonialife.cardeck.launcher.VirtualLauncher
+                        .appContext() != null
+                if (inSession) refresh()
+                mainHandler.postDelayed(this, if (inSession) 1_000L else 5_000L)
             }
         }
 

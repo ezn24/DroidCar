@@ -29,9 +29,7 @@ import io.github.shaonialife.cardeck.util.Bg
 class DockActivity : AppCompatActivity() {
     private var appsContainer: LinearLayout? = null
     private var clockView: TextView? = null
-    private var batteryText: TextView? = null
-    private var batteryBar: View? = null
-    private var batteryFill: View? = null
+    private var batteryView: io.github.shaonialife.cardeck.ui.BatteryGlyphView? = null
     private var barForm = false
 
     /**
@@ -93,9 +91,7 @@ class DockActivity : AppCompatActivity() {
         setContentView(if (barForm) R.layout.activity_dock_bar else R.layout.activity_dock_sidebar)
 
         clockView = findViewById(R.id.dockClock)
-        batteryText = findViewById(R.id.dockBatteryText)
-        batteryBar = findViewById(R.id.dockBatteryBar)
-        batteryFill = findViewById(R.id.dockBatteryFill)
+        batteryView = findViewById(R.id.dockBattery)
         appsContainer = findViewById(R.id.dockApps)
         wallpaperView = findViewById(R.id.dockWallpaper)
         findViewById<View>(R.id.dockRecents).setOnClickListener { VirtualLauncher.showRecentApps(this) }
@@ -121,7 +117,8 @@ class DockActivity : AppCompatActivity() {
         // 字号按「设计 px × designScale」设置（不进 XML：荣耀 ROM 上 autoSize 对窄 dock
         // 不生效，仍需布局完成后按实测宽度手工缩钟表——见 fitClockText；13/22 为原型值）
         clockView?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 22f * designScale)
-        batteryText?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 13f * designScale)
+        // 电池图标高度与原百分比文字同一设计基准（13 设计 px），随 dock 缩放
+        batteryView?.let { v -> v.layoutParams = v.layoutParams.apply { height = (13f * designScale).toInt().coerceAtLeast(1) } }
         clockView?.post { fitClockText(clockView!!) }
         setupWallpaper()
         // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
@@ -257,25 +254,7 @@ class DockActivity : AppCompatActivity() {
         val charging =
             status == BatteryManager.BATTERY_STATUS_CHARGING ||
                 status == BatteryManager.BATTERY_STATUS_FULL
-        runOnUiThread {
-            batteryText?.text = (if (charging) "⚡" else "") + "$percent%"
-            val bar = batteryBar
-            val fill = batteryFill
-            if (bar != null && fill != null) {
-                bar.post {
-                    val width = bar.width
-                    if (width > 0) {
-                        fill.layoutParams =
-                            (fill.layoutParams as FrameLayout.LayoutParams).apply {
-                                this.width =
-                                    (width * percent / 100)
-                                        .coerceAtLeast((3 * resources.displayMetrics.density).toInt())
-                            }
-                    }
-                }
-                fill.setBackgroundColor(if (percent <= 20) 0xFFFF6B6B.toInt() else 0xFF34C759.toInt())
-            }
-        }
+        runOnUiThread { batteryView?.setLevel(percent, charging) }
     }
 
     private var lastRendered: List<String> = emptyList()

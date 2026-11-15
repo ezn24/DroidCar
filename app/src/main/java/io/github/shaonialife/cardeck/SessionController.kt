@@ -2605,7 +2605,7 @@ object SessionController {
 
                                     "forceKeyFrame" -> {
                                         // 车机解不出画面时会要 I 帧。必须立即响应：
-                                        // 拖到下一个周期 I 帧（1s）车机可能一直卡在等帧状态。
+                                        // 拖到下一个周期 I 帧（3s，见 VideoSender.KEYFRAME_INTERVAL_S）车机会一直卡在等帧状态。
                                         val forced = videoSender?.requestKeyFrame() == true
                                         appendLog(
                                             "EVENT: 车机请求关键帧（forceKeyFrame）→ " +

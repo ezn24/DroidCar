@@ -43,7 +43,15 @@ object TouchRouter {
 
     /** 分屏把手粘性路由状态（命中把手条后整条触摸流固定路由应用屏）。 */
     private var splitHandlePressed = false
-    private var dashboardMapGesture = false
+
+    /** 本次按下用于关闭语音助理浮层（点 dock），直到抬起前的事件都吞掉。 */
+    private var assistDockSwallow = false
+
+    private fun inDockArea(
+        px: Int,
+        py: Int,
+    ): Boolean = if (VirtualLauncher.dockAtBottom) py >= VirtualLauncher.appHeightPx else px < VirtualLauncher.dockWidthPx
+
     private val dashboardSwipe = DashboardSwipeGesture()
     private val touchReleases = TouchReleaseTracker()
 
@@ -108,6 +116,25 @@ object TouchRouter {
             }
         }
 
+        // 语音助理浮层在车机上时，点 dock（浮层所在屏之外、它收不到的地方）= 关掉浮层；
+        // 整段按下→抬起都吞掉，免得同时触发 dock 按钮。浮层屏内的点击照常注入，由 Gemini
+        // 自己处理（点空白处收起）。
+        if (assistDockSwallow ||
+            (
+                contact.down &&
+                    !pressed &&
+                    io.github.shaonialife.cardeck.assist.AssistOverlayController
+                        .isOnCar() &&
+                    inDockArea(px, py)
+            )
+        ) {
+            if (!assistDockSwallow) {
+                io.github.shaonialife.cardeck.assist.AssistOverlayController
+                    .dismissFromCar()
+            }
+            assistDockSwallow = contact.down
+            return
+        }
         if (io.github.shaonialife.cardeck.notifications.NotificationBannerController.onContact(
                 contact.down,
                 px.toFloat(),
@@ -117,15 +144,24 @@ object TouchRouter {
             return
         }
         if (io.github.shaonialife.cardeck.launcher.MediaReturnControl
-                .onContact(contact.down, px.toFloat(), py.toFloat(), pressed || dashboardMapGesture)
+                .onContact(contact.down, px.toFloat(), py.toFloat(), pressed)
         ) {
             return
         }
         val launcher = VirtualLauncher
+        // 分屏地图卡可直接操作（2026-11-15 用户要求，不再点按转全屏）：按在地图卡里的手势
+        // 交给地图，不能起仪表盘左滑——否则横向拖地图就翻到了应用页
+        val splitMapPane = splitMapPane(launcher)
+        val assistLayer =
+            io.github.shaonialife.cardeck.assist.AssistOverlayController
+                .isOnAssistLayer()
         val canStartSwipe =
-            launcher.dashboardMode &&
+            !assistLayer &&
+                !launcher.assistCoversDashboard &&
+                launcher.dashboardMode &&
                 !launcher.mapFullscreen &&
                 !launcher.isLayoutTransitioning() &&
+                splitMapPane?.contains(px.toFloat(), py.toFloat()) != true &&
                 (if (launcher.dockAtBottom) py < launcher.appHeightPx else px >= launcher.dockWidthPx)
         when (
             dashboardSwipe.update(
@@ -138,9 +174,6 @@ object TouchRouter {
             )
         ) {
             DashboardSwipeGesture.Result.TRIGGER -> {
-                cancelMapTileTap()
-                tapDragSlot = -1
-                dashboardMapGesture = false
                 if (pressed) runCatching { CarInputClient.service?.pointerUp(pressedDisplay, 0, 0) }
                 pressed = false
                 pressedDisplay = -1
@@ -156,21 +189,8 @@ object TouchRouter {
                 if (pressed) runCatching { CarInputClient.service?.pointerUp(pressedDisplay, 0, 0) }
                 pressed = false
                 pressedDisplay = -1
-                dashboardMapGesture = false
-                tapDragSlot = -1
-                cancelMapTileTap()
             }
             return
-        }
-        if (launcher.dashboardMode && !launcher.mapFullscreen && !(pressed && pressedDisplay == launcher.mediaDisplayId)) {
-            val inTile =
-                dashboardTouchArea(launcher.mapPaneBounds(), launcher.mediaPaneBounds(), px.toFloat(), py.toFloat()) ==
-                    DashboardTouchArea.MAP
-            if ((inTile && !pressed) || dashboardMapGesture) {
-                dashboardMapGesture = contact.down
-                updateMapTileTap(launcher, contact, inTile, px)
-                return
-            }
         }
         // 动画期间不把静态坐标注入正在移动的画面；首帧后可正常操作。
         if (launcher.isLayoutTransitioning()) return
@@ -232,6 +252,7 @@ object TouchRouter {
             // 地图 tile（应用区上半；全屏=应用区全部）。触摸/流坐标顶部起算：
             // tile 矩形 py ∈ [CARD_MARGIN_PX, +mapTileHeight]，屏内 y = py-边距（顶边距扣除）
             if (!inDock &&
+                !launcher.assistCoversDashboard &&
                 launcher.mapDisplayId >= 0 &&
                 launcher.mapFullscreen &&
                 launcher.tileSlideFraction <= 0.01f &&
@@ -255,6 +276,7 @@ object TouchRouter {
         } else {
             inDock = px < dockW
             if (!inDock &&
+                !launcher.assistCoversDashboard &&
                 launcher.mapDisplayId >= 0 &&
                 launcher.mapFullscreen &&
                 launcher.tileSlideFraction <= 0.01f
@@ -278,7 +300,20 @@ object TouchRouter {
                 localY = (py * scale).toInt()
             }
         }
-        if (launcher.isMediaPaneVisible()) {
+        // 分屏地图卡：按下落在卡内 → 整段手势注入地图屏（拖出卡外仍粘在地图屏，同媒体卡）。
+        // 地图屏在分屏时 resize 成卡片尺寸（与 mapPaneBounds 1:1），坐标只需平移。
+        if (splitMapPane != null &&
+            (
+                (!pressed && splitMapPane.contains(px.toFloat(), py.toFloat())) ||
+                    (pressed && pressedDisplay == launcher.mapDisplayId)
+            )
+        ) {
+            inDock = false
+            targetDisplay = launcher.mapDisplayId
+            localX = (px - splitMapPane.left).toInt().coerceIn(0, splitMapPane.width - 1)
+            localY = (py - splitMapPane.top).toInt().coerceIn(0, splitMapPane.height - 1)
+        }
+        if (launcher.isMediaPaneVisible() && !launcher.assistCoversDashboard) {
             val pane = launcher.mediaAppBounds()
             if (pane.contains(px.toFloat(), py.toFloat()) ||
                 (pressed && pressedDisplay == launcher.mediaDisplayId)
@@ -288,6 +323,13 @@ object TouchRouter {
                 localX = (px - pane.left).toInt().coerceIn(0, pane.width - 1)
                 localY = (py - pane.top).toInt().coerceIn(0, pane.height - 1)
             }
+        }
+        // 语音助理层在顶上：应用区的触摸全给它（点空白处 Gemini 自己收起），优先于卡片分流。
+        // 助理屏与应用区同尺寸、1:1，坐标只需扣掉应用区原点；按下时已在助理屏的整段手势粘住。
+        if (!inDock && (assistLayer || (pressed && pressedDisplay == launcher.assistDisplayId)) && launcher.assistDisplayId >= 0) {
+            targetDisplay = launcher.assistDisplayId
+            localX = (if (launcher.dockAtBottom) px else px - dockW).coerceIn(0, launcher.appAreaWidth - 1)
+            localY = py.coerceIn(0, launcher.appAreaHeight - 1)
         }
         if (targetDisplay < 0) {
             diag("目标屏无效 dock=${launcher.dockDisplayId} app=${launcher.appDisplayId}")
@@ -354,21 +396,6 @@ object TouchRouter {
         } catch (e: Exception) {
             diag("注入异常：${e.message}")
         }
-
-        // 仪表盘模式：地图 tile 的触摸同时喂给「点按 → 全屏地图」检测器
-        // （注入逻辑不受影响；点按 = 快速轻点，平移/双击/双指等地图手势不触发）。
-        // 横竖屏都启用：tileX 传 tile 内坐标（仅用于位移判定，起点取值不敏感）
-        val tileHit =
-            !inDock &&
-                targetDisplay == launcher.mapDisplayId &&
-                launcher.dashboardMode &&
-                !launcher.mapFullscreen
-        updateMapTileTap(
-            launcher,
-            contact,
-            tileHit,
-            if (launcher.dockAtBottom) px - CARD_MARGIN_PX else px - dockW,
-        )
     }
 
     fun reset() {
@@ -376,95 +403,26 @@ object TouchRouter {
         pressedDisplay = -1
         overlayPressed = false
         splitHandlePressed = false
-        dashboardMapGesture = false
         dashboardSwipe.reset()
         touchReleases.reset()
         io.github.shaonialife.cardeck.launcher.MediaReturnControl
             .reset()
-        cancelMapTileTap()
-        tapDragSlot = -1
         coordScaleX = 1f
         coordScaleY = 1f
     }
 
-    // ---- 仪表盘地图 tile「快速点按 → 全屏地图」检测 ----
-    // 点按判定：按下→抬起 ≤400ms 且位移 ≤30px；抬起后 300ms 内无第二次按下
-    // （确认窗规避地图双击缩放误触）。拖动/拖出 tile/双指等地图手势不触发。
-    private const val TAP_MAX_MS = 400L
-    private const val TAP_MAX_MOVE_PX = 30
-    private const val TAP_CONFIRM_MS = 0L
-    private val tapHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var tapArmSlot = -1
-
-    /** 已判为拖动的按住手势（slot）：作废到抬起为止——否则长滑动的 cancel→re-arm
-     *  会把抬起点当新起点（位移小、时长短），误判成 tap 直接触发全屏。 */
-    private var tapDragSlot = -1
-    private var tapDownAt = 0L
-    private var tapX = 0
-    private var tapY = 0
-    private var tapConfirm: Runnable? = null
-
-    private fun updateMapTileTap(
-        launcher: VirtualLauncher,
-        contact: Contact,
-        inTile: Boolean,
-        tileX: Int,
-    ) {
-        val now = android.os.SystemClock.uptimeMillis()
-        if (!launcher.dashboardMode || launcher.mapFullscreen) {
-            cancelMapTileTap()
-            return
-        }
-        if (contact.down) {
-            if (inTile && tapConfirm != null) {
-                cancelMapTileTap() // 确认窗内再次按下 = 双击缩放，取消全屏触发
-                return
-            }
-            if (tapArmSlot < 0 && inTile && tapDragSlot < 0) {
-                tapArmSlot = contact.slot
-                tapDownAt = now
-                tapX = tileX
-                tapY = contact.yPixels
-            } else if (tapArmSlot >= 0 &&
-                (
-                    !inTile ||
-                        contact.slot != tapArmSlot ||
-                        kotlin.math.abs(tileX - tapX) + kotlin.math.abs(contact.yPixels - tapY) > TAP_MAX_MOVE_PX
-                )
-            ) {
-                // 拖动 / 拖出 tile / 双指：整个手势作废到抬起（见 tapDragSlot 注释）
-                tapDragSlot = tapArmSlot
-                cancelMapTileTap()
-            }
+    /**
+     * 分屏形态下可直接操作的地图卡区域（流坐标）；不在分屏 / 卡片在滑动 / 助理浮层占用时为 null。
+     */
+    private fun splitMapPane(launcher: VirtualLauncher): io.github.shaonialife.cardeck.render.PaneBounds? =
+        if (!launcher.assistCoversDashboard &&
+            launcher.dashboardMode &&
+            !launcher.mapFullscreen &&
+            launcher.mapDisplayId >= 0 &&
+            launcher.tileSlideFraction <= 0.01f
+        ) {
+            launcher.mapPaneBounds()
         } else {
-            if (tapDragSlot >= 0) {
-                if (contact.slot == tapDragSlot) tapDragSlot = -1
-                return
-            }
-            if (tapArmSlot >= 0 && contact.slot == tapArmSlot) {
-                val ok =
-                    inTile &&
-                        now - tapDownAt <= TAP_MAX_MS &&
-                        kotlin.math.abs(tileX - tapX) + kotlin.math.abs(contact.yPixels - tapY) <= TAP_MAX_MOVE_PX
-                cancelMapTileTap()
-                if (ok) {
-                    tapConfirm =
-                        Runnable {
-                            tapConfirm = null
-                            if (launcher.dashboardMode && !launcher.mapFullscreen) {
-                                logSink?.invoke("LAUNCHER: 地图卡片点按 → 全屏地图")
-                                launcher.setMapFullscreen(true)
-                            }
-                        }
-                    tapHandler.postDelayed(tapConfirm!!, TAP_CONFIRM_MS)
-                }
-            }
+            null
         }
-    }
-
-    private fun cancelMapTileTap() {
-        tapArmSlot = -1
-        tapConfirm?.let { tapHandler.removeCallbacks(it) }
-        tapConfirm = null
-    }
 }

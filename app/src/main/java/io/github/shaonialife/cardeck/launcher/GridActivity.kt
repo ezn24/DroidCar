@@ -70,7 +70,10 @@ class GridActivity : AppCompatActivity() {
 
     /** 仪表盘模式变化（VirtualLauncher 通知）。 */
     private val dashboardListener = { dashboard: Boolean ->
-        runOnUiThread { applyDashboardMode(dashboard) }
+        runOnUiThread {
+            applyDashboardMode(dashboard)
+            syncDotsLayer()
+        }
     }
 
     /** 媒体状态监听（MediaSessionsState 主线程回调）。 */
@@ -96,6 +99,7 @@ class GridActivity : AppCompatActivity() {
             runOnUiThread {
                 layoutDashboardMedia()
                 refreshDashWallpaper()
+                syncDotsLayer()
             }
         }
 
@@ -467,6 +471,7 @@ class GridActivity : AppCompatActivity() {
                         VirtualLauncher.setTileSlide(dashboardPageFraction(position, positionOffset))
                         VirtualLauncher.showMapTile()
                     }
+                    syncDotsLayer()
                 }
 
                 override fun onPageScrollStateChanged(state: Int) {
@@ -486,6 +491,7 @@ class GridActivity : AppCompatActivity() {
                             reload()
                         }
                     }
+                    syncDotsLayer()
                 }
             },
         )
@@ -853,6 +859,32 @@ class GridActivity : AppCompatActivity() {
             (row.getChildAt(i).background as? android.graphics.drawable.GradientDrawable)
                 ?.setColor(if (i == selected) 0xFFFFFFFF.toInt() else 0x66FFFFFF.toInt())
         }
+        // 等本轮布局完成再快照（rebuildDots 刚加的子 View 尚未测量）
+        row.post { publishDots() }
+    }
+
+    /**
+     * 仪表盘的地图/媒体卡由合成器画在本应用屏之上，会盖住页点：把页点快照交给合成器
+     * 补画到卡片上层，同时隐藏本地这份，避免两份重叠。判据见 [VirtualLauncher.pageDotsOnTop]。
+     */
+    private fun publishDots() {
+        val row = dotsRow ?: return
+        syncDotsLayer()
+        if (row.childCount == 0 || row.width <= 0 || row.height <= 0) {
+            VirtualLauncher.setPageDots(null, 0f, 0f)
+            return
+        }
+        // View.draw 不施加 View 自身的 alpha，隐藏本地页点不影响快照
+        val bitmap = android.graphics.Bitmap.createBitmap(row.width, row.height, android.graphics.Bitmap.Config.ARGB_8888)
+        row.draw(android.graphics.Canvas(bitmap))
+        val loc = IntArray(2)
+        row.getLocationOnScreen(loc)
+        VirtualLauncher.setPageDots(bitmap, loc[0].toFloat(), loc[1].toFloat())
+    }
+
+    /** 页点归属切换（本地 ↔ 合成器上层）：仪表盘模式/滑动/地图全屏变化时调用。 */
+    private fun syncDotsLayer() {
+        dotsRow?.alpha = if (VirtualLauncher.pageDotsOnTop()) 0f else 1f
     }
 
     override fun onDestroy() {
@@ -861,6 +893,7 @@ class GridActivity : AppCompatActivity() {
             .removeListener(wallpaperListener)
         VirtualLauncher.removeDashboardListener(dashboardListener)
         VirtualLauncher.removeMapLayoutListener(mapLayoutListener)
+        VirtualLauncher.setPageDots(null, 0f, 0f)
         MediaSessionsState
             .removeListener(mediaStateListener)
         DockPrefs.removeListener(dockPrefsListener)

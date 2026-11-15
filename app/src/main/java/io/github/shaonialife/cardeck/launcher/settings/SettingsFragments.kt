@@ -638,20 +638,6 @@ class DefaultMapPanelFragment : SettingsPanelFragment() {
                     it.component.packageName in VirtualLauncher.MAP_PACKAGES_PRIORITY ||
                         it.component.packageName == current
                 }.distinctBy { it.component.packageName }
-        if (VirtualLauncher.mapDisplayId >= 0) {
-            container.addView(
-                layoutInflater.inflate(R.layout.item_map_option, container, false).apply {
-                    findViewById<TextView>(R.id.mapOptionName).setText(R.string.switch_current_map)
-                    findViewById<ImageView>(R.id.mapOptionIcon).setImageResource(R.drawable.ic_menu_map)
-                    findViewById<ImageView>(R.id.mapOptionRadio).setImageResource(R.drawable.ic_chevron_right)
-                    setOnClickListener {
-                        showMapPicker(R.string.switch_current_map, apps, VirtualLauncher.currentMapPackage() ?: current) { entry ->
-                            Bg.run("switch-map") { VirtualLauncher.switchMap(entry.component) }
-                        }
-                    }
-                },
-            )
-        }
         suggested.forEach { entry ->
             val row = layoutInflater.inflate(R.layout.item_map_option, container, false)
             row.findViewById<TextView>(R.id.mapOptionName).text = entry.label
@@ -866,6 +852,12 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             R.string.car_notifications_note,
             DisplayPrefs.showCarNotifications(ctx),
         ) { DisplayPrefs.setShowCarNotifications(ctx, it) }
+        bindDisplayToggle(
+            view.findViewById(R.id.displayAssistOverlay),
+            R.string.show_assist_overlay,
+            R.string.assist_overlay_note,
+            DisplayPrefs.showAssistOverlay(ctx),
+        ) { DisplayPrefs.setShowAssistOverlay(ctx, it) }
         bindDisplayToggle(
             view.findViewById(R.id.displayMutePhoneAudio),
             R.string.mute_phone_audio,

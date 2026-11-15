@@ -56,6 +56,18 @@ class SignalWavesView
         private var animator: ValueAnimator? = null
         private var orbitRotation = 0f
 
+        /**
+         * 暂停循环动画（手机界面不可见 / 被暗幕盖住时）。车机连接期间手机主页常驻前台，
+         * 物理面板断电后 App 仍以 60fps 重画这个动画——2026-11-16 实测是整个进程里
+         * 最耗 CPU 的线程（RenderThread ~7%）。
+         */
+        var paused: Boolean = false
+            set(value) {
+                if (field == value) return
+                field = value
+                startAnimation()
+            }
+
         fun setState(next: State) {
             if (state == next) return
             state = next
@@ -78,7 +90,7 @@ class SignalWavesView
             animator?.cancel()
             orbitRotation = 0f
             val idle = state == State.IDLE
-            if (idle) {
+            if (idle || paused) {
                 invalidate()
                 return
             }

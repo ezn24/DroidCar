@@ -91,12 +91,11 @@
                 android:textColor="#FFFFFF"
                 android:textStyle="bold" />
 
-            <TextView
-                android:id="@+id/dockBatteryText"
+            <io.github.shaonialife.cardeck.ui.BatteryGlyphView
+                android:id="@+id/dockBattery"
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="1.14dp"
-                android:textColor="#B0B0B8" />
+                android:layout_height="11dp"
+                android:layout_marginTop="2dp" />
         </LinearLayout>
     </LinearLayout>
 </FrameLayout>

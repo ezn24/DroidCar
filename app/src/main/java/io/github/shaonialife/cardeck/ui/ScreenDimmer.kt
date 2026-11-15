@@ -88,6 +88,24 @@ object ScreenDimmer {
 
     private val showRunnable = Runnable { showDim() }
 
+    /** 暗幕显隐监听（主线程回调）：手机界面被盖住时应停掉自己的动画/轮询，否则在暗幕下照画。 */
+    private val coverListeners = java.util.concurrent.CopyOnWriteArrayList<(Boolean) -> Unit>()
+
+    fun addCoverListener(listener: (Boolean) -> Unit) {
+        coverListeners.add(listener)
+    }
+
+    fun removeCoverListener(listener: (Boolean) -> Unit) {
+        coverListeners.remove(listener)
+    }
+
+    /** 手机屏当前是否被暗幕盖住（含物理面板已断电）。 */
+    fun isCovering(): Boolean = dimShown
+
+    private fun notifyCover(covered: Boolean) {
+        coverListeners.forEach { runCatching { it(covered) } }
+    }
+
     /** 会话开始/结束（由 SessionController 在推流起停时调用）。 */
     fun setSessionActive(active: Boolean) {
         if (sessionActive == active) return
@@ -270,6 +288,7 @@ object ScreenDimmer {
                     syncScreenTimeout(ctx)
                 }
                 Log.i("CarPlaySender", "DIMMER: 暗幕已显示")
+                notifyCover(true)
                 // 真·假息屏：暗幕上好后直接断物理屏电源。系统保持交互态（常亮超时已设
                 // 为永不，不会真睡下去），虚拟屏完全不受影响；触摸经探针唤醒。
                 setPanelPower(false)
@@ -285,6 +304,7 @@ object ScreenDimmer {
             appContext?.let(::syncScreenTimeout)
         }
         runCatching { windowManager?.removeView(view) }
+        notifyCover(false)
     }
 
     /** 1px 触摸探针：捕获屏幕上任意处的 DOWN 事件用于重置计时，不消费事件。 */
