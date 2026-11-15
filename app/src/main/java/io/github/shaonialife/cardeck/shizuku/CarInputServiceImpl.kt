@@ -658,6 +658,36 @@ class CarInputServiceImpl(
         }
     }
 
+    /** 助理包名 → uid 缓存（-1 = 未安装）。 */
+    private val assistantUids = HashMap<String, Int>()
+
+    override fun isAssistantListening(): Boolean =
+        try {
+            val shellContext =
+                try {
+                    context.createPackageContext("com.android.shell", 0)
+                } catch (_: Throwable) {
+                    context
+                }
+            val appOps = shellContext.getSystemService(android.app.AppOpsManager::class.java)
+            ASSISTANT_PACKAGES.any { pkg ->
+                val uid =
+                    synchronized(assistantUids) {
+                        assistantUids.getOrPut(pkg) {
+                            try {
+                                context.packageManager.getPackageUid(pkg, 0)
+                            } catch (_: Throwable) {
+                                -1
+                            }
+                        }
+                    }
+                uid >= 0 && ASSISTANT_MIC_OPS.any { op -> runCatching { appOps.isOpActive(op, uid, pkg) }.getOrDefault(false) }
+            }
+        } catch (t: Throwable) {
+            fileLog("isAssistantListening 失败：$t")
+            false
+        }
+
     override fun releaseDisplay(displayId: Int): Boolean {
         val vd = synchronized(virtualDisplays) { virtualDisplays.remove(displayId) }
         if (vd == null) {
@@ -856,6 +886,12 @@ class CarInputServiceImpl(
         private const val STALE_CHECK_INTERVAL_MS = 15_000L
 
         /** VIRTUAL_DISPLAY_FLAG_TRUSTED（@hide；AOSP 定义 = 1 << 10 = 0x400）。 */
+        /** 会弹语音助理浮层的应用：Google 应用（Gemini 浮层宿主）与独立 Gemini 应用。 */
+        private val ASSISTANT_PACKAGES = listOf("com.google.android.googlequicksearchbox", "com.google.android.apps.bard")
+
+        /** 开麦相关 AppOp（字符串形式；hotword 为隐藏常量，按字符串传入同样有效）。 */
+        private val ASSISTANT_MIC_OPS = listOf("android:record_audio", "android:record_audio_hotword")
+
         private const val FLAG_TRUSTED = 1 shl 10
 
         /** VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH（@hide；AOSP 定义 = 1 << 6 = 0x40）。 */

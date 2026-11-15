@@ -1206,6 +1206,7 @@ class MainActivity : AppCompatActivity() {
                     repeatMode = ObjectAnimator.REVERSE
                     start()
                 }
+            if (!uiResumed || ScreenDimmer.isCovering()) hubBlink?.pause()
         }
 
         heroStateText.text =
@@ -2696,9 +2697,29 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    /** 界面在前台（onResume 与 onPause 之间）。 */
+    private var uiResumed = false
+
+    private val dimmerCoverListener: (Boolean) -> Unit = { runOnUiThread { syncPhoneUiActivity() } }
+
+    /**
+     * 手机主页的动画与 1s 英雄卡刷新只在「真有人看得到」时运行：前台且没被暗幕盖住。
+     * 车机连接时手机多半在暗幕/断电状态，此前动画与刷新照跑（白耗 CPU/GPU/电）。
+     */
+    private fun syncPhoneUiActivity() {
+        if (isFinishing || isDestroyed) return
+        val active = uiResumed && !ScreenDimmer.isCovering()
+        mainHandler.removeCallbacks(heroTick)
+        if (active) mainHandler.post(heroTick)
+        if (::signalWaves.isInitialized) signalWaves.paused = !active
+        hubBlink?.let { if (active) it.resume() else it.pause() }
+    }
+
     override fun onResume() {
         super.onResume()
-        mainHandler.post(heroTick)
+        uiResumed = true
+        ScreenDimmer.addCoverListener(dimmerCoverListener)
+        syncPhoneUiActivity()
         // 旋转/重建后尚未接受：用原截止时刻续弹（不重新等 10 秒）
         if (needsDisclaimerAtLaunch(
                 DisclaimerPrefs.acceptedVersion(this),
@@ -2839,7 +2860,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        mainHandler.removeCallbacks(heroTick)
+        uiResumed = false
+        ScreenDimmer.removeCoverListener(dimmerCoverListener)
+        syncPhoneUiActivity()
     }
 
     override fun onDestroy() {

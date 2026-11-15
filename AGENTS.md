@@ -1,3 +1,22 @@
+## 2026-11-16 效能约定（改动前先看）
+
+- **手机主页在会话中多半看不见**（暗幕/物理面板断电），但 Activity 仍是前台：任何循环动画或定时刷新都要随 `ScreenDimmer.isCovering()` / `addCoverListener` 和 onPause 暂停（见 `MainActivity.syncPhoneUiActivity`）。实测此前主页波纹动画让 RenderThread 成为全进程最耗 CPU 的线程（~7%）。
+- **周期 I 帧 3s**（`VideoSender.KEYFRAME_INTERVAL_S`）：I 帧 ~550KB / P 帧 5–20KB；车机要帧走 `forceKeyFrame` → `requestKeyFrame` 即时补。改回 1s 前先确认真车确实需要。
+- **日志异步落盘**（`DebugFileLog` 单写线程 + 队列）：不要在热路径（视频/触摸/音频线程）上做同步文件 I/O；高频事件（每帧、每个 I 帧）不要逐条打日志。
+- **合成循环事件驱动**：输入新帧 / 叠加层 / 布局动画通过 `wake()` 叫醒，不要再加固定 sleep 轮询；每次 draw 复用 `posBuf/texBuf`，不要在 draw 里分配直接缓冲。静止心跳仍是 33ms（降频前要真车验证，历史上出过「无帧 → 接收端画面冻结」）。
+- **视频帧打包**：`annexBToLengthPrefixed` 一次扫描出定长数组（单测与旧实现逐字节对照），AES 原地加密；socket 外包 `BufferedOutputStream`，头与体一次发出。
+- **媒体轮询只在会话中**：`MediaListenerService` 会话外不做每秒 getActiveSessions（全天耗电），靠回调。
+
+## 2026-11-15 语音助理上车、分屏地图直控（跨会话结论）
+
+- **Gemini 浮层是普通 Activity**（`googlequicksearchbox/...FloatyActivity`，`ty=BASE_APPLICATION`），不是 VOICE_INTERACTION 窗口；开在**当前焦点屏**。「Hey Google」多落在手机主屏，`am display move-stack <task> <gridDisplay>` 可把它搬上车机屏，原生渲染、可触摸。镜像裁剪方案试过，观感差已放弃。
+- **检测开麦只能靠 AppOps**：应用侧 `AudioRecordingCallback`、甚至 shell 侧 `getActiveRecordingConfigurations` 都看不到 Gemini 的 `src:HOTWORD` 录音（S24 实测）；可靠的是 Google 应用的 `RECORD_AUDIO` / `RECORD_AUDIO_HOTWORD` op（UserService `isAssistantListening`，shell 有 WATCH_APPOPS）。
+- **关浮层要 `am stack remove`，不能发 BACK**：Gemini 把 BACK 当「收起」，task 跳回手机屏挂着（还带误识别文字）。点浮层所在屏空白处由 Gemini 自己正常结束。
+- **仪表盘 / 全屏地图时把浮层搬到地图屏**（叠在地图卡上，地图照常可见；分屏地图卡可直触，浮层收得到点击）；其它情况搬到当前活动应用屏。曾用「让出卡片」（`tilesSuppressed`）方案，地图会整块消失被用户否决，现仅作搬移失败时的兜底。
+- Gemini 唤起时会截手机主屏当 screen context，搬上车机后可能显示那张手机截图（竖屏、居中）——是 Gemini 自身行为。
+- 应用进程对 display 0 的 `getRealMetrics` 会话中可能读到车机虚拟屏尺寸（S24 读成 2628x1080）；要手机真实尺寸用 `wm size`。
+- 分屏地图卡直控：地图屏分屏时 resize 成 `mapPaneBounds` 尺寸，触摸坐标只需平移；卡内起手不得起仪表盘左滑（否则拖地图翻页）。
+
 ## 0.1.39 連線直接進分屏
 
 - 新連線先設定分屏為首頁，再啟動 Dock 和桌面；背景啟動預設地圖，回到分屏時沿用已切換的地圖。

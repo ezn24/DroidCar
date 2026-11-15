@@ -75,6 +75,7 @@ class VideoSender(
 
     @Volatile
     private var framesSent = 0L
+    private var keyFramesSent = 0L
 
     /** 推流是否活跃（静默降噪守卫判断用：start 失败时保持 false）。 */
     val isRunning: Boolean get() = running.get()
@@ -132,7 +133,7 @@ class VideoSender(
                     setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                     setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
                     setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
-                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_S)
                     // 固定 H.264 level 4.0（SPS level_idc=40，真 iPhone 同款流形态）。
                     // 不固定时编码器按「分辨率+帧率」自动选：默认 30fps 下 1412x654
                     // 合法落入 level 3.2——奥迪 DELPHI 解码器对该 level 静默不渲染
@@ -157,7 +158,7 @@ class VideoSender(
                         setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                         setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
                         setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
-                        setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                        setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_S)
                     }
                 codec.configure(fallback, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             }
@@ -217,7 +218,9 @@ class VideoSender(
 
     private fun drainEncoder() {
         val codec = encoder ?: return
-        val output = socket?.getOutputStream() ?: return
+        // 缓冲包一层：128B 头与帧体合并成一次发送（tcpNoDelay 下原先是两个 TCP 段），
+        // 每帧末尾本来就会 flush，不引入额外延迟
+        val output = java.io.BufferedOutputStream(socket?.getOutputStream() ?: return, 64 * 1024)
         val bufferInfo = MediaCodec.BufferInfo()
         try {
             while (running.get()) {
@@ -357,22 +360,11 @@ class VideoSender(
         }
         val annexB = ByteArray(size)
         buffer.get(annexB)
-        val nalUnits = splitAnnexB(annexB)
-        if (nalUnits.isEmpty()) return
-
-        // 关键帧内嵌的 SPS 同步打 level 补丁：车机会用帧内 SPS 更新解码器参数，
-        // 只改 csd 不改帧内 SPS 的话，收到第一个关键帧就又变回低 level 了
-        val packed = ByteArrayOutputStream(size)
-        for (nal in nalUnits) {
-            val out =
-                if (nal.isNotEmpty() && (nal[0].toInt() and 0x1F) == 7) patchSpsLevel(nal) else nal
-            packed.write((out.size ushr 24) and 0xFF)
-            packed.write((out.size ushr 16) and 0xFF)
-            packed.write((out.size ushr 8) and 0xFF)
-            packed.write(out.size and 0xFF)
-            packed.write(out)
-        }
-        val plain = packed.toByteArray()
+        // Annex-B → 4 字节长度前缀，一次扫描直接写进定长数组；关键帧内嵌的 SPS 同步打
+        // level 补丁（车机会用帧内 SPS 更新解码器参数，只改 csd 不改帧内 SPS 的话，
+        // 收到第一个关键帧就又变回低 level 了）。此前拆 NAL 逐个复制再经
+        // ByteArrayOutputStream 拼接，一个 ~550KB 的 I 帧要复制 4 次。
+        val plain = annexBToLengthPrefixed(annexB) ?: return
 
         // 加密方式按会话的 et 选择（catplay ScreenFrameCodec）：
         //  - ChaCha：header 作 AAD，body 长度含 16B tag；
@@ -389,9 +381,9 @@ class VideoSender(
                 is StreamFrameCipher.ChaCha ->
                     AirPlayCrypto.chachaSeal(cipher.key, AirPlayCrypto.nonce64(frameCounter), plain, header)
                 is StreamFrameCipher.AesCtr -> {
-                    val encrypted = plain.copyOf()
-                    aesStream?.applyKeystream(encrypted)
-                    encrypted
+                    // CTR 不改长度、plain 之后只用到 size：原地加密，省一次整帧复制
+                    aesStream?.applyKeystream(plain)
+                    plain
                 }
             }
         frameCounter++
@@ -401,8 +393,11 @@ class VideoSender(
         framesSent++
         framesSinceKeepAlive++
         bytesSinceKeepAlive += plain.size.toLong()
-        if (keyFrame || framesSent <= 3 || framesSent % 150 == 0L) {
-            log("VIDEO: 帧 #$framesSent ${plain.size}B${if (keyFrame) " (key)" else ""} 已发送")
+        if (keyFrame) keyFramesSent++
+        // 留痕节流：此前每个 I 帧都记一行（1 行/秒，且日志是同步落盘的）。
+        // 现在只记开头几帧、每 150 帧一次、以及每 20 个 I 帧一次（足够看出码率与 I 帧大小）。
+        if (framesSent <= 3 || framesSent % 150 == 0L || (keyFrame && keyFramesSent % 20 == 1L)) {
+            log("VIDEO: 帧 #$framesSent ${plain.size}B${if (keyFrame) " (key #$keyFramesSent)" else ""} 已发送")
         }
     }
 
@@ -473,6 +468,13 @@ class VideoSender(
     }
 
     companion object {
+        /**
+         * 周期 I 帧间隔（秒）。原为 1s：I 帧 ~550KB、P 帧 5–20KB（S24 实测），每秒一个 I 帧
+         * 约占 4Mbps 并造成周期性发送尖峰。车机解码出错时会发 `forceKeyFrame`，由
+         * [requestKeyFrame] 即时补 I 帧，所以周期 I 帧只是兜底——3s 兼顾流量与恢复速度。
+         */
+        private const val KEYFRAME_INTERVAL_S = 3
+
         private const val HEADER_LEN = 128
         private const val OP_FRAME = 0
         private const val OP_CONFIG = 1
@@ -595,6 +597,62 @@ private const val TARGET_LEVEL_IDC = 40
  * 动机：奥迪 DELPHI 解码器对 level 3.1/3.2 的流静默不渲染（TCP 照收、会话正常、
  * 车机黑屏；2026-10-22 奥迪 0628 真机日志：同机 level=40 全部成功、level=32 首例黑屏）。
  */
+
+/**
+ * Annex-B（起始码分隔）→ 每个 NAL 前加 4 字节大端长度（AVCC 样式），并就地把 SPS 的
+ * level_idc 抬到 [TARGET_LEVEL_IDC]。起始码识别与旧 `splitAnnexB` 完全一致（3/4 字节、
+ * 尾部 3 字节内不认），空 NAL 跳过；找不到起始码时整块当一个 NAL。没有任何 NAL 返回 null。
+ * 结果与「splitAnnexB → patchSpsLevel → 逐个写长度+数据」逐字节相同（单测对照）。
+ */
+internal fun annexBToLengthPrefixed(bytes: ByteArray): ByteArray? {
+    if (bytes.isEmpty()) return null
+    // 记录每个 NAL 的 [体起点, 体终点)
+    val bodies = ArrayList<Long>()
+    var index = 0
+    var pendingStart = -1
+    while (index + 3 < bytes.size) {
+        if (bytes[index] == 0.toByte() && bytes[index + 1] == 0.toByte()) {
+            val prefix =
+                when {
+                    bytes[index + 2] == 1.toByte() -> 3
+                    bytes[index + 2] == 0.toByte() && bytes[index + 3] == 1.toByte() -> 4
+                    else -> 0
+                }
+            if (prefix > 0) {
+                if (pendingStart >= 0 && index > pendingStart) bodies += (pendingStart.toLong() shl 32) or index.toLong()
+                pendingStart = index + prefix
+                index += prefix
+                continue
+            }
+        }
+        index++
+    }
+    if (pendingStart < 0) {
+        bodies += bytes.size.toLong() // 无起始码：[0, size)
+    } else if (bytes.size > pendingStart) {
+        bodies += (pendingStart.toLong() shl 32) or bytes.size.toLong()
+    }
+    if (bodies.isEmpty()) return null
+    var total = 0
+    for (b in bodies) total += 4 + ((b and 0xFFFFFFFFL) - (b ushr 32)).toInt()
+    val out = ByteArray(total)
+    var pos = 0
+    for (b in bodies) {
+        val start = (b ushr 32).toInt()
+        val len = (b and 0xFFFFFFFFL).toInt() - start
+        out[pos] = (len ushr 24).toByte()
+        out[pos + 1] = (len ushr 16).toByte()
+        out[pos + 2] = (len ushr 8).toByte()
+        out[pos + 3] = len.toByte()
+        System.arraycopy(bytes, start, out, pos + 4, len)
+        if (len >= 4 && (bytes[start].toInt() and 0x1F) == 7 && (bytes[start + 3].toInt() and 0xFF) < TARGET_LEVEL_IDC) {
+            out[pos + 4 + 3] = TARGET_LEVEL_IDC.toByte()
+        }
+        pos += 4 + len
+    }
+    return out
+}
+
 internal fun patchSpsLevel(sps: ByteArray): ByteArray {
     if (sps.size < 4) return sps
     val current = sps[3].toInt() and 0xFF

@@ -277,6 +277,9 @@ object VirtualLauncher {
         if (ok) {
             activeMapComponent = component
             recordSessionApp(component, target)
+            // 默认地图 = 最后使用的地图（2026-11-15 用户要求）：在桌面开了别的地图，
+            // 下次连接分屏就用它，不必去设置里改
+            appContextRef?.let { DefaultMapPrefs.set(it, component.packageName) }
         }
         logSink?.invoke("MAP: ${component.packageName} → 地图区域 display=$target ok=$ok")
         return ok
@@ -578,15 +581,105 @@ object VirtualLauncher {
 
     fun refreshOverlayCard() {
         composer?.overlayCard = hintOverlay ?: notificationOverlay ?: MediaReturnControl.card()
+        composer?.pageDots = pageDotsCard
+    }
+
+    /** 桌面页点快照（输出画面坐标）；见 [DualDisplayComposer.pageDots]。 */
+    @Volatile
+    private var pageDotsCard: OverlayCard? = null
+
+    /**
+     * 页点是否改由合成器画在地图/媒体卡之上：仪表盘分屏可见（含与应用页之间的滑动），
+     * 且地图不是全屏。GridActivity 以同一判据隐藏自身页点。
+     */
+    fun pageDotsOnTop(): Boolean = (dashboardMode || dashboardPageAnimating) && !mapFullscreen
+
+    /**
+     * GridActivity 上报页点位图。[left]/[top] 为页点在**桌面所在屏**内的像素坐标；
+     * 桌面屏可能是超采样屏（像素 = 输出 × [gridScale]），换算回输出画面再平移到 [appAreaRect]。
+     */
+    fun setPageDots(
+        bitmap: android.graphics.Bitmap?,
+        left: Float,
+        top: Float,
+    ) {
+        val area = appAreaRect()
+        val scale = gridScale().coerceAtLeast(0.01f)
+        pageDotsCard =
+            if (bitmap == null || area == null) {
+                null
+            } else {
+                val l = area.left + left / scale
+                val t = area.top + top / scale
+                OverlayCard(bitmap, l, t, l + bitmap.width / scale, t + bitmap.height / scale)
+            }
+        composer?.pageDots = pageDotsCard
+    }
+
+    /**
+     * 语音助理浮层（Gemini）开在桌面所在的车机屏上时为 true：合成器暂停绘制地图/媒体卡，
+     * 触摸也不再分流给卡片，让原生浮层完整可见、可点。
+     */
+    @Volatile
+    var assistCoversDashboard = false
+        private set
+
+    /**
+     * 浮层所在屏（-1 = 已关闭）。只有落在桌面屏 / 当前活动应用屏时才需要让出卡片——
+     * 其它屏（地图/媒体屏）上的浮层本来就随卡片一起显示。返回是否让出了卡片。
+     */
+    fun setAssistOnCarDisplay(displayId: Int): Boolean {
+        val cover = displayId >= 0 && (displayId == gridDisplayId || displayId == activeAppDisplayId())
+        assistCoversDashboard = cover
+        composer?.tilesSuppressed = cover
+        refreshOverlayCard()
+        return cover
     }
 
     fun isMediaReturnVisible(): Boolean =
         hintOverlay == null &&
             notificationOverlay == null &&
+            !assistCoversDashboard &&
             dashboardMode &&
             mediaPaneOpen &&
             !mapFullscreen &&
             !dashboardPageAnimating
+
+    /** 语音助理透明屏（-1 = 未建）；按需创建，见 [ensureAssistDisplay]。 */
+    @Volatile
+    var assistDisplayId: Int = -1
+        private set
+
+    @Volatile
+    private var assistDensityDpi = 200
+
+    /**
+     * 按需建语音助理透明屏（CarPlayAssist，应用区尺寸、与原生应用屏同密度、受信）。
+     * 只能在后台线程调用（binder + shell）。失败返回 -1，调用方退回旧做法。
+     */
+    @Synchronized
+    fun ensureAssistDisplay(): Int {
+        if (assistDisplayId >= 0) return assistDisplayId
+        val svc = CarInputClient.service ?: return -1
+        val surface = composer?.assistLayerSurface() ?: return -1
+        if (appAreaWidth <= 0 || appAreaHeight <= 0) return -1
+        val id =
+            runCatching {
+                svc.createDisplay("CarPlayAssist", appAreaWidth, appAreaHeight, assistDensityDpi, surface, true)
+            }.getOrDefault(-1)
+        if (id >= 0) {
+            assistDisplayId = id
+            applyIgnoreOrientationRequest(id)
+        }
+        logSink?.invoke("ASSIST: 助理透明屏 ${if (id >= 0) "已建 id=$id ${appAreaWidth}x$appAreaHeight@${assistDensityDpi}dpi" else "创建失败"}")
+        return id
+    }
+
+    /** 助理层显隐（浮层在 / 不在助理透明屏上）。 */
+    fun setAssistLayerVisible(visible: Boolean) {
+        composer?.assistLayerVisible = visible
+        refreshOverlayCard()
+    }
 
     /** 会话上下文（letterbox 重启后复探要用；未 attach 时为 null）。 */
     fun appContext(): Context? = appContextRef
@@ -710,6 +803,7 @@ object VirtualLauncher {
             } else {
                 appPortraitDensity
             }
+        assistDensityDpi = appNativeDensity
 
         // 等待 Shizuku UserService 绑定（受信虚拟屏需要 shell 权限创建）
         var svc = CarInputClient.service
@@ -750,7 +844,8 @@ object VirtualLauncher {
                                 it.name == "CarPlayApp" ||
                                 it.name == "CarPlayAppHi" ||
                                 it.name == "CarPlayMap" ||
-                                it.name == "CarPlayMedia"
+                                it.name == "CarPlayMedia" ||
+                                it.name == "CarPlayAssist"
                         }.forEach { stale ->
                             runCatching { svc!!.releaseDisplay(stale.displayId) }
                                 .onSuccess { log("LAUNCHER: 已释放残留虚拟屏 ${stale.name}#${stale.displayId}") }
@@ -1027,6 +1122,8 @@ object VirtualLauncher {
             // 暗幕组件就绪（常亮+暗幕功能；主界面开关控制启停）
             ScreenDimmer
                 .attach(context)
+            io.github.shaonialife.cardeck.assist.AssistOverlayController
+                .start(context, log)
             dockOk && gridOk
         } catch (error: IllegalStateException) {
             log("LAUNCHER: GL 合成器启动失败 - ${error.message}")
@@ -1040,10 +1137,14 @@ object VirtualLauncher {
     private var displaysViaService = false
 
     fun detach() {
+        io.github.shaonialife.cardeck.assist.AssistOverlayController
+            .stop()
         io.github.shaonialife.cardeck.notifications.NotificationBannerController
             .clear()
         hintOverlay = null
         notificationOverlay = null
+        pageDotsCard = null
+        assistCoversDashboard = false
         ScreenDimmer
             .detach()
         // 还原方向策略（false = 跟随应用请求，系统默认）。
@@ -1076,6 +1177,9 @@ object VirtualLauncher {
             }
             displaysViaService = false
         }
+        val assistId = assistDisplayId
+        assistDisplayId = -1
+        if (assistId >= 0) runCatching { CarInputClient.service?.releaseDisplay(assistId) }
         appContextRef = null
         watchdogActive = false
         // 还原 letterbox 宽高比为系统默认（不把会话调参留在系统里）。
@@ -1506,8 +1610,6 @@ object VirtualLauncher {
         notifyRunningAppsChanged()
         return requested.none { it in after }
     }
-
-    fun currentMapPackage(): String? = activeMapComponent?.packageName
 
     fun showRecentApps(context: Context) {
         val display = gridDisplayId.takeIf { it >= 0 } ?: return

@@ -342,11 +342,12 @@
     <string name="no_matching_apps">沒有符合的應用程式</string>
     <string name="mute_phone_audio">連線時靜音手機媒體輸出</string>
     <string name="mute_phone_audio_note">預設關閉。部分系統會連同播放擷取一起靜音，導致接收端無聲；關閉時手機可能同時播放。下次連線生效。</string>
-    <string name="switch_current_map">切換目前地圖（不改預設）</string>
     <string name="swap_dashboard_panes">對調地圖與音樂位置</string>
     <string name="back_playback_controls">返回播放控制</string>
     <string name="show_car_notifications">顯示車機通知橫幅</string>
     <string name="car_notifications_note">需要通知使用權。顯示 5 秒，點擊開啟 App；右上角可關閉。鎖屏時隱藏訊息預覽。</string>
+    <string name="show_assist_overlay">在車機顯示語音助理（實驗）</string>
+    <string name="assist_overlay_note">「Hey Google」喚出 Gemini 時，把它的原生浮層搬到車機上顯示，並暫時讓出儀表板卡片；點車機空白處或 dock 即關閉。需要 Shizuku。</string>
     <string name="new_notification">新通知</string>
     <string name="recent_apps">背景應用</string>
     <string name="recent_back">返回</string>

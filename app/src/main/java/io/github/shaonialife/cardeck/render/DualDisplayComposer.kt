@@ -145,16 +145,41 @@ class DualDisplayComposer(
         set(value) {
             field = value
             overlayDirty = true
+            wake()
         }
+
+    /** 合成循环的唤醒信号：有输入新帧 / 叠加层变化 / 布局动画开始时立即叫醒。 */
+    private val frameSignal = Object()
+
+    private fun wake() {
+        synchronized(frameSignal) { frameSignal.notifyAll() }
+    }
 
     @Volatile
     private var overlayDirty = false
 
-    /** 已上传纹理对应的卡片（仅 GL 线程访问）。 */
-    private var uploadedOverlay: OverlayCard? = null
+    /**
+     * 桌面页点（输出画面坐标）。页点本在应用屏的 GridActivity 里，但仪表盘的地图/媒体
+     * 卡在 GL 层画在应用屏之上，会把页点盖掉；所以由 GridActivity 把页点快照成位图交给
+     * 这里，在卡片之后、dock 之前补画。是否绘制由 [VirtualLauncher.pageDotsOnTop] 决定，
+     * 与 GridActivity 隐藏自身页点用同一判据（避免两份重叠或都不显示）。
+     */
+    @Volatile
+    var pageDots: OverlayCard? = null
+        set(value) {
+            field = value
+            overlayDirty = true
+            wake()
+        }
 
-    /** 叠加卡片纹理（0 = 尚未创建，仅 GL 线程访问）。 */
-    private var overlayTexture = 0
+    /** 一张叠加位图的 GL 纹理与已上传的卡片引用（仅 GL 线程访问）。 */
+    private class OverlaySlot {
+        var texture = 0
+        var uploaded: OverlayCard? = null
+    }
+
+    private val overlaySlot = OverlaySlot()
+    private val pageDotsSlot = OverlaySlot()
 
     /** 超采样输入（GL 线程创建；start() 返回后对其他线程安全可读）。 */
     @Volatile
@@ -178,6 +203,24 @@ class DualDisplayComposer(
     private var mediaInput: Input? = null
 
     fun hasMediaContent(): Boolean = mediaInput?.hasContent == true
+
+    /**
+     * 语音助理层：Gemini 浮层所在的透明虚拟屏（CarPlayAssist，与应用区同尺寸）。
+     * 可见时按预乘 alpha 叠在地图/媒体卡之上、dock 之下——浮层本身半透明，
+     * 卡片照常可见，光效与对话条铺满整个应用区。
+     */
+    @Volatile
+    var assistLayerVisible = false
+
+    @Volatile
+    private var assistLayerInput: Input? = null
+
+    /** 交给助理虚拟屏的 Surface（合成器未就绪时 null）。 */
+    fun assistLayerSurface(): Surface? = assistLayerInput?.surface
+
+    /** 语音助理浮层开在应用屏上：暂停绘制地图/媒体卡（它们会盖住原生浮层）。 */
+    @Volatile
+    var tilesSuppressed = false
 
     @Throws(IllegalStateException::class)
     fun start(
@@ -284,6 +327,7 @@ class DualDisplayComposer(
                 now,
             )
         tileLayout = layout
+        wake()
     }
 
     @Volatile
@@ -298,6 +342,7 @@ class DualDisplayComposer(
     fun animateAppEntry(fromMediaCard: Boolean = false) {
         appEntryFromMedia = fromMediaCard
         appEntryAt = android.os.SystemClock.uptimeMillis()
+        wake()
     }
 
     fun isLayoutTransitioning(): Boolean {
@@ -415,7 +460,10 @@ class DualDisplayComposer(
             val st = SurfaceTexture(tex[0])
             st.setDefaultBufferSize(width, height)
             val input = Input(tex[0], st, Surface(st))
-            st.setOnFrameAvailableListener { input.hasNewFrame = true }
+            st.setOnFrameAvailableListener {
+                input.hasNewFrame = true
+                wake()
+            }
             return input
         }
 
@@ -424,7 +472,7 @@ class DualDisplayComposer(
         val hi = if (hasHiInput) newInput(hiW, hiH).also { appHi = it } else null
         val map = if (hasMapInput) newInput(mapW, mapH).also { mapInput = it } else null
         val media = newInput(mediaW, mediaH).also { mediaInput = it }
-
+        val assistLayer = newInput(appW, appH).also { assistLayerInput = it }
         // ---- 着色器 ----
         val program = buildProgram(oes = true)
         GLES20.glUseProgram(program)
@@ -448,26 +496,29 @@ class DualDisplayComposer(
         val ouTexture = GLES20.glGetUniformLocation(overlayProgram, "uTexture")
 
         /** 上传/更新叠加卡片纹理（仅 GL 线程；卡片引用变化时才重新上传）。 */
-        fun syncOverlayTexture(): OverlayCard? {
+        fun syncOverlayTexture(
+            slot: OverlaySlot,
+            source: OverlayCard?,
+        ): OverlayCard? {
             val card =
-                overlayCard ?: run {
-                    uploadedOverlay = null
+                source ?: run {
+                    slot.uploaded = null
                     return null
                 }
-            if (card === uploadedOverlay && overlayTexture != 0) return card
-            if (overlayTexture == 0) {
+            if (card === slot.uploaded && slot.texture != 0) return card
+            if (slot.texture == 0) {
                 val tex = IntArray(1)
                 GLES20.glGenTextures(1, tex, 0)
-                overlayTexture = tex[0]
+                slot.texture = tex[0]
             }
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTexture)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, slot.texture)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
             android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, card.bitmap, 0)
-            uploadedOverlay = card
+            slot.uploaded = card
             return card
         }
 
@@ -476,7 +527,7 @@ class DualDisplayComposer(
          * 这里转成 GL 底部原点；Bitmap 首行在顶部，故纹理 v 轴与顶点方向相反。
          */
         fun drawOverlay(
-            card: OverlayCard,
+            slot: OverlaySlot,
             left: Float,
             top: Float,
             right: Float,
@@ -485,7 +536,7 @@ class DualDisplayComposer(
             GLES20.glUseProgram(overlayProgram)
             GLES20.glUniform1i(ouTexture, 0)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTexture)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, slot.texture)
             GLES20.glEnable(GLES20.GL_BLEND)
             GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
             GLES20.glUniformMatrix4fv(ouSTMatrix, 1, false, IDENTITY_ST, 0)
@@ -496,7 +547,8 @@ class DualDisplayComposer(
             val yTop = outHeight - top
             val yBottom = outHeight - bottom
             val positions =
-                floatBuffer(
+                vertexBuffer(
+                    posBuf,
                     px(left),
                     py(yBottom),
                     px(right),
@@ -507,7 +559,7 @@ class DualDisplayComposer(
                     py(yTop),
                 )
             // Bitmap v=0 在顶部：底部顶点取 v=1，顶部顶点取 v=0
-            val coords = floatBuffer(0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f)
+            val coords = vertexBuffer(texBuf, 0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f)
             GLES20.glVertexAttribPointer(oaPos, 2, GLES20.GL_FLOAT, false, 0, positions)
             GLES20.glEnableVertexAttribArray(oaPos)
             GLES20.glVertexAttribPointer(oaTexCoord, 2, GLES20.GL_FLOAT, false, 0, coords)
@@ -550,7 +602,8 @@ class DualDisplayComposer(
 
             fun py(v: Float) = v / outHeight * 2f - 1f
             val positions =
-                floatBuffer(
+                vertexBuffer(
+                    posBuf,
                     px(x0),
                     py(y0),
                     px(x1),
@@ -560,7 +613,7 @@ class DualDisplayComposer(
                     px(x1),
                     py(y1),
                 )
-            val coords = floatBuffer(u0, 0f, u1, 0f, u0, 1f, u1, 1f)
+            val coords = vertexBuffer(texBuf, u0, 0f, u1, 0f, u0, 1f, u1, 1f)
             GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, positions)
             GLES20.glEnableVertexAttribArray(aPos)
             GLES20.glVertexAttribPointer(aTexCoord, 2, GLES20.GL_FLOAT, false, 0, coords)
@@ -629,6 +682,12 @@ class DualDisplayComposer(
                 media.frameCount++
                 media.surfaceTexture.updateTexImage()
             }
+            if (assistLayer.hasNewFrame) {
+                assistLayer.hasNewFrame = false
+                assistLayer.hasContent = true
+                assistLayer.frameCount++
+                assistLayer.surfaceTexture.updateTexImage()
+            }
             val activeInput = if (activeAppHi) hi else app
             val nowMs = android.os.SystemClock.uptimeMillis()
             val appLeft = if (dockAtBottom) 0f else dockW.toFloat()
@@ -664,7 +723,7 @@ class DualDisplayComposer(
                     )
                 }
             }
-            if (map?.hasContent == true && tileLayout != TileLayout.HIDDEN) {
+            if (map?.hasContent == true && tileLayout != TileLayout.HIDDEN && !tilesSuppressed) {
                 val expanded =
                     layoutMotion?.valueAt(nowMs)
                         ?: if (tileLayout == TileLayout.FULLSCREEN) 1f else 0f
@@ -697,6 +756,7 @@ class DualDisplayComposer(
                 )
             }
             if (showMediaPane &&
+                !tilesSuppressed &&
                 media.hasContent &&
                 tileLayout == TileLayout.SPLIT &&
                 (VirtualLauncher.dashboardMode || VirtualLauncher.dashboardPageAnimating)
@@ -712,6 +772,19 @@ class DualDisplayComposer(
                     cornerRadius = TILE_CORNER_RADIUS,
                 )
             }
+            // 页点压在地图/媒体卡之上（固定不随 tile 滑动，与 GridActivity 原位置一致）
+            if (VirtualLauncher.pageDotsOnTop()) {
+                syncOverlayTexture(pageDotsSlot, pageDots)?.let { dots ->
+                    drawOverlay(pageDotsSlot, dots.left, dots.top, dots.right, dots.bottom)
+                }
+            }
+            if (assistLayerVisible && assistLayer.hasContent) {
+                // 预乘 alpha 混合：虚拟屏空白处 alpha=0，只有浮层像素压在卡片上
+                GLES20.glEnable(GLES20.GL_BLEND)
+                GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                drawInput(assistLayer, appLeft, outWidth.toFloat(), appBottom, outHeight.toFloat())
+                GLES20.glDisable(GLES20.GL_BLEND)
+            }
             if (dock.hasContent) {
                 if (dockAtBottom) {
                     drawInput(dock, 0f, outWidth.toFloat(), 0f, dockH.toFloat())
@@ -720,8 +793,8 @@ class DualDisplayComposer(
                 }
             }
             // 叠加卡片最后绘制（最上层，不受分支影响）：卡片坐标为输出画面坐标（顶部原点）
-            syncOverlayTexture()?.let { card ->
-                drawOverlay(card, card.left, card.top, card.right, card.bottom)
+            syncOverlayTexture(overlaySlot, overlayCard)?.let { card ->
+                drawOverlay(overlaySlot, card.left, card.top, card.right, card.bottom)
             }
             if (fullRedraw ||
                 overlayDirty ||
@@ -760,6 +833,7 @@ class DualDisplayComposer(
                 // 但不为看不见的内容白烧 GPU/带宽。
                 val hasNew =
                     isLayoutTransitioning() ||
+                        (assistLayerVisible && assistLayerInput?.hasNewFrame == true) ||
                         overlayDirty ||
                         dock.hasNewFrame ||
                         (if (activeAppHi) appHi else app)?.hasNewFrame == true ||
@@ -767,22 +841,31 @@ class DualDisplayComposer(
                         (showMediaPane && tileLayout == TileLayout.SPLIT && mediaInput?.hasNewFrame == true)
                 val now = System.currentTimeMillis()
                 val intervalMs = if (hasNew) 1000L / targetFps.coerceIn(1, 120) else 33L
-                if (now - lastComposeAt >= intervalMs) {
+                val waitMs = intervalMs - (now - lastComposeAt)
+                if (waitMs <= 0) {
                     composeFrame(fullRedraw = false)
                     lastComposeAt = now
                 } else {
-                    Thread.sleep(8)
+                    // 等到下一个出帧点，或被新帧/状态变化提前叫醒（此前固定 sleep(8) 轮询：
+                    // 静止时每秒白醒 ~125 次，且新帧最多晚 8ms 才被发现）
+                    synchronized(frameSignal) { frameSignal.wait(waitMs) }
                 }
             }
         } catch (_: InterruptedException) {
         } finally {
-            if (overlayTexture != 0) {
-                runCatching { GLES20.glDeleteTextures(1, intArrayOf(overlayTexture), 0) }
-                overlayTexture = 0
+            for (slot in arrayOf(overlaySlot, pageDotsSlot)) {
+                if (slot.texture != 0) {
+                    runCatching { GLES20.glDeleteTextures(1, intArrayOf(slot.texture), 0) }
+                    slot.texture = 0
+                }
+                slot.uploaded = null
             }
             runCatching { media.surface.release() }
             runCatching { media.surfaceTexture.release() }
             mediaInput = null
+            assistLayerInput = null
+            runCatching { assistLayer.surface.release() }
+            runCatching { assistLayer.surfaceTexture.release() }
             runCatching { dock.surface.release() }
             runCatching { app.surface.release() }
             runCatching { dock.surfaceTexture.release() }
@@ -876,6 +959,24 @@ class DualDisplayComposer(
         GLES20.glAttachShader(program, compile(GLES20.GL_FRAGMENT_SHADER, fragment))
         GLES20.glLinkProgram(program)
         return program
+    }
+
+    /**
+     * 每次绘制的顶点/纹理坐标写进这两块**复用**的直接缓冲（仅 GL 线程用）。此前每次
+     * draw 都 allocateDirect 两块新缓冲——每帧 6~10 次直接内存分配，靠 Cleaner 回收，
+     * 是合成线程上的稳定 GC 压力。glDrawArrays 调用时即读取客户端数组，复用安全。
+     */
+    private val posBuf = floatBuffer(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+    private val texBuf = floatBuffer(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+
+    private fun vertexBuffer(
+        buffer: FloatBuffer,
+        vararg values: Float,
+    ): FloatBuffer {
+        buffer.clear()
+        buffer.put(values)
+        buffer.position(0)
+        return buffer
     }
 
     private fun floatBuffer(vararg values: Float): FloatBuffer =

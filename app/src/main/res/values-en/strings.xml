@@ -342,11 +342,12 @@
     <string name="no_matching_apps">No matching apps</string>
     <string name="mute_phone_audio">Mute phone media on connection</string>
     <string name="mute_phone_audio_note">Off by default. Some systems also mute captured audio, leaving the receiver silent. When off, the phone may also play audio. Applies next connection.</string>
-    <string name="switch_current_map">Switch current map (keep default)</string>
     <string name="swap_dashboard_panes">Swap map and music positions</string>
     <string name="back_playback_controls">Playback controls</string>
     <string name="show_car_notifications">Show car notification banners</string>
     <string name="car_notifications_note">Requires notification access. Shown for 5 seconds; tap to open the app or close from the top right. Message previews are hidden while locked.</string>
+    <string name="show_assist_overlay">Show voice assistant on car (experimental)</string>
+    <string name="assist_overlay_note">When \"Hey Google\" brings up Gemini, its native overlay is moved to the car screen and the dashboard cards step aside. Tap empty space or the dock on the car to close it. Requires Shizuku.</string>
     <string name="new_notification">New notification</string>
     <string name="recent_apps">Background apps</string>
     <string name="recent_back">Back</string>

@@ -42,6 +42,8 @@
 
         <include android:id="@+id/displayCarNotifications" layout="@layout/item_display_toggle" />
 
+        <include android:id="@+id/displayAssistOverlay" layout="@layout/item_display_toggle" />
+
         <include android:id="@+id/displayMutePhoneAudio" layout="@layout/item_display_toggle" />
 
         <TextView
