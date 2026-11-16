@@ -66,6 +66,15 @@ class MainActivity : AppCompatActivity() {
                 R.string.screen_001,
             )
         const val KEY_DISCLAIMER_DEADLINE = "disclaimer_deadline"
+
+        /** 底部导航分页（深浅色切换会重建 Activity，分页随 savedState 恢复）。 */
+        const val KEY_TAB = "main_tab"
+        const val TAB_CONNECT = 0
+        const val TAB_CAR = 1
+        const val TAB_DIAG = 2
+
+        /** 壁纸横条里「从相册」选项的键（不是真实来源）。 */
+        const val PICK_KEY = "pick"
     }
 
     private lateinit var deviceSubtitle: TextView
@@ -172,6 +181,9 @@ class MainActivity : AppCompatActivity() {
         java.util.concurrent.atomic
             .AtomicBoolean(false)
 
+    /** 相册选图写入的槽位（深色 / 浅色）。 */
+    private var pendingWallpaperSlot = WallpaperStore.Slot.DARK
+
     /** 车机壁纸选择（Photo Picker；无需存储权限）。选中即持久化并通知合成器换图。 */
     private val wallpaperPicker =
         registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -179,9 +191,11 @@ class MainActivity : AppCompatActivity() {
                 log("WALLPAPER: 未选择图片")
                 return@registerForActivityResult
             }
+            val slot = pendingWallpaperSlot
             val ok =
                 WallpaperStore
-                    .setFromUri(this, uri)
+                    .setFromUri(this, uri, slot)
+            if (ok) buildWallpaperStrips()
             log(
                 "WALLPAPER: ${if (ok) "壁纸已更新（会话进行中约 1 秒内上车；下次连接自动生效）" else "保存失败"}",
             )
@@ -201,7 +215,51 @@ class MainActivity : AppCompatActivity() {
     private val audioPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             log("MODE: RECORD_AUDIO 授权: $granted（音频通道需要）")
+            // 录音授权与投屏授权必须**依次**弹：同时发起时两个系统弹窗叠在一起，
+            // 先出现的那个会在另一个弹出时跳动/移位（用户长期反馈的「弹窗动一下」）
+            launchProjectionConsent()
         }
+
+    private fun launchProjectionConsent() {
+        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+        projectionLauncher.launch(manager.createScreenCaptureIntent())
+    }
+
+    /**
+     * 申请车机侧声音所需授权。Shizuku 就绪时走 [SilentProjectionActivity]（appops 放行，
+     * 与「上车自动连接」同一路径）——不弹任何系统窗；否则依次弹录音 → 投屏两个系统授权。
+     */
+    private fun requestAudioCapture() {
+        if (ShizukuGate.state(this) == ShizukuGate.State.READY) {
+            Bg.run("audio-silent-grant") {
+                val grant =
+                    io.github.shaonialife.cardeck.audio.SilentProjectionActivity
+                        .request(applicationContext)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (grant != null) {
+                        log("MODE: 已经 Shizuku 静默取得投屏授权（不弹系统窗）")
+                        onProjectionGranted(grant.resultCode, grant.data)
+                    } else {
+                        log("MODE: 静默授权失败，改用系统授权弹窗")
+                        requestAudioCaptureViaSystem()
+                    }
+                }
+            }
+            return
+        }
+        requestAudioCaptureViaSystem()
+    }
+
+    private fun requestAudioCaptureViaSystem() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            launchProjectionConsent()
+        }
+    }
 
     private val projectionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -210,30 +268,37 @@ class MainActivity : AppCompatActivity() {
                 log("MODE: 投屏权限被拒绝（车机侧声音不可用）")
                 return@registerForActivityResult
             }
-            // Android 14+ 顺序：先把结果交给服务，由服务升级 FGS 类型后调 getMediaProjection
-            CarPlayService.pendingProjectionResult =
-                result.resultCode to data
-            CarPlayService
-                .start(this)
-            log("MODE: ✓ 投屏权限已授予（重启手机后需重新授权）")
-            // 会话已在进行中授权（授权晚于连接）：等投影就绪后动态补启音频通道
-            Bg.run("audio-late-start") {
-                val deadline = SystemClock.uptimeMillis() + 5_000L
-                while (SystemClock.uptimeMillis() < deadline) {
-                    if (CarPlayService.mediaProjection != null) break
-                    Thread.sleep(200)
-                }
-                if (CarPlayService.mediaProjection == null) {
-                    log("MODE: 投影 5 秒未就绪（服务异常？），音频通道本次未启动")
-                    return@run
-                }
-                SessionController.maybeStartAudioNow(applicationContext)
-                // 「启动连接」时选了开启声音、投屏授权在此刻才拿到：接着启动连接
-                if (pendingStartAfterProjection.compareAndSet(true, false)) {
-                    startConnectionNow()
-                }
+            onProjectionGranted(result.resultCode, data)
+        }
+
+    private fun onProjectionGranted(
+        resultCode: Int,
+        data: android.content.Intent,
+    ) {
+        // Android 14+ 顺序：先把结果交给服务，由服务升级 FGS 类型后调 getMediaProjection
+        CarPlayService.pendingProjectionResult =
+            resultCode to data
+        CarPlayService
+            .start(this)
+        log("MODE: ✓ 投屏权限已授予（重启手机后需重新授权）")
+        // 会话已在进行中授权（授权晚于连接）：等投影就绪后动态补启音频通道
+        Bg.run("audio-late-start") {
+            val deadline = SystemClock.uptimeMillis() + 5_000L
+            while (SystemClock.uptimeMillis() < deadline) {
+                if (CarPlayService.mediaProjection != null) break
+                Thread.sleep(200)
+            }
+            if (CarPlayService.mediaProjection == null) {
+                log("MODE: 投影 5 秒未就绪（服务异常？），音频通道本次未启动")
+                return@run
+            }
+            SessionController.maybeStartAudioNow(applicationContext)
+            // 「启动连接」时选了开启声音、投屏授权在此刻才拿到：接着启动连接
+            if (pendingStartAfterProjection.compareAndSet(true, false)) {
+                startConnectionNow()
             }
         }
+    }
 
     /** 投屏授权是「启动连接」的前置（选了开启声音且尚未授权）时置位。 */
     private val pendingStartAfterProjection =
@@ -620,13 +685,7 @@ class MainActivity : AppCompatActivity() {
         // 开启声音需要投屏权限（播放捕获的授权来源）：先申请，授权完成后再启动连接
         log("MODE: 开启声音需要投屏权限——先后申请（音频捕获依赖），授权后自动开始连接")
         pendingStartAfterProjection.set(true)
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        }
-        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
-        projectionLauncher.launch(manager.createScreenCaptureIntent())
+        requestAudioCapture()
     }
 
     /** 「启动连接」主体（权限检查留在这里；会话启动交给 [SessionController]，幂等不双开）。 */
@@ -800,6 +859,7 @@ class MainActivity : AppCompatActivity() {
         renderConsole(SessionController.logText())
 
         setUpUiControls()
+        setUpTabs(savedInstanceState?.getInt(KEY_TAB, TAB_CONNECT) ?: TAB_CONNECT)
         // 以横屏启动时不会触发 onConfigurationChanged，这里按当前方向定一次排布。
         // 首次调用时 contentArea 未测量（width=0，只能退回屏宽估算），
         // 布局完成后再精确重算一次，避免英雄卡宽度与右栏让位差几个像素。
@@ -956,15 +1016,7 @@ class MainActivity : AppCompatActivity() {
         btnPickTarget.setOnClickListener { showTargetPicker() }
 
         // 车机侧声音授权（原「申请投屏权限」）：RECORD_AUDIO + MediaProjection 一起请求
-        btnAudio.setOnClickListener {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
-                PackageManager.PERMISSION_GRANTED
-            ) {
-                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            }
-            val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
-            projectionLauncher.launch(manager.createScreenCaptureIntent())
-        }
+        btnAudio.setOnClickListener { requestAudioCapture() }
 
         // ---- 车机显示 ----
         findViewById<LinearLayout>(R.id.rowDim).setOnClickListener {
@@ -982,29 +1034,7 @@ class MainActivity : AppCompatActivity() {
             log("DIMMER: 手动假息屏（点击屏幕恢复）")
         }
 
-        findViewById<TextView>(R.id.btnWallpaperPick).setOnClickListener {
-            wallpaperPicker.launch(
-                androidx.activity.result.PickVisualMediaRequest(
-                    androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly,
-                ),
-            )
-        }
-        findViewById<TextView>(R.id.btnWallpaperReset).setOnClickListener {
-            val ok =
-                WallpaperStore
-                    .resetToDefault(this)
-            log("WALLPAPER: ${if (ok) "已恢复内置默认（CarPlay 官方深色壁纸）" else "恢复失败"}")
-            snack(
-                if (ok) {
-                    UiStrings.text(
-                        R.string.screen_037,
-                    )
-                } else {
-                    UiStrings
-                        .text(R.string.screen_038)
-                },
-            )
-        }
+        buildWallpaperStrips()
 
         // ---- 折叠卡：高级 / 日志 ----
         bindExpandable(R.id.advHeader, advBody, advChevron)
@@ -1068,9 +1098,21 @@ class MainActivity : AppCompatActivity() {
         // 所以 Shizuku 授权成功、连接建立等时机都会再调一次。
         ensureNotificationAccessAsync()
 
-        // ---- 车机设置（手机侧二级菜单：桌面/横屏/超采样/dock/默认地图） ----
-        findViewById<LinearLayout>(R.id.btnCarSettings).setOnClickListener {
-            startActivity(android.content.Intent(this, PhoneSettingsActivity::class.java))
+        // ---- 车机设置（「车机」分页：与车机双栏共用的设置菜单） ----
+        buildCarMenu()
+
+        // ---- 车机画面截图（合成后的整幅画面） ----
+        findViewById<View>(R.id.btnCarScreenshot).setOnClickListener {
+            io.github.shaonialife.cardeck.util.CarScreenshot.capture(this) { result ->
+                runOnUiThread {
+                    if (result == null) {
+                        snack(getString(R.string.md_car_screenshot_failed))
+                    } else {
+                        log("SCREENSHOT: 车机画面 ${result.width}x${result.height} → ${result.path}")
+                        snack(result.path.substringAfter("/storage/emulated/0/"))
+                    }
+                }
+            }
         }
 
         // 启动即检查：常亮开 + 无悬浮窗权限 → 主动请求
@@ -1192,7 +1234,7 @@ class MainActivity : AppCompatActivity() {
         hubPlate.background.mutate().setTint(plateColor)
         hubCar.setColorFilter(carColor)
         hubCaption.setTextColor(
-            if (s == HeroState.IDLE) getColor(R.color.m3_mono_dim) else 0xFF5C8B96.toInt(),
+            getColor(if (s == HeroState.IDLE) R.color.m3_mono_dim else R.color.m3_hub_caption),
         )
 
         hubBlink?.cancel()
@@ -2708,11 +2750,216 @@ class MainActivity : AppCompatActivity() {
      */
     private fun syncPhoneUiActivity() {
         if (isFinishing || isDestroyed) return
-        val active = uiResumed && !ScreenDimmer.isCovering()
+        val covered = ScreenDimmer.isCovering()
+        val active = uiResumed && !covered
         mainHandler.removeCallbacks(heroTick)
         if (active) mainHandler.post(heroTick)
-        if (::signalWaves.isInitialized) signalWaves.paused = !active
-        hubBlink?.let { if (active) it.resume() else it.pause() }
+        // 波形动画只在「连线」分页可见时跑（其它分页英雄卡是 GONE）
+        val heroVisible = active && currentTab == TAB_CONNECT
+        if (::signalWaves.isInitialized) signalWaves.paused = !heroVisible
+        hubBlink?.let { if (heroVisible) it.resume() else it.pause() }
+        applySystemBars(covered)
+    }
+
+    /**
+     * 系统栏平时与页面同色（深浅色跟随手机）；暗幕盖住时切回纯黑——暗幕是
+     * APPLICATION_OVERLAY 窗口、盖不到系统栏，浅色主题下会剩两条亮边。
+     */
+    private fun applySystemBars(covered: Boolean) {
+        val black = android.graphics.Color.BLACK
+        window.statusBarColor = if (covered) black else getColor(R.color.m3_surface)
+        window.navigationBarColor = if (covered) black else getColor(R.color.m3_surface_low)
+        val lightBars = !covered && resources.getBoolean(R.bool.m3_light_bars)
+        androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = lightBars
+            isAppearanceLightNavigationBars = lightBars
+        }
+    }
+
+    // ---- 底部导航（MD3 Navigation bar；横屏改为左侧 Navigation rail，见 applyContentLayout） ----
+    private var currentTab = TAB_CONNECT
+
+    private fun setUpTabs(initial: Int) {
+        findViewById<View>(R.id.navConnect).setOnClickListener { selectTab(TAB_CONNECT) }
+        findViewById<View>(R.id.navCar).setOnClickListener { selectTab(TAB_CAR) }
+        findViewById<View>(R.id.navDiag).setOnClickListener { selectTab(TAB_DIAG) }
+        selectTab(initial.coerceIn(TAB_CONNECT, TAB_DIAG))
+    }
+
+    private fun selectTab(tab: Int) {
+        currentTab = tab
+        val pages = intArrayOf(R.id.contentArea, R.id.tabCar, R.id.tabDiag)
+        pages.forEachIndexed { i, id ->
+            findViewById<View>(id).visibility = if (i == tab) View.VISIBLE else View.GONE
+        }
+        val items =
+            arrayOf(
+                Triple(R.id.navConnectPill, R.id.navConnectIcon, R.id.navConnectLabel),
+                Triple(R.id.navCarPill, R.id.navCarIcon, R.id.navCarLabel),
+                Triple(R.id.navDiagPill, R.id.navDiagIcon, R.id.navDiagLabel),
+            )
+        items.forEachIndexed { i, (pill, icon, label) ->
+            val on = i == tab
+            findViewById<View>(pill).background =
+                if (on) ContextCompat.getDrawable(this, R.drawable.bg_nav_pill) else null
+            findViewById<ImageView>(icon).imageTintList =
+                android.content.res.ColorStateList.valueOf(
+                    getColor(if (on) R.color.m3_on_sec_container else R.color.m3_on_var),
+                )
+            findViewById<TextView>(label).apply {
+                setTextColor(getColor(if (on) R.color.m3_on_surface else R.color.m3_on_var))
+                setTypeface(null, if (on) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            }
+            findViewById<View>(
+                when (i) {
+                    TAB_CONNECT -> R.id.navConnect
+                    TAB_CAR -> R.id.navCar
+                    else -> R.id.navDiag
+                },
+            ).isSelected = on
+        }
+        syncPhoneUiActivity()
+    }
+
+    // ---- 车机壁纸：深色 / 浅色两条缩略图（默认、内置图案、我的图片、从相册；浅色多一个「同深色」） ----
+
+    private fun buildWallpaperStrips() {
+        fillWallpaperStrip(findViewById(R.id.wallpaperDarkStrip), WallpaperStore.Slot.DARK)
+        fillWallpaperStrip(findViewById(R.id.wallpaperLightStrip), WallpaperStore.Slot.LIGHT)
+    }
+
+    private fun fillWallpaperStrip(
+        strip: LinearLayout,
+        slot: WallpaperStore.Slot,
+    ) {
+        strip.removeAllViews()
+        val current = WallpaperStore.source(this, slot)
+        val options = mutableListOf<Pair<String, String>>()
+        if (slot == WallpaperStore.Slot.LIGHT) options += WallpaperStore.SRC_SAME to getString(R.string.wp_same)
+        options += WallpaperStore.SRC_DEFAULT to getString(R.string.wp_default)
+        // 内置图案按槽位排序：本槽位色调的在前
+        val presets =
+            io.github.shaonialife.cardeck.ui.WallpaperPresets.ALL
+                .sortedBy { it.light != (slot == WallpaperStore.Slot.LIGHT) }
+        presets.forEach { options += (WallpaperStore.SRC_PRESET_PREFIX + it.id) to getString(it.nameRes) }
+        if (WallpaperStore.hasUserImage(this, slot)) options += WallpaperStore.SRC_USER to getString(R.string.wp_custom)
+        options += PICK_KEY to getString(R.string.wp_pick)
+
+        val density = resources.displayMetrics.density
+        val thumbW = (96 * density).toInt()
+        val thumbH = (54 * density).toInt()
+        for ((key, label) in options) {
+            val selected = key == current
+            val item =
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = android.view.Gravity.CENTER_HORIZONTAL
+                    setPadding(0, 0, (10 * density).toInt(), 0)
+                }
+            val frame =
+                FrameLayout(this).apply {
+                    background =
+                        android.graphics.drawable.GradientDrawable().apply {
+                            cornerRadius = 12 * density
+                            setColor(getColor(R.color.m3_surface_high))
+                            if (selected) setStroke((3 * density).toInt(), getColor(R.color.m3_primary))
+                        }
+                    clipToOutline = true
+                    val pad = if (selected) (3 * density).toInt() else 0
+                    setPadding(pad, pad, pad, pad)
+                    contentDescription = label
+                    isClickable = true
+                    isFocusable = true
+                    foreground =
+                        ContextCompat.getDrawable(
+                            this@MainActivity,
+                            android.util
+                                .TypedValue()
+                                .also {
+                                    theme.resolveAttribute(android.R.attr.selectableItemBackground, it, true)
+                                }.resourceId,
+                        )
+                    setOnClickListener { onWallpaperOption(slot, key) }
+                }
+            val image =
+                ImageView(this).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    clipToOutline = true
+                    background =
+                        android.graphics.drawable.GradientDrawable().apply {
+                            cornerRadius = 9 * density
+                            setColor(getColor(R.color.m3_surface_high))
+                        }
+                }
+            frame.addView(image, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            when (key) {
+                PICK_KEY, WallpaperStore.SRC_SAME -> {
+                    image.scaleType = ImageView.ScaleType.CENTER
+                    image.setImageResource(if (key == PICK_KEY) R.drawable.ic_wallpaper else R.drawable.ic_moon)
+                    image.imageTintList =
+                        android.content.res.ColorStateList
+                            .valueOf(getColor(R.color.m3_primary))
+                }
+                else ->
+                    Bg.run("wallpaper-thumb") {
+                        val thumb =
+                            runCatching {
+                                val bmp =
+                                    WallpaperStore.decodeSource(this, slot, key, maxOf(thumbW, thumbH) * 2)
+                                bmp?.let { android.media.ThumbnailUtils.extractThumbnail(it, thumbW, thumbH) }
+                            }.getOrNull()
+                        runOnUiThread { if (!isDestroyed && thumb != null) image.setImageBitmap(thumb) }
+                    }
+            }
+            item.addView(frame, LinearLayout.LayoutParams(thumbW, thumbH))
+            item.addView(
+                TextView(this).apply {
+                    text = label
+                    textSize = 11.5f
+                    setTextColor(getColor(if (selected) R.color.m3_primary else R.color.m3_on_var))
+                    if (selected) setTypeface(typeface, android.graphics.Typeface.BOLD)
+                    setPadding(0, (4 * density).toInt(), 0, 0)
+                },
+            )
+            strip.addView(item)
+        }
+    }
+
+    private fun onWallpaperOption(
+        slot: WallpaperStore.Slot,
+        key: String,
+    ) {
+        if (key == PICK_KEY) {
+            pendingWallpaperSlot = slot
+            wallpaperPicker.launch(
+                androidx.activity.result.PickVisualMediaRequest(
+                    ActivityResultContracts.PickVisualMedia.ImageOnly,
+                ),
+            )
+            return
+        }
+        WallpaperStore.setSource(this, slot, key)
+        log("WALLPAPER: ${slot.name} 槽位 → $key（会话进行中约 1 秒内上车）")
+        buildWallpaperStrips()
+    }
+
+    /** 「车机」分页的设置菜单：与车机双栏同一份 [SettingsMenus]，点开进共用内容页。 */
+    private fun buildCarMenu() {
+        val list = findViewById<LinearLayout>(R.id.carMenuList)
+        list.removeAllViews()
+        val ripple = android.util.TypedValue()
+        theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
+        for (item in io.github.shaonialife.cardeck.launcher.settings.SettingsMenus.ALL) {
+            val row = layoutInflater.inflate(R.layout.item_phone_settings_menu, list, false)
+            // 菜单项原是独立卡片；放进分组卡里改成列表行
+            row.setBackgroundResource(ripple.resourceId)
+            (row.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.topMargin = 0
+            row.findViewById<ImageView>(R.id.menuIcon).setImageResource(item.iconRes)
+            row.findViewById<TextView>(R.id.menuTitle).text = item.title
+            row.findViewById<TextView>(R.id.menuDesc).text = item.desc
+            row.setOnClickListener { SettingsContentActivity.start(this, item) }
+            list.addView(row)
+        }
     }
 
     override fun onResume() {
@@ -2734,6 +2981,7 @@ class MainActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putLong(KEY_DISCLAIMER_DEADLINE, disclaimerDeadlineAt)
+        outState.putInt(KEY_TAB, currentTab)
     }
 
     /**
@@ -2803,6 +3051,7 @@ class MainActivity : AppCompatActivity() {
         // （圆盘是视觉主体，品牌字在顶部标题里已有）
         findViewById<View>(R.id.hubCaption).visibility =
             if (landscape) View.GONE else View.VISIBLE
+        val railWidth = applyNavPlacement(landscape, density)
 
         row.orientation = android.widget.LinearLayout.VERTICAL
         if (landscape) {
@@ -2816,7 +3065,7 @@ class MainActivity : AppCompatActivity() {
             val pagePadding =
                 (16 * resources.displayMetrics.density * 2).toInt()
             val available =
-                (resources.displayMetrics.widthPixels - pagePadding).coerceAtLeast(1)
+                (resources.displayMetrics.widthPixels - pagePadding - railWidth).coerceAtLeast(1)
             val heroWidth = (available * 0.46f).toInt().coerceAtLeast(1)
             // 高度必须 WRAP_CONTENT：FrameLayout 会把 MATCH_PARENT/WRAP 视作铺满，
             // 铺满会把按钮顶到卡片底缘、副标题挤成三行（真机截图暴露）
@@ -2856,6 +3105,46 @@ class MainActivity : AppCompatActivity() {
                 weight = 0f
             }
         }
+    }
+
+    /**
+     * 导航栏位置：竖屏底部横条（80dp）；横屏屏高只有 ~300dp，底栏会把英雄卡挤出首屏，
+     * 改成左侧竖向导航栏（MD3 Navigation rail）。返回导航栏占用的宽度（竖屏为 0）。
+     */
+    private fun applyNavPlacement(
+        landscape: Boolean,
+        density: Float,
+    ): Int {
+        val root = findViewById<LinearLayout>(R.id.rootColumn)
+        val nav = findViewById<LinearLayout>(R.id.bottomNav)
+        val page = findViewById<LinearLayout>(R.id.pageColumn)
+        val match = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        val barSize = (80 * density).toInt()
+        root.removeView(nav)
+        if (landscape) {
+            root.orientation = LinearLayout.HORIZONTAL
+            root.addView(nav, 0, LinearLayout.LayoutParams(barSize, match))
+            page.layoutParams = LinearLayout.LayoutParams(0, match, 1f)
+            nav.orientation = LinearLayout.VERTICAL
+            nav.gravity = android.view.Gravity.CENTER
+            nav.setPadding(0, 0, 0, 0)
+        } else {
+            root.orientation = LinearLayout.VERTICAL
+            root.addView(nav, LinearLayout.LayoutParams(match, barSize))
+            page.layoutParams = LinearLayout.LayoutParams(match, 0, 1f)
+            nav.orientation = LinearLayout.HORIZONTAL
+            nav.gravity = android.view.Gravity.NO_GRAVITY
+            nav.setPadding(0, (12 * density).toInt(), 0, (16 * density).toInt())
+        }
+        for (id in intArrayOf(R.id.navConnect, R.id.navCar, R.id.navDiag)) {
+            findViewById<View>(id).layoutParams =
+                if (landscape) {
+                    LinearLayout.LayoutParams(match, (72 * density).toInt())
+                } else {
+                    LinearLayout.LayoutParams(0, match, 1f)
+                }
+        }
+        return if (landscape) barSize else 0
     }
 
     override fun onPause() {

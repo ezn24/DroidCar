@@ -49,32 +49,29 @@ class DisclaimerHintTest {
     fun hintsExplainWhyAcceptIsBlocked() {
         // 两者都没满足：提示同时给出倒计时与滑动要求
         assertEquals(
-            "请滑动阅读至底部，并等待 7 秒",
+            DisclaimerBlock.SCROLL_AND_WAIT,
             disclaimerBlockReason(
                 countdownDone = false,
                 contentScrollable = true,
                 scrolledToBottom = false,
-                remainingSeconds = 7,
             ),
         )
         // 只有倒计时
         assertEquals(
-            "请等待 3 秒后接受",
+            DisclaimerBlock.WAIT,
             disclaimerBlockReason(
                 countdownDone = false,
                 contentScrollable = false,
                 scrolledToBottom = false,
-                remainingSeconds = 3,
             ),
         )
         // 只有滚动
         assertEquals(
-            "请滑动阅读至底部",
+            DisclaimerBlock.SCROLL,
             disclaimerBlockReason(
                 countdownDone = true,
                 contentScrollable = true,
                 scrolledToBottom = false,
-                remainingSeconds = 0,
             ),
         )
         // 已可接受：无提示
@@ -83,31 +80,51 @@ class DisclaimerHintTest {
                 countdownDone = true,
                 contentScrollable = true,
                 scrolledToBottom = true,
-                remainingSeconds = 0,
             ),
         )
     }
 }
 
 class DisclaimerContentTest {
+    /** 读 strings.xml 里的免责声明正文（单测工作目录 = app 模块）。 */
+    private fun disclaimerText(folder: String): Map<String, String> {
+        val xml = java.io.File("src/main/res/$folder/strings.xml").readText()
+        return Regex("""<string name="(disclaimer_s\d_(?:title|body))">(.*?)</string>""")
+            .findAll(xml)
+            .associate { it.groupValues[1] to it.groupValues[2] }
+    }
+
+    private val locales = listOf("values", "values-b+zh+Hant", "values-en")
+
+    @Test
+    fun everyLocaleHasEverySection() {
+        val keys = DisclaimerContent.sections.size * 2
+        for (folder in locales) assertEquals(folder, keys, disclaimerText(folder).size)
+    }
+
     @Test
     fun contentCoversMandatoryTopics() {
-        val text = DisclaimerContent.sections.joinToString("\n") { it.title + "\n" + it.body }
-        // 分享出去必须讲清的三类内容：测试范围、驾驶风险、系统权限
-        assertTrue(text.contains("已经测试过的组合只有"))
-        assertTrue(text.contains("驾驶安全"))
-        assertTrue(text.contains("Shizuku"))
-        // 非官方声明（避免被误认为与 Apple 有关联）
-        assertTrue(text.contains("非官方"))
-        assertTrue(text.contains("商标"))
+        // 分享出去必须讲清：测试范围、驾驶风险、系统权限、非官方与商标
+        val hans = disclaimerText("values").values.joinToString(" ")
+        assertTrue(hans.contains("已经测试过的组合只有"))
+        assertTrue(hans.contains("驾驶安全"))
+        assertTrue(hans.contains("非官方"))
+        assertTrue(hans.contains("商标"))
+        for (folder in locales) {
+            val text = disclaimerText(folder).values.joinToString(" ")
+            assertTrue(folder, text.contains("Shizuku"))
+            assertTrue(folder, text.contains("Apple Inc."))
+        }
     }
 
     @Test
     fun contentHasNoMarkdownMarkers() {
         // 正文直接进 TextView：`**`/`#` 会原样显示，属排版事故
-        val text = DisclaimerContent.sections.joinToString("") { it.body }
-        assertFalse(text.contains("**"))
-        assertFalse(text.contains("##"))
-        assertFalse(text.contains("`"))
+        for (folder in locales) {
+            val text = disclaimerText(folder).values.joinToString("")
+            assertFalse(folder, text.contains("**"))
+            assertFalse(folder, text.contains("##"))
+            assertFalse(folder, text.contains("`"))
+        }
     }
 }

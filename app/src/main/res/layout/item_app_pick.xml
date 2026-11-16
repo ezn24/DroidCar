@@ -28,7 +28,7 @@
         android:layout_weight="1"
         android:ellipsize="end"
         android:maxLines="1"
-        android:textColor="#FFF5F5F7"
+        android:textColor="?attr/panelTextPrimary"
         android:textSize="13sp" />
 
     <ImageView

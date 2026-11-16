@@ -4,9 +4,12 @@ import android.content.ComponentName
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.widget.FrameLayout
+import android.widget.GridLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -14,9 +17,16 @@ import android.widget.TextView
 import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import io.github.shaonialife.cardeck.R
+import io.github.shaonialife.cardeck.ui.WallpaperStore
 import io.github.shaonialife.cardeck.util.Bg
 
-/** 仅展示当前车机任务，图标/标签和 shell 查询全在后台。 */
+/**
+ * 背景应用管理（车机侧）。2026-11-17 改成 CarPlay 主画面同一套视觉：与桌面同一张壁纸
+ * 切片、4 列大图标 + 名称；图标左上角「−」关闭（iOS 编辑态同款），点图标切换过去；
+ * 顶栏：返回 · 标题 · 「全部关闭」胶囊。
+ *
+ * 只展示本次连接开过的应用（[VirtualLauncher.sessionApps]），图标/标签和 shell 查询全在后台。
+ */
 class RecentAppsActivity : AppCompatActivity() {
     private data class Entry(
         val component: ComponentName,
@@ -24,73 +34,126 @@ class RecentAppsActivity : AppCompatActivity() {
         val icon: Bitmap,
     )
 
-    private lateinit var rows: LinearLayout
+    private lateinit var grid: GridLayout
     private lateinit var status: TextView
+    private lateinit var empty: TextView
     private lateinit var closeAll: TextView
-    private lateinit var refresh: TextView
     private var entries = emptyList<Entry>()
     private var busy = false
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
-    private fun text(
-        value: String,
-        size: Float = 16f,
-    ): TextView =
-        TextView(this).apply {
-            text = value
-            textSize = size
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-    private fun button(
-        label: String,
-        action: () -> Unit,
-    ): TextView =
-        text(label).apply {
-            gravity = Gravity.CENTER
-            minHeight = dp(48)
-            setPadding(dp(14), 0, dp(14), 0)
-            background = getDrawable(R.drawable.bg_app_row)
-            isFocusable = true
-            setOnClickListener { if (!busy) action() }
+    private fun pill(color: Int) =
+        GradientDrawable().apply {
+            cornerRadius = dp(100).toFloat()
+            setColor(color)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val root =
+        val root = FrameLayout(this).apply { setBackgroundColor(0xFF090B12.toInt()) }
+        addWallpaper(root)
+        // 壁纸上压一层暗幕，保证图标与文字可读（与桌面观感一致、略深一点区分「管理态」）
+        root.addView(View(this).apply { setBackgroundColor(0x59000000) }, FrameLayout.LayoutParams(-1, -1))
+
+        val column =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(18), dp(12), dp(18), dp(12))
-                setBackgroundColor(0xFF090B12.toInt())
+                setPadding(dp(16), dp(10), dp(16), dp(8))
             }
-        val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        header.addView(button(getString(R.string.recent_back)) { leave() })
-        header.addView(
-            text(getString(R.string.recent_apps), 21f).apply {
-                setTypeface(typeface, Typeface.BOLD)
-                setPadding(dp(16), 0, 0, 0)
-            },
-            LinearLayout.LayoutParams(0, dp(52), 1f),
-        )
-        refresh = button(getString(R.string.recent_refresh)) { load() }
-        closeAll = button(getString(R.string.recent_close_all)) { close(entries.map { it.component.packageName }.toSet()) }
-        header.addView(refresh)
-        header.addView(closeAll, LinearLayout.LayoutParams(-2, dp(48)).apply { leftMargin = dp(10) })
-        root.addView(header)
-        root.addView(
-            text(getString(R.string.recent_help), 13f).apply {
-                setTextColor(0xFFADB4C6.toInt())
-                setPadding(0, dp(8), 0, dp(8))
-            },
-        )
-        status = text("", 15f).apply { setPadding(0, dp(8), 0, dp(8)) }
-        root.addView(status)
-        rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(ScrollView(this).apply { addView(rows) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        column.addView(buildHeader(), LinearLayout.LayoutParams(-1, dp(52)))
+        status =
+            TextView(this).apply {
+                textSize = 13f
+                setTextColor(0xCCFFFFFF.toInt())
+                gravity = Gravity.CENTER
+                visibility = View.GONE
+            }
+        column.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+
+        val body = FrameLayout(this)
+        grid =
+            GridLayout(this).apply {
+                columnCount = COLUMNS
+                setPadding(0, dp(6), 0, dp(6))
+            }
+        body.addView(ScrollView(this).apply { addView(grid, FrameLayout.LayoutParams(-1, -2)) }, FrameLayout.LayoutParams(-1, -1))
+        empty =
+            TextView(this).apply {
+                textSize = 17f
+                setTextColor(0xB3FFFFFF.toInt())
+                gravity = Gravity.CENTER
+                visibility = View.GONE
+            }
+        body.addView(empty, FrameLayout.LayoutParams(-1, -1))
+        column.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(column, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
         onBackPressedDispatcher.addCallback(this) { leave() }
+    }
+
+    /** 顶栏：圆形返回 · 标题（居中）· 全部关闭胶囊。 */
+    private fun buildHeader(): View {
+        val header = FrameLayout(this)
+        header.addView(
+            ImageView(this).apply {
+                setImageResource(R.drawable.ic_chev_left)
+                setColorFilter(Color.WHITE)
+                background = pill(0x33FFFFFF)
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+                contentDescription = getString(R.string.recent_back)
+                isFocusable = true
+                setOnClickListener { leave() }
+            },
+            FrameLayout.LayoutParams(dp(44), dp(44), Gravity.START or Gravity.CENTER_VERTICAL),
+        )
+        header.addView(
+            TextView(this).apply {
+                text = getString(R.string.recent_apps)
+                textSize = 20f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+            },
+            FrameLayout.LayoutParams(-2, -2, Gravity.CENTER),
+        )
+        closeAll =
+            TextView(this).apply {
+                text = getString(R.string.recent_close_all)
+                textSize = 15f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                background = pill(0xCCE5484D.toInt())
+                setPadding(dp(18), 0, dp(18), 0)
+                isFocusable = true
+                setOnClickListener { if (!busy) close(entries.map { it.component.packageName }.toSet()) }
+            }
+        header.addView(closeAll, FrameLayout.LayoutParams(-2, dp(40), Gravity.END or Gravity.CENTER_VERTICAL))
+        return header
+    }
+
+    /** 与桌面同一张壁纸切片（整幅画布 aspectFill，按 dock 位置偏移露出应用区那一块）。 */
+    private fun addWallpaper(root: FrameLayout) {
+        val scale = VirtualLauncher.gridScale()
+        val canvasWidth = (VirtualLauncher.streamWidthPx * scale).toInt()
+        val canvasHeight = (VirtualLauncher.streamHeightPx * scale).toInt()
+        if (canvasWidth <= 0 || canvasHeight <= 0) return
+        val view =
+            ImageView(this).apply {
+                scaleType = ImageView.ScaleType.FIT_XY
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
+        root.addView(
+            view,
+            FrameLayout.LayoutParams(canvasWidth, canvasHeight).apply {
+                leftMargin = if (VirtualLauncher.dockAtBottom) 0 else -(VirtualLauncher.dockWidthPx * scale).toInt()
+            },
+        )
+        Bg.run("wallpaper-recents") {
+            val bitmap = runCatching { WallpaperStore.aspectFillCanvas(this, canvasWidth, canvasHeight) }.getOrNull()
+            if (bitmap != null) runOnUiThread { if (!isDestroyed) view.setImageBitmap(bitmap) }
+        }
     }
 
     override fun onResume() {
@@ -110,15 +173,20 @@ class RecentAppsActivity : AppCompatActivity() {
 
     private fun busy(value: Boolean) {
         busy = value
-        refresh.isEnabled = !value
         closeAll.isEnabled = !value && entries.isNotEmpty()
-        rows.alpha = if (value) 0.5f else 1f
+        closeAll.alpha = if (closeAll.isEnabled) 1f else 0.4f
+        grid.alpha = if (value) 0.5f else 1f
+    }
+
+    private fun showStatus(message: String?) {
+        status.text = message.orEmpty()
+        status.visibility = if (message.isNullOrEmpty()) View.GONE else View.VISIBLE
     }
 
     private fun load(message: String? = null) {
         if (busy) return
         busy(true)
-        status.text = message ?: getString(R.string.recent_loading)
+        showStatus(message)
         Bg.run("recent-apps") {
             val result =
                 runCatching {
@@ -129,7 +197,7 @@ class RecentAppsActivity : AppCompatActivity() {
                         val info = runCatching { packageManager.getApplicationInfo(pkg, 0) }.getOrNull()
                         val title = app?.label ?: info?.loadLabel(packageManager)?.toString() ?: pkg
                         val icon = app?.icon ?: info?.loadIcon(packageManager) ?: packageManager.defaultActivityIcon
-                        Entry(component, title, AppIcons.rounded(icon, 112))
+                        Entry(component, title, AppIcons.rounded(icon, 144))
                     }
                 }
             runOnUiThread {
@@ -138,54 +206,86 @@ class RecentAppsActivity : AppCompatActivity() {
                     .onSuccess {
                         entries = it
                         render()
-                        status.text =
-                            message ?: if (it.isEmpty()) getString(R.string.recent_empty) else getString(R.string.recent_count, it.size)
-                    }.onFailure { status.setText(R.string.recent_read_failed) }
+                    }.onFailure { showStatus(getString(R.string.recent_read_failed)) }
                 busy(false)
             }
         }
     }
 
+    /** 4 列图标格：格宽 = 内容宽 / 4，图标占格宽 ~46%（与桌面网格同观感）。 */
     private fun render() {
-        rows.removeAllViews()
-        entries.forEach { entry ->
-            val row =
-                LinearLayout(this).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    minimumHeight = dp(76)
-                    setPadding(dp(14), dp(10), dp(10), dp(10))
-                    background = getDrawable(R.drawable.bg_app_row)
-                }
-            val open =
-                LinearLayout(this).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    isFocusable = true
-                    contentDescription = getString(R.string.recent_open_app, entry.title)
-                    setOnClickListener { if (!busy) open(entry) }
-                }
-            open.addView(
-                ImageView(this).apply {
-                    setImageBitmap(entry.icon)
-                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                },
-                LinearLayout.LayoutParams(dp(44), dp(44)),
-            )
-            open.addView(
-                text(entry.title, 18f).apply {
-                    maxLines = 1
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(dp(14), 0, dp(14), 0)
-                },
-                LinearLayout.LayoutParams(0, dp(52), 1f),
-            )
-            row.addView(open, LinearLayout.LayoutParams(0, -2, 1f))
-            row.addView(
-                button(getString(R.string.recent_close)) { close(setOf(entry.component.packageName)) }.apply {
-                    contentDescription = getString(R.string.recent_close_app, entry.title)
-                },
-            )
-            rows.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
-        }
+        grid.removeAllViews()
+        empty.visibility = if (entries.isEmpty()) View.VISIBLE else View.GONE
+        empty.text = getString(R.string.recent_empty)
+        if (entries.isEmpty()) return
+        val contentWidth = resources.displayMetrics.widthPixels - dp(32)
+        val cellWidth = contentWidth / COLUMNS
+        val iconSize = (cellWidth * 0.46f).toInt().coerceIn(dp(48), dp(96))
+        val badge = (iconSize * 0.30f).toInt().coerceAtLeast(dp(22))
+        entries.forEach { entry -> grid.addView(cell(entry, iconSize, badge), GridLayout.LayoutParams().apply { width = cellWidth }) }
+    }
+
+    private fun cell(
+        entry: Entry,
+        iconSize: Int,
+        badge: Int,
+    ): View {
+        val cell =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(0, dp(10), 0, dp(10))
+                isFocusable = true
+                contentDescription = getString(R.string.recent_open_app, entry.title)
+                setOnClickListener { if (!busy) open(entry) }
+            }
+        // 图标 + 左上角关闭徽标（徽标向外溢出一半，压在图标角上）
+        val iconFrame = FrameLayout(this).apply { clipChildren = false }
+        val inset = badge / 3
+        iconFrame.addView(
+            ImageView(this).apply {
+                setImageBitmap(entry.icon)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            },
+            FrameLayout.LayoutParams(iconSize, iconSize).apply {
+                leftMargin = inset
+                topMargin = inset
+            },
+        )
+        iconFrame.addView(
+            TextView(this).apply {
+                text = "−"
+                textSize = 16f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+                background =
+                    GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(0xF02C2C2E.toInt())
+                        setStroke(dp(1), 0x66FFFFFF)
+                    }
+                isFocusable = true
+                contentDescription = getString(R.string.recent_close_app, entry.title)
+                setOnClickListener { if (!busy) close(setOf(entry.component.packageName)) }
+            },
+            FrameLayout.LayoutParams(badge, badge, Gravity.TOP or Gravity.START),
+        )
+        cell.addView(iconFrame, LinearLayout.LayoutParams(iconSize + inset, iconSize + inset))
+        cell.addView(
+            TextView(this).apply {
+                text = entry.title
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setShadowLayer(dp(2).toFloat(), 0f, dp(1).toFloat(), 0x99000000.toInt())
+            },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) },
+        )
+        return cell
     }
 
     private fun open(entry: Entry) {
@@ -198,7 +298,7 @@ class RecentAppsActivity : AppCompatActivity() {
                     finishAndRemoveTask()
                 } else {
                     busy(false)
-                    status.setText(R.string.recent_open_failed)
+                    showStatus(getString(R.string.recent_open_failed))
                 }
             }
         }
@@ -215,5 +315,9 @@ class RecentAppsActivity : AppCompatActivity() {
                 load(if (ok) null else getString(R.string.recent_close_failed))
             }
         }
+    }
+
+    private companion object {
+        const val COLUMNS = 4
     }
 }

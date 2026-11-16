@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- MD3 导航栏选中项的指示胶囊（secondaryContainer） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/m3_sec_container" />
+    <corners android:radius="16dp" />
+</shape>

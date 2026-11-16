@@ -58,12 +58,12 @@ object DisclaimerDialog {
         renderSections(activity, sections)
 
         if (requireAcceptance) {
-            subtitle.text = "首次使用前请完整阅读。接受后可在主界面底部随时重看。"
+            subtitle.text = activity.getString(R.string.disclaimer_subtitle_first)
         } else {
-            subtitle.text = "你可以随时回来查看本声明（当前版本 v${DisclaimerPrefs.CURRENT_VERSION}）。"
+            subtitle.text = activity.getString(R.string.disclaimer_subtitle_view, DisclaimerPrefs.CURRENT_VERSION)
             btnDecline.visibility = View.GONE
             btnAccept.isEnabled = true
-            btnAccept.text = "关闭"
+            btnAccept.text = activity.getString(R.string.disclaimer_close)
             blockHint.visibility = View.GONE
         }
 
@@ -103,15 +103,25 @@ object DisclaimerDialog {
                 val countdownDone = remainingMs <= 0L
                 val enabled = canAcceptDisclaimer(countdownDone, contentScrollable, scrolledToBottom)
                 btnAccept.isEnabled = enabled
-                btnAccept.text = if (countdownDone) "接受" else "接受（${remainingSeconds}s）"
+                btnAccept.text =
+                    if (countdownDone) {
+                        activity.getString(R.string.disclaimer_accept)
+                    } else {
+                        activity.getString(R.string.disclaimer_accept_wait, remainingSeconds)
+                    }
                 val reason =
                     disclaimerBlockReason(
                         countdownDone = countdownDone,
                         contentScrollable = contentScrollable,
                         scrolledToBottom = scrolledToBottom,
-                        remainingSeconds = remainingSeconds,
                     )
-                blockHint.text = reason.orEmpty()
+                blockHint.text =
+                    when (reason) {
+                        DisclaimerBlock.SCROLL_AND_WAIT -> activity.getString(R.string.disclaimer_hint_scroll_wait, remainingSeconds)
+                        DisclaimerBlock.WAIT -> activity.getString(R.string.disclaimer_hint_wait, remainingSeconds)
+                        DisclaimerBlock.SCROLL -> activity.getString(R.string.disclaimer_hint_scroll)
+                        null -> ""
+                    }
                 blockHint.visibility = if (reason == null) View.GONE else View.VISIBLE
             }
 
@@ -164,7 +174,7 @@ object DisclaimerDialog {
         val density = activity.resources.displayMetrics.density
         DisclaimerContent.sections.forEachIndexed { index, section ->
             val title = TextView(activity)
-            title.text = section.title
+            title.text = activity.getString(section.title)
             title.setTextColor(activity.getColor(R.color.m3_primary))
             title.textSize = 13.5f
             title.setTypeface(title.typeface, android.graphics.Typeface.BOLD)
@@ -172,7 +182,7 @@ object DisclaimerDialog {
             container.addView(title)
 
             val body = TextView(activity)
-            body.text = section.body
+            body.text = activity.getString(section.body)
             body.setTextColor(activity.getColor(R.color.m3_on_var))
             body.textSize = 12.5f
             body.setLineSpacing(4 * density, 1f)

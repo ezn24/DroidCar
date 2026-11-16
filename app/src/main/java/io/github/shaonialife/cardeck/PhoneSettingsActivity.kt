@@ -69,6 +69,7 @@ class SettingsContentActivity :
     AppCompatActivity(),
     SettingsToastHost {
     override fun onCreate(savedInstanceState: Bundle?) {
+        // 面板颜色走主题属性（panel*）：手机与车机（竖屏转发）都随手机深浅色与系统主色
         super.onCreate(savedInstanceState)
         val menuId = intent.getIntExtra(EXTRA_MENU, SettingsMenus.DESKTOP)
         setContentView(R.layout.activity_settings_content)

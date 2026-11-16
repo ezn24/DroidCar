@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 手机侧「车机设置」菜单卡片：图标 tile + 标题/描述 + 箭头 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:layout_marginTop="6dp"
@@ -25,7 +26,8 @@
             android:layout_width="20dp"
             android:layout_height="20dp"
             android:layout_gravity="center"
-            android:importantForAccessibility="no" />
+            android:importantForAccessibility="no"
+            app:tint="@color/m3_primary" />
     </FrameLayout>
 
     <LinearLayout
@@ -58,5 +60,6 @@
         android:layout_width="22dp"
         android:layout_height="22dp"
         android:importantForAccessibility="no"
-        android:src="@drawable/ic_chev_right" />
+        android:src="@drawable/ic_chev_right"
+        app:tint="@color/m3_on_var" />
 </LinearLayout>

@@ -1,305 +1,109 @@
-# CarDeck Neo
+<p align="center">
+  <img src="docs/images/icon.svg" width="120" alt="CarDeck Neo 圖示">
+</p>
 
-CarDeck Neo 是基於 [CarDeck](https://github.com/shaonialife/cardeck) 的介面改版。它讓 Android 手機透過無線 CarPlay 連接相容車機，顯示 CarDeck 的地圖、媒體及應用頁。
+<h1 align="center">CarDeck Neo</h1>
 
-## 主要改動
-
-- **分屏與操作**：
-  - 連線後直接進入地圖與媒體分屏。兩區採固定 3:1 比例，分屏與應用頁可滑動切換（在媒體卡或空白處滑）。地圖卡可直接操作，不需要先展開全屏。要交換兩區的位置，前往 **車機設定 → 顯示 → 對調地圖與音樂位置**。
-- **地圖**：
-  - 預設地圖會記住最後使用的地圖：在主畫面打開其他地圖 App 即切換到分屏，下次連線也沿用它。
-  - 也可以在 **車機設定 → 預設地圖** 手動選擇，或點 **選擇其他已安裝應用…** 搜尋。
-- **媒體**：
-  - 點分屏的媒體卡即可開啟音樂 App，再點右下角的浮動按鈕返回播放控制。
-- **Dock 背景應用與桌面管理**：
-  - 點 Dock 的 **背景應用**，可查看本次連線開過的 App、切換 App 或關閉車機視窗。要更改應用頁顯示哪些 App，前往 **車機設定 → 管理桌面應用**，用搜尋欄找到 App 並勾選或取消勾選。
-- **語言與通知**：
-  - 在 **車機設定 → 顯示 → 語言** 可選擇繁體中文、簡體中文、英文或跟隨系統。在 **車機設定 → 顯示** 開啟 **顯示車機通知橫幅**，即可在車機上看到通知。
-- **語音助理（實驗性）**
-  - 支援喊出 Gemini （OK Google）時在車機界面渲染語音助理的動畫以及界面
-- 整體的效能優化以及適配的界面美化
-
-在專案根目錄建置 Neo 的 Android 偵錯版：
-
-```powershell
-.\gradlew.bat :app:assembleStandardDebug
-.\gradlew.bat :app:testStandardDebugUnitTest :app:lintStandardDebug
-```
-
-APK 位於 `app/build/outputs/apk/standard/debug/`。詳細操作及建置環境見 [儀表板使用說明](docs/DASHBOARD-UX.md)。下方的上游下載連結提供 CarDeck 原版。
+<p align="center">
+  讓 Android 手機以無線 CarPlay 連上車機，顯示地圖、音樂與 App 的車機桌面<br>
+  <b>繁體中文</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.en.md">English</a>
+</p>
 
 ---
 
-让一台普通 Android 手机（未 root）扮演 **CarPlay 发送端（iPhone 角色）**，
-把 app 自绘界面投到支持 CarPlay 的车机上。
+CarDeck Neo 是 [CarDeck](https://github.com/shaonialife/cardeck) 的介面改版。手機（不需 root）扮演 CarPlay 發送端，把自繪的車機桌面與手機上的 App 投到支援無線 CarPlay 的車機上，車機觸控再回傳到手機操作。
 
-> **非官方项目**：本项目为个人实验性作品，与 Apple Inc. 及任何汽车制造商均无关联，
-> 未获授权或认证，**不是 MFi 产品**。CarPlay / AirPlay 是 Apple Inc. 的商标，
-> 文中出现仅用于说明兼容目标。
+> **非官方專案**：與 Apple Inc. 及任何汽車製造商無關，未獲授權或認證，**不是 MFi 產品**。CarPlay / AirPlay 是 Apple Inc. 的商標，僅用於說明相容目標。
 >
-> **驾驶安全**：仅限停车时配置与操作；行驶中断连可能导致导航中断，请以原厂导航为安全冗余。
->
-> 完整条款见 [DISCLAIMER.md](DISCLAIMER.md)（与应用内首次启动的免责声明同源）。
+> **駕駛安全**：只在停車時連線與設定；行駛中可能斷線，請以原廠導航作為安全備援。完整條款見 [DISCLAIMER.md](DISCLAIMER.md)。
 
-## 结论先行（可行性）
+## 畫面預覽
 
-- **方向与 DiPlay/xcertplay 相反**：它们是接收端（车机角色）；本项目是发送端。
-  **DiPlay 是 xcertplay 的衍生版，也是本项目实际使用的测试台**；`reference/`
-  里两者的源码都留作参考（协议知识在 iAP2/链路层/Bonjour 层共享，角色逻辑互不包含）。
-- **发送端不需要苹果签名身份**：iAP2 认证是单向的（手机验证车机的 MFi 证书，
-  车机信任手机自报结果，Oligo Security DEF CON 2025 已公开证实）。
-- **有线 USB 路线已排除**（app 无法控制 USB gadget，荣耀无法解锁 BL），
-  只走无线：蓝牙 RFCOMM → 车机热点 → mDNS → iAP2/AirPlay。
-- 详细协议依据见 [docs/PROTOCOL-NOTES.md](docs/PROTOCOL-NOTES.md)。
+### 車機
 
-## 上游 CarDeck 下載與安裝
+<p align="center">
+  <img src="docs/screenshots/car-1920x720.png" alt="車機儀表板 1920×720">
+  <br><sub>儀表板：左邊地圖可直接操作，右邊音樂控制（1920×720）</sub>
+</p>
 
-**推荐：GitHub Release**（可直接下载、附 SHA-256 与签名指纹）：
-[Releases](https://github.com/shaonialife/cardeck/releases/latest)
+<p align="center">
+  <img src="docs/screenshots/car-gemini-1920x720.png" alt="車機上的 Gemini">
+  <br><sub>說「Hey Google」，Gemini 直接顯示在車機上，可觸控操作（實驗性）</sub>
+</p>
 
-**国内备用：百度网盘**（国内访问 GitHub 慢时用）
+### 不同解析度與比例
 
-> 通过网盘分享的文件：CarDeck
-> 链接: https://pan.baidu.com/s/1RQoDzFBermUobakZ0d0e3Q?pwd=xc5i
-> 提取码: xc5i
+版面會依車機解析度自動調整：寬螢幕左右分屏，窄螢幕把 Dock 移到底部，讓地圖有更多空間。
 
-安装前请确认：
+| 1280×720（16:9） | 960×540（16:9） |
+| :---: | :---: |
+| <img src="docs/screenshots/car-1280x720.png" alt="1280×720"> | <img src="docs/screenshots/car-960x540.png" alt="960×540"> |
+| **800×480（5:3）** | **1280×488（8:3）** |
+| <img src="docs/screenshots/car-800x480.png" alt="800×480"> | <img src="docs/screenshots/car-1280x488.png" alt="1280×488"> |
 
-- **Android 14+**（`应用横屏` 功能依赖 SDK 34 起的平台 ChangeId，13 及更早不可用）
-- 已安装并**启动** **Shizuku**（无线调试激活，免 root）——本应用的虚拟屏、触摸注入、
-  窗口状态读取全部经它完成，未就绪时无法连接
-  - 官网（含分步骤激活指南）：https://shizuku.rikka.app/
-  - GitHub（版本与更新说明）：https://github.com/RikkaApps/Shizuku
-- 首次启动会显示免责声明，需滑到底并等待 10 秒后才能接受
+### 手機
 
-> 两个渠道提供的是同一个构建产物（官方 release 密钥签名）。网盘无法自动校验，
-> 建议下载后用 `apksigner verify --print-certs <apk>` 核对证书指纹是否与 Release
-> 备注里公布的一致（SHA-256 `9457d04d2709094404a534ba06d7ecbc53cb1406224ec7c53c05a9c67ccc4970`），
-> 不一致就不要安装。
+<p align="center">
+  <img src="docs/screenshots/phone-home.png" width="300" alt="手機主頁">
+  <br><sub>手機主頁（Material Design 3，深淺色跟隨手機、主色跟隨系統桌布）</sub>
+</p>
 
-## 路线图与 Go/No-Go
+## 功能
 
+- **儀表板**：連線後直接進入地圖與音樂分屏。地圖卡可以直接拖動、縮放；從儀表板往左拖可翻到應用頁，頁面跟著手指移動。翻頁時不會誤觸音樂卡。
+- **依解析度自動排版**：寬螢幕（如 1920×720）左右分屏；窄螢幕（如 800×480、16:9）預設 Dock 在底部，也可以在設定改回左右分屏。
+- **地圖**：記住最後使用的地圖 App，下次連線沿用；也可以在 **車機設定 → 預設地圖** 手動選擇任何已安裝的 App。
+- **音樂**：點音樂卡開啟音樂 App；方向盤媒體鍵可切歌。
+- **聲音走車機**：Shizuku 就緒時直接擷取系統播放的聲音，不需要螢幕錄製授權彈窗；只擷取播放的聲音，不使用麥克風。
+- **Gemini 上車（實驗性）**：說「Hey Google」時，Gemini 的浮層與動畫直接顯示在車機上，可觸控操作。
+- **Dock**：顯示時間、訊號、Wi-Fi 與電量（充電時顯示綠色），背景應用可從主畫面的「背景應用」切換或關閉。
+- **車機桌布**：內建多款桌布，深色與淺色模式可分別設定，跟隨手機自動切換；也能從相簿選圖。
+- **手機介面**：Material Design 3，底部分為「連線 / 車機 / 診斷」三頁；深淺色跟隨手機，主色跟隨系統。
+- **多語言**：繁體中文、簡體中文、英文，可在 **車機設定 → 顯示 → 語言** 切換。
+- **車機畫面截圖**：在「診斷」頁一鍵把目前車機畫面存成 PNG（存到「下載/CarDeck」）。
 
-| 阶段    | 内容                                                 | 门槛                          | 状态                                                                               |
-| ------- | ---------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------- |
-| Phase 0 | 测试台 + 网络层 demo（本仓库）                       | 两台手机 mDNS 互发现          | ✅ 已验收（DiPlay 测试台）                                                         |
-| Phase 1 | iAP2 发送端会话（链路状态机 + 0x1D00/0x5702/0x4300） | 接收端日志显示「iPhone 接入」 | ✅ 已验收：完整走通至 0x4301，拿到热点凭据与 AirPlay 端点                          |
-| Phase 2 | AirPlay 主会话（PairVerify + H.264 编码 + HID 回传） | 备用机显示本机画面并可触摸    | ✅ 已验收（2026-10-08 23:17）：30fps 推流+渲染、触摸事件回传打通                   |
-| Phase 3 | 真车（奥迪 MIB3）验证                                | 车机点亮                      | ✅**全通（2026-10-11）**：视频稳定上屏 + 车机触摸/滑动可交互（详见下方 Phase 3-C） |
-| 兜底    | 买 Tbox 安卓盒子，把同一套自绘 UI 装进盒子           | —                            | 不需要（真车路线已通）                                                             |
+## 需求
 
-**Phase 3-C 全通（2026-10-11，奥迪实车验收）**：iAP2 → AirPlay 配对 → 视频推流 →
-触摸回传 → 虚拟屏注入全链路可交互。本日攻坚战果（细节见 `docs/PROTOCOL-NOTES.md` §9c）：
+- Android 12 以上的手機（「應用橫屏」功能需要 Android 14 以上）
+- 已安裝並啟動 [Shizuku](https://shizuku.rikka.app/)（以無線偵錯啟用，不需 root）。虛擬螢幕、觸控注入與聲音擷取都經由它完成，未就緒時無法連線
+- 支援無線 CarPlay 的車機，且手機已與車機完成藍牙配對
 
-1. **AirPlay 配对 403 破案**：配对请求缺 Apple 标识头（`Content-Type: application/pairing+tlv8` +
-   `X-Apple-HKP: 2`、pair-verify 加 `X-Apple-PD: 1`，对照 catplay PairingHelperTx 逐字）。
-   补齐后 pair-setup/pair-verify 全 200，车机保存长期公钥。
-2. **屏幕流 400 破案**：SETUP 必须通告**真实 UDP 计时端口**（TimingServer，RTCP NTP 应答）
-   且 features 发**完整 iPhone 能力清单**（接收端按「车机支持 ∩ 手机提议」算交集，
-   只提 videoPlayback 会得到空集 → 视频管线不启用）；modesChanged 资源声明先行；
-   UA/sourceVersion 用 iPhone 自报值（566.25.21），勿用车机的。
-3. **会话 10s 拆链破案**：双心跳缺一不可——keepAlive UDP ping（车机 keepAlivePort，10s 周期）
-   + `POST /feedback`（1s 周期，catplay FEEDBACK_INTERVAL）。
-4. **触摸链路（本日最后战场，五连破）**：
-   - 车机命令必须走**事件通道 socket** 上的 `POST /command`（fire-and-forget、独立 CSeq、
-     Events 密钥），发在 RTSP 控制连接上车机收不到（DiPlay sendCommandLocked 实证）
-   - `hidSetInputMode`（uuid 原样字符串回传）武装 HID 后车机才开始发触摸
-   - 奥迪 `/info hidDevices[].uuid` 是**字符串** "0"/"1"（触摸=uuid 1 eso_touchScreen，
-     报文 5 字节 `[tip 1bit][X u16LE][Y u16LE]`，坐标上限 1412×654=屏幕分辨率）
-   - 事件通道是双向 RTSP：**每条来向请求立即回 200**，否则车机请求管道塞满判通道死亡
-     （表现为「能滑一下就断」）
-   - 事件通道 `iAPSendMessage` 承载车机发起的**虚拟 iAP2 链路**（marker=DETECT 一问一答，
-     车机是客户端发 SYN——服务器重发 DETECT 会把它打回 Detecting）
-5. **稳定性三修**：BT 客户端线程世代号（防僵尸并发）、ctrl mDNS 注册跟随网络绑定
-   （换网/绑定后 force 重注册，listener 每次新建）、mDNS 结果按车机网段过滤
-   （防手机热点共享把电脑 AirPlay 当车机）。
-6. **调试流程坑（记一辈子）**：`adb install -r` 不杀旧进程——旧 dex 继续跑，
-   「修复无效」时先 force-stop 重启；验证时进程代次（`ps -T` 线程数）
-   与 APK 内字符串（解包 dex grep）都要查。
+## 使用方式
 
-**Phase 3 实车突破（2026-10-09，Audi_MMI_6318 / MHI3_AS_AU_P3801，见 `docs/PROTOCOL-NOTES.md` §9b）**：
-与测试台（DiPlay）相比，奥迪 MIB3 有六处关键差异，逐一修正后 iAP2 全链路首次贯通：
+1. 安裝 CarDeck Neo，首次開啟時閱讀並接受免責聲明。
+2. 啟動 Shizuku，並在 CarDeck Neo 主頁授權。
+3. 在車機上打開無線 CarPlay（配對模式），回到手機點 **啟動連線**。
+4. 連線後車機會顯示儀表板。車機相關設定可在手機「車機」頁或車機上的設定 App 調整。
 
-1. 车机**主动发 SYN** 声明会话表 `{1:control, 2:EA}`，手机必须 ACK+原样回显，
-   之后 CSM 走 **1 号会话**（发 10 号被车机静默丢弃，而链路层照常 ACK——极具迷惑性）
-2. **MFi 挑战必须 20 字节**（32B 车机完全不应答；测试台 DiPlay 反而要 32B → 做成 32/20/16 回退）
-3. 车机**不发 0x4301**（识别帧能力清单实锤：可收 0x4e0c/0x4e09/0x4e0d/0x4e0e/0x5702/0xea00/0xea01、
-   可发 0x5703/0xea03）→ AirPlay 端点只能走 WiFi 上 **mDNS `_airplay._tcp`** 发现
-4. **ctrl 邀请死锁**：车机在 WiFi 上发现手机 `_carplay-ctrl._tcp` 并 `GET /ctrl-int/1/connect`
-   邀请后才开放 AirPlay 窗口 → 手机必须**在 0x5703 到达时立即**绑热点+广播 ctrl
-5. ctrl TXT `id` 必须是**真实蓝牙 MAC**（Shizuku shell 读 `settings secure bluetooth_address`；
-   应用层 API 只有占位 `02:00:…`，占位值导致车机不邀请 → 双向死锁）
-6. pair-setup 被 **403**（奥迪不接受匿名 SRP 配对）→ 转「已配对设备」pair-verify 快路径；
-   且**绝不能**断 BT 控制会话（测试台 detach hack 会让奥迪拆掉整轮会话）
+## 從原始碼建置
 
-**Phase 1 真机调试记录（2026-10-08，DiPlay on Redmi K40）**：
+需要 JDK 17 與 Android SDK。在專案根目錄執行：
 
-1. `StreamDuplexStream` 读写共享锁导致死锁（读阻塞持锁，写永远等待）→ 读写分离
-2. MFi 挑战 16 字节被拒（Carlinkit EC 身份走 AuthV3，要求**精确 32 字节**）→ 已修
-3. 参考代码（xcertplay）在订阅后发 0x6800 StartHID；**实际测试台 DiPlay 不发**（订阅完直接等 0x5702）→ 改为 2 秒可选等待
-
-**Phase 2 里程碑 A：AirPlay 配对打通（2026-10-08 22:58）**——蓝牙保持连接状态下一次通过：
-`/info` 前哨 87ms 应答 → pair-setup（SRP 固定码 3939，M1/M3/M5）→ pair-verify（M1/M3，
-接收端 ed25519 签名对照 mDNS `pk` 校验通过）→ 控制通道 ChaCha20 密钥派生。
-DiPlay 侧 logcat 确认：5 个 POST 全部处理，随即 `airplay control encryption enabled`，
-之后耐心等待 23 秒（等加密的 SETUP/事件通道）才重置。
-
-**调试教训（值得记一辈子的一个）**：「RTSP 无应答」曾归因于接收端状态门禁/时序竞争，
-最终真凶是**客户端读缓冲 bug**——响应头和 body 在同一次 read 到达，`readExactly` 却去
-流里等已消费的字节。**在下结论「对端不理我」之前，先用对端日志/抓包验证字节是否到达、
-自己的读取路径是否正确。**
-
-**Phase 2 全链路验收（2026-10-08 23:17）**：控制面（蓝牙 iAP2 → pair-setup/verify →
-加密 RTSP → SETUP → 事件通道 → 流协商 → RECORD）+ 数据面（MediaCodec H.264 →
-128 字节头+ChaCha20 帧封装 → TCP 推流）。接收端实测 rx=shown=29.6fps、decode p50=6ms、
-touch2frame 18ms、recoveries=0。
-
-**触摸闭环验收（2026-10-09 10:20）**：事件通道命令解析（RtspAccumulator + plist）→
-hidSendReport 双槽报文解析（u16LE 像素坐标）→ UI 命中测试。真机确认：按住高亮、
-松开熄灭、计数递增、坐标实时刷新；拖动轨迹完整。注意坑：报文第二槽是
-`(0,0)↑` 空闲占位，必须过滤，否则覆盖真实手指状态。
-
-**音频通道（2026-10-10）**：SETUP type=100 协商 UDP 音频流 → `AudioPlaybackCapture`
-捕获本机媒体/导航声音 → PCM 48k 立体声按 RTP+ChaCha20 封包推流（每包 512 帧）。
-密钥与视频同规则（`DataStream-Salt<connId>`）；需要 MediaProjection + RECORD_AUDIO
-授权（点「申请投屏权限」时一并请求）。已单测（解密回环 3 用例），待真机验证。
-剩余：麦克风上行（通话）、正式车机桌面 UI 完善、真车（Phase 3）。
-
-## 测试台搭建（Phase 0 使用说明）
-
-1. **备用安卓手机**（Android 9+）：从 [DiPlay releases](https://github.com/shihabal3amri/DiPlay/releases)
-   下载 APK 安装——它是我们的「虚拟车机」（接收端）。
-   （DiPlay 是 xcertplay 的衍生版，更活跃；`reference/` 里两份源码都留作参考。）
-2. **两台手机系统级蓝牙配对**（设置里直接配对即可，这是 DiPlay 回连的前提）。
-3. **本 app 安装到荣耀手机**：
-   ```bash
-   ./gradlew assembleDebug
-   adb install app/build/outputs/apk/debug/app-debug.apk
-   ```
-4. 按界面四步操作：
-   - **③ 启动蓝牙 iAP2 监听**：监听 iPhone UUID，等 DiPlay 回连。
-     连上后日志会十六进制转储入向字节——看到 `ff 55 02 00 …` 即链路层 SYN，
-     Phase 0 的核心验证点；
-   - 备用机 DiPlay 选无线模式（热点/局域网），开启后它会扫描已配对手机并回连；
-   - **① 加入热点**：输入 DiPlay 显示的 SSID（系统弹窗输密码）；
-   - **② 扫描 _airplay._tcp**：应解析出备用机的 AirPlay 端点 + TXT（deviceid/features/pi/pk）；
-   - **④ 广播 _carplay-ctrl._tcp**：验证 DiPlay 能发现并反连手机控制通道。
-5. DiPlay 的发布版内置了从 Carlinkit 固件提取的实验性配件身份（其 README 已声明），
-   即可走完 MFi 认证（我们的发送端跳过校验）。若需自备 MFi 身份（芯片/本地证书/
-   远程服务三种途径），见 xcertplay README。
-
-## 工程结构
-
-```
-app/src/main/java/com/lizhihua/carplaysender/
-├── MainActivity.kt                 # 手机侧操作台 UI（连接/声音/暗幕/日志/免责声明入口）
-├── SessionController.kt            # 会话总管（进程级单例）：链路生命周期、配对、WiFi、取消
-├── SenderApp.kt                    # Application（未捕获异常兜底、包变化失效缓存）
-├── iap2/                           # iAP2 链路层 + CSM + 发送端会话
-├── airplay/                        # AirPlay 配对/控制通道/流协商/流加密/Timing
-├── audio/AudioSender.kt            # 音频通道（播放捕获 → RTP/ChaCha20 over UDP）
-├── video/VideoSender.kt            # H.264 编码推流
-├── bt/                             # RFCOMM 双向（Server 等回连 / Client 真车主动连）+ 目标设备
-├── launcher/                       # 隐形屏启动器（dock + 应用网格 + 地图屏；含 letterbox 提示）
-│   └── settings/                   # 设置面板 Fragment（车机双栏与手机二级菜单共用）
-├── render/DualDisplayComposer.kt   # EGL 多屏合成 → 编码 Surface（含叠加卡片层）
-├── input/                          # 触摸分流（dock/应用屏/地图屏直注）+ 消费键
-├── capture/                        # 隐形屏画面源
-├── shizuku/                        # Shizuku 桥（shell 权限 / 触摸注入 / 受信虚拟屏 AIDL）
-├── net/                            # WiFi 入网 / mDNS 发现与 ctrl 广播
-├── media/                          # 通知使用权 → 媒体会话（音乐卡数据源）
-├── service/CarPlayService.kt       # 前台保活服务（连接/投屏 FGS 类型）
-├── transport/                      # 传输层封装
-├── ui/                             # 暗幕、波形图、壁纸、深色弹窗、面板窗口尺寸
-├── legal/                          # 免责声明（内容/接受状态/弹窗）
-└── util/                           # Bg（后台任务池）等工具
-docs/PROTOCOL-NOTES.md              # 协议知识库（分层格式/时序/参考索引）
-docs/CARLIFE-GATEWAY-FEASIBILITY.md # 另一条路线的可行性调研（CarLife 网关）
-reference/                          # 参考仓库（gitignore，不入库不分发）
+```powershell
+.\gradlew.bat :app:assembleStandardDebug
 ```
 
-## 代码质量（提交前自动拦截）
+```powershell
+.\gradlew.bat :app:testStandardDebugUnitTest :app:lintStandardDebug
+```
 
-提交（`git commit`）前 pre-commit 钩子（`.githooks/pre-commit`，经 `core.hooksPath` 启用）
-会自动执行两步，任一失败即阻止提交：
-
-1. **代码格式化**：Spotless + ktlint（Kotlin 官方代码风格，规则在根目录 `.editorconfig`）。
-   暂存过的 `.kt`/`.kts` 会被自动格式化并重新暂存，无需手工处理；
-2. **Android Lint**：`lintDebug` 全量检查，error 级问题使提交失败。
-
-手工命令：
+偵錯版 APK 位於 `app/build/outputs/apk/standard/debug/`。安裝前請先停止正在執行的 App（連線中直接安裝，系統確認視窗可能會跑到車機畫面上）：
 
 ```bash
-./gradlew spotlessApply             # 全量格式化
-./gradlew :app:lintDebug            # lint 检查（报告: app/build/reports/lint-results-debug.html）
-./gradlew :app:updateLintBaseline   # 修复问题后重建 lint 基线
+adb shell am force-stop io.github.shaonialife.cardeck
 ```
-
-存量 lint 问题（273 条，均为车机 UI 场景的有意取舍：硬编码中文文案、px 定位、RTL 等）
-记录在 `app/lint-baseline.xml` 中豁免；**新代码再引入同类问题仍会被拦截**。
-问题实际修复后基线条目自动失效；确认为误报可单独关闭对应 issue id，或评审后重建基线。
-全新克隆后需执行一次 `git config core.hooksPath .githooks` 启用钩子。
-
-## 构建与发布
 
 ```bash
-./gradlew :app:assembleStandardDebug    # 日常偵錯包
-./gradlew :app:assembleStandardRelease  # Release APK
-./gradlew :app:testStandardDebugUnitTest # 單元測試
+adb install -r app/build/outputs/apk/standard/debug/app-standard-debug.apk
 ```
 
-**版本號**：修改 `app/build.gradle.kts` 頂部的 `appVersionName`。Gradle 以 `major × 10000 + minor × 100 + patch` 算出基礎版本碼，再乘以 10,000。CI 將執行編號加到版本碼的最後四位。
+詳細操作與驗證方式見 [儀表板使用說明](docs/DASHBOARD-UX.md)；給開發者與 AI 助手的專案約定見 [AGENTS.md](AGENTS.md)。
 
-**GitHub Actions 簽名建置**（`.github/workflows/android-ci.yml`）會在推送到 `neo` 分支時執行。若預設分支也包含此工作流，可在 Actions 選取 `neo` 手動執行。單元測試與 Lint 通過後，流程建置 `standard` Release APK，驗證簽名，再把 `CarDeck-Neo-<版本>-release.apk` 上傳為 Artifacts。執行摘要包含 APK 的 SHA-256 與簽名憑證指紋。
+## 致謝與上游
 
-在 Neo 倉庫的 **Settings → Secrets and variables → Actions** 加入以下 Secrets：
+- 本專案基於 [shaonialife/cardeck](https://github.com/shaonialife/cardeck)。上游的協定研究、開發紀錄與測試台搭建說明保存在 [docs/UPSTREAM-README.md](docs/UPSTREAM-README.md)，協定細節見 [docs/PROTOCOL-NOTES.md](docs/PROTOCOL-NOTES.md)。
+- 上游 CarDeck 原版下載見 [上游 Releases](https://github.com/shaonialife/cardeck/releases/latest)。
 
+## 授權
 
-| Secret                         | 值                                 |
-| ------------------------------ | ---------------------------------- |
-| `KEYSTORE_BASE64`              | Release keystore 檔案的 Base64     |
-| `KEYSTORE_PASSWORD`            | keystore 密碼                      |
-| `KEY_ALIAS`                    | 簽名金鑰別名                       |
-| `KEY_PASSWORD`                 | 簽名金鑰密碼                       |
-| `EXPECTED_CERT_SHA256`（選用） | 預期的簽名憑證 SHA-256，供流程比對 |
-
-PowerShell 可用 `[Convert]::ToBase64String([IO.File]::ReadAllBytes("cardeck-release.jks"))` 取得 Base64。缺少必要 Secrets 時，簽名建置會失敗。Actions 以執行編號作為版本後綴，例如 `0.1.39.12`。同簽名的 Release APK 可依版本號覆蓋安裝。
-
-**签名**：本地 `assembleRelease` 在没有 `keystore.properties` 时退回 **debug 签名**
-（只给 fork 者试装；CI 带构建号的构建会直接报错），正式对外分发前请配置真实签名：
-
-1. 复制 `keystore.properties.example` → `keystore.properties`（已 gitignore）；
-2. `keytool -genkeypair -v -keystore cardeck-release.jks -alias cardeck -keyalg RSA -keysize 4096 -validity 10000`；
-3. 填好密码后重新 `assembleRelease`，用 `apksigner verify --print-certs` 确认证书 CN 不是 `Android Debug`。
-
-> ⚠️ 私钥泄露 = 任何人可签发能覆盖安装的更新；私钥丢失 = 已安装用户再也收不到更新
-> （只能让所有人卸载重装）。keystore 与密码绝不入库、绝不外发。
-
-## 边界
-
-- **产品形态是隐形屏启动器**（受信虚拟屏跑手机应用 + dock 常驻），不是整机镜像；
-  车机触摸经 Shizuku 直注虚拟屏（2026-10-10 起桌面/镜像两种模式已移除）。
-- **许可证**：本项目源码以 [MIT](LICENSE) 发布。`reference/` 下参考项目
-  （xcertplay/DiPlay 为 GPL-3.0；**catplay 仓库未声明任何许可证**，默认保留所有权利）
-  **已被 `.gitignore` 排除、不随本仓库分发**，其许可义务不适用于本仓库；本项目为
-  独立实现，仅参考公开协议格式与真机抓包，不复制其代码。
-  勿分发固件提取的密钥或证书。
-- 真车验证前请先用可借到的 iPhone 与车机做一次正常无线配对留作对照。
-
-## 名称与商标
-
-- 应用名为 **CarDeck**，**不含**任何第三方商标。早期版本曾用「CarPlay 车机投屏」，
-  该名称已弃用——把商标用作产品名属商标性使用，容易被误认为官方产品。
-- 「CarPlay」「AirPlay」是 Apple Inc. 的商标；文中出现仅用于**说明兼容目标**
-  （描述性引用），不表示关联、赞助或认可。
-- 本项目**不使用** Apple 或任何车厂的图形标识、认证标（含 MFi）。
-- 包名 `io.github.shaonialife.cardeck` 同样不含第三方商标（采用 GitHub 用户名的
-  标准倒写形式）。从旧的 `com.lizhihua.carplaysender` 迁移过来属于**不兼容变更**：
-  系统视为不同应用，需卸载重装，Shizuku 授权与本地设置（含 AirPlay 配对身份）
-  都会重置，车机端也需重新配对。
-
-## 已知风险（详单见 PROTOCOL-NOTES.md §9）
-
-1. 奥迪 MIB2 在 catplay 兼容表中有断电前科；MIB3 全新未知。
-2. 真车可能要求先插 USB 才开放无线配对（测试台无此限制）——Phase 3 实测。
-3. WifiNetworkSpecifier 无法程序化传密码，每次入网需系统弹窗确认。
+[MIT License](LICENSE)。使用前請閱讀 [DISCLAIMER.md](DISCLAIMER.md)。

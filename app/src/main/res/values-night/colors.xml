@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 手机侧 MD3 深色令牌：主色/中性色跟随系统 Material You（scripts 生成：改色先改生成脚本的取值表，再整体重生） -->
+<resources>
+    <color name="m3_on_surface">@android:color/system_neutral1_100</color>
+    <color name="m3_on_var">@android:color/system_neutral2_200</color>
+    <color name="m3_outline">@android:color/system_neutral2_400</color>
+    <color name="m3_outline_var">@android:color/system_neutral2_700</color>
+    <color name="m3_primary">@android:color/system_accent1_200</color>
+    <color name="m3_on_primary">@android:color/system_accent1_800</color>
+    <color name="m3_pri_container">@android:color/system_accent1_700</color>
+    <color name="m3_on_pri_container">@android:color/system_accent1_100</color>
+    <color name="m3_sec_container">@android:color/system_accent2_700</color>
+    <color name="m3_on_sec_container">@android:color/system_accent2_100</color>
+    <color name="m3_inverse_primary">@android:color/system_accent1_600</color>
+    <color name="m3_error">#FFB4AB</color>
+    <color name="m3_err_container">#5C1A16</color>
+    <color name="m3_on_err_container">#FFDAD6</color>
+    <color name="m3_inverse">@android:color/system_neutral1_100</color>
+    <color name="m3_on_inverse">@android:color/system_neutral1_800</color>
+    <color name="m3_wave_idle">@android:color/system_neutral2_700</color>
+    <color name="m3_wave_connecting">@android:color/system_accent1_400</color>
+    <color name="m3_wave_connected">@android:color/system_accent1_300</color>
+    <color name="m3_orbit">@android:color/system_neutral2_800</color>
+    <color name="m3_ok">#7BD8A5</color>
+    <color name="m3_ok_dot">#58C08A</color>
+    <color name="m3_amber">#E8C072</color>
+    <color name="m3_console_text">#8FCFA4</color>
+    <color name="m3_console_bg">#0A0F10</color>
+    <color name="m3_console_stroke">@android:color/system_neutral2_800</color>
+    <color name="m3_mono_dim">@android:color/system_neutral2_300</color>
+    <color name="m3_mono_key">@android:color/system_accent1_300</color>
+    <color name="m3_ripple">#1FFFFFFF</color>
+    <color name="m3_hairline">#0AFFFFFF</color>
+    <color name="m3_ok_container">#1F58C08A</color>
+    <color name="m3_cta_disabled">@android:color/system_accent1_800</color>
+    <color name="m3_hero_stroke">@android:color/system_accent1_800</color>
+    <color name="m3_err_outline">#8CFFB4AB</color>
+    <color name="m3_count_bg">@android:color/system_accent1_800</color>
+    <color name="m3_hub_caption">@android:color/system_accent1_300</color>
+    <color name="m3_switch_thumb_off">@android:color/system_neutral2_400</color>
+    <color name="m3_plate">@android:color/system_neutral1_50</color>
+    <color name="m3_warn_container">#33E8C072</color>
+</resources>

@@ -14,7 +14,7 @@
         android:layout_marginTop="6dp"
         android:layout_marginBottom="11dp"
         android:text="@string/ui_104"
-        android:textColor="#FF8E8E93"
+        android:textColor="?attr/panelTextSecondary"
         android:textSize="12sp" />
 
     <!-- 能力不可用横幅：本机 ROM 未注册这两个 ChangeId（OEM 定制项）时显示，
@@ -24,12 +24,12 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginBottom="10dp"
-        android:background="#33E8C072"
+        android:background="?attr/panelWarnBg"
         android:paddingLeft="10dp"
         android:paddingTop="8dp"
         android:paddingRight="10dp"
         android:paddingBottom="8dp"
-        android:textColor="#FFE8C072"
+        android:textColor="?attr/panelWarn"
         android:textSize="11.5sp"
         android:visibility="gone" />
 
@@ -40,12 +40,12 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginBottom="10dp"
-        android:background="#33FF6B6B"
+        android:background="?attr/panelDangerBg"
         android:paddingLeft="10dp"
         android:paddingTop="8dp"
         android:paddingRight="10dp"
         android:paddingBottom="8dp"
-        android:textColor="#FFFF6B6B"
+        android:textColor="?attr/panelDanger"
         android:textSize="11.5sp"
         android:visibility="gone" />
 
@@ -61,7 +61,7 @@
             android:layout_marginTop="18dp"
             android:gravity="center"
             android:text="@string/ui_082"
-            android:textColor="#7C8B8B"
+            android:textColor="?attr/panelTextHint"
             android:textSize="12.5sp" />
 
         <androidx.recyclerview.widget.RecyclerView

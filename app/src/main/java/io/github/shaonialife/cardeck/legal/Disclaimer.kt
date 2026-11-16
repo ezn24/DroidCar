@@ -15,7 +15,7 @@ object DisclaimerPrefs {
      *
      * v2（2026-10-18）：应用改名 CarDeck，补「非官方」「非 MFi」与 MIT 开源说明。
      */
-    const val CURRENT_VERSION = 2
+    const val CURRENT_VERSION = 3
 
     private const val PREFS = "disclaimer"
     private const val KEY_ACCEPTED_VERSION = "accepted_version"
@@ -68,20 +68,20 @@ internal fun needsDisclaimerAtLaunch(
     currentVersion: Int,
 ): Boolean = acceptedVersion < currentVersion
 
+/** 「接受」暂不可点的原因（UI 按语言取文案）。 */
+internal enum class DisclaimerBlock { SCROLL_AND_WAIT, WAIT, SCROLL }
+
 /**
- * 底部提示文案（让用户知道「为什么按钮点不动」）。返回 null 表示可以点。
+ * 底部提示（让用户知道「为什么按钮点不动」）。返回 null 表示可以点。
  */
 internal fun disclaimerBlockReason(
     countdownDone: Boolean,
     contentScrollable: Boolean,
     scrolledToBottom: Boolean,
-    remainingSeconds: Int,
-): String? =
+): DisclaimerBlock? =
     when {
-        !countdownDone && contentScrollable && !scrolledToBottom ->
-            "请滑动阅读至底部，并等待 $remainingSeconds 秒"
-
-        !countdownDone -> "请等待 $remainingSeconds 秒后接受"
-        contentScrollable && !scrolledToBottom -> "请滑动阅读至底部"
+        !countdownDone && contentScrollable && !scrolledToBottom -> DisclaimerBlock.SCROLL_AND_WAIT
+        !countdownDone -> DisclaimerBlock.WAIT
+        contentScrollable && !scrolledToBottom -> DisclaimerBlock.SCROLL
         else -> null
     }

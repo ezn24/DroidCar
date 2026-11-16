@@ -48,12 +48,19 @@
         android:textStyle="bold"
         android:includeFontPadding="false" />
 
-    <!-- CarPlay 风格电池图标（高度由 DockActivity 按 designScale 设定） -->
+    <!-- CarPlay 风格状态行：信号圆点 + Wi-Fi，其下电池（高度由 DockActivity 按 designScale 设定） -->
+    <io.github.shaonialife.cardeck.ui.StatusGlyphsView
+        android:id="@+id/dockStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="10dp"
+        android:layout_marginTop="5dp"
+        android:layout_gravity="center_horizontal" />
+
     <io.github.shaonialife.cardeck.ui.BatteryGlyphView
         android:id="@+id/dockBattery"
         android:layout_width="wrap_content"
         android:layout_height="12dp"
-        android:layout_marginTop="4dp"
+        android:layout_marginTop="5dp"
         android:layout_gravity="center_horizontal" />
 
     <ScrollView
@@ -61,6 +68,7 @@
         android:layout_height="0dp"
         android:layout_weight="1"
         android:layout_marginTop="8dp"
+        android:fillViewport="true"
         android:scrollbars="none">
 
         <LinearLayout
@@ -68,24 +76,15 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:gravity="center_horizontal" />
+            android:gravity="center" />
     </ScrollView>
 
     <View
         android:layout_width="match_parent"
         android:layout_height="0.38dp"
         android:layout_marginBottom="1.52dp"
-        android:background="#3A3A3C" />
+        android:background="#99FFFFFF" />
 
-    <ImageView
-        android:id="@+id/dockRecents"
-        android:layout_width="match_parent"
-        android:layout_height="41.90dp"
-        android:background="?android:attr/selectableItemBackgroundBorderless"
-        android:contentDescription="@string/recent_apps"
-        android:padding="9.90dp"
-        android:scaleType="fitCenter"
-        android:src="@drawable/ic_recent_apps" />
 
     <ImageView
         android:id="@+id/dockHome"

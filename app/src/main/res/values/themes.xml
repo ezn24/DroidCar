@@ -5,17 +5,51 @@
          尤其突兀，看起来像没适配全面屏（2026-10-18 用户截图反馈）。
          假息屏遮罩是 APPLICATION_OVERLAY 窗口，只能覆盖内容区（系统栏由 SystemUI
          画在其上），所以系统栏颜色必须自身就是黑的才能与遮罩融为一体。 -->
+    <!-- 2026-11-17 MD3 重构：深浅色跟随手机、主色跟随系统 Material You。系统栏与页面同色；
+         暗幕盖住时由 MainActivity.applySystemBars 临时切回纯黑（见上条：遮罩盖不到系统栏）。 -->
     <style name="Theme.CarPlaySender" parent="Theme.AppCompat.DayNight.NoActionBar">
-        <item name="android:statusBarColor">#000000</item>
-        <item name="android:navigationBarColor">#000000</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
-        <item name="android:colorBackground">#101418</item>
+        <item name="android:statusBarColor">@color/m3_surface</item>
+        <item name="android:navigationBarColor">@color/m3_surface_low</item>
+        <item name="android:windowLightStatusBar">@bool/m3_light_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/m3_light_bars</item>
+        <item name="android:colorBackground">@color/m3_surface</item>
+        <item name="android:windowBackground">@color/m3_surface</item>
+        <item name="colorPrimary">@color/m3_primary</item>
+        <item name="colorAccent">@color/m3_primary</item>
+        <item name="colorControlActivated">@color/m3_primary</item>
+        <item name="panelTextPrimary">@color/m3_on_surface</item>
+        <item name="panelTextSecondary">@color/m3_on_var</item>
+        <item name="panelTextHint">@color/m3_outline</item>
+        <item name="panelHeader">@color/m3_primary</item>
+        <item name="panelAccent">@color/m3_primary</item>
+        <item name="panelOnAccent">@color/m3_on_primary</item>
+        <item name="panelRowBg">@color/m3_surface_low</item>
+        <item name="panelRipple">@color/m3_ripple</item>
+        <item name="panelSegmentBg">@color/m3_surface_highest</item>
+        <item name="panelControlOff">@color/m3_outline</item>
+        <item name="panelWarn">@color/m3_amber</item>
+        <item name="panelWarnBg">@color/m3_warn_container</item>
+        <item name="panelDanger">@color/m3_error</item>
+        <item name="panelDangerBg">@color/m3_err_container</item>
     </style>
 
     <!-- 车机桌面（dock/网格/设置）：窗口透明——壁纸由 GL 合成器画在最底层，
          Activity 不垫底色（否则壁纸被盖住） -->
     <style name="Theme.CarPlaySender.Launcher" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="panelTextPrimary">#FFF5F5F7</item>
+        <item name="panelTextSecondary">#FF8E8E93</item>
+        <item name="panelTextHint">#FF7C8B8B</item>
+        <item name="panelHeader">#FF636366</item>
+        <item name="panelAccent">#FF0A84FF</item>
+        <item name="panelOnAccent">#FFFFFFFF</item>
+        <item name="panelRowBg">#FF121215</item>
+        <item name="panelRipple">#1FFFFFFF</item>
+        <item name="panelSegmentBg">#FF1F1F23</item>
+        <item name="panelControlOff">#FF48484A</item>
+        <item name="panelWarn">#FFE8C072</item>
+        <item name="panelWarnBg">#33E8C072</item>
+        <item name="panelDanger">#FFFF6B6B</item>
+        <item name="panelDangerBg">#33FF6B6B</item>
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:colorBackground">@android:color/transparent</item>
         <item name="android:windowIsTranslucent">true</item>
@@ -27,8 +61,26 @@
 
     <!-- 车机设置：进入/退出用滑动转场（windowAnimationStyle 全版本可用，
          不依赖 API 34 已废弃的 overridePendingTransition） -->
+    <!-- 车机设置：MD3 深色（SettingsActivity 固定夜间模式，m3 令牌解析为深色 + 系统主色） -->
     <style name="Theme.CarPlaySender.Settings" parent="Theme.CarPlaySender.Launcher">
         <item name="android:windowAnimationStyle">@style/CarPlaySettingsAnimation</item>
+        <item name="colorPrimary">@color/m3_primary</item>
+        <item name="colorAccent">@color/m3_primary</item>
+        <item name="colorControlActivated">@color/m3_primary</item>
+        <item name="panelTextPrimary">@color/m3_on_surface</item>
+        <item name="panelTextSecondary">@color/m3_on_var</item>
+        <item name="panelTextHint">@color/m3_outline</item>
+        <item name="panelHeader">@color/m3_primary</item>
+        <item name="panelAccent">@color/m3_primary</item>
+        <item name="panelOnAccent">@color/m3_on_primary</item>
+        <item name="panelRowBg">@color/m3_surface_low</item>
+        <item name="panelRipple">@color/m3_ripple</item>
+        <item name="panelSegmentBg">@color/m3_surface_highest</item>
+        <item name="panelControlOff">@color/m3_outline</item>
+        <item name="panelWarn">@color/m3_amber</item>
+        <item name="panelWarnBg">@color/m3_warn_container</item>
+        <item name="panelDanger">@color/m3_error</item>
+        <item name="panelDangerBg">@color/m3_err_container</item>
     </style>
 
     <style name="Theme.CarPlaySender.Grid" parent="Theme.CarPlaySender.Launcher">
@@ -62,11 +114,15 @@
         <item name="android:statusBarColor">#000000</item>
         <item name="android:navigationBarColor">#000000</item>
     </style>
-    <style name="CarDeckAppPicker" parent="ThemeOverlay.AppCompat.Dark">
-        <item name="android:windowBackground">#FF121215</item>
-        <item name="android:colorBackground">#FF121215</item>
-        <item name="android:textColorPrimary">#FFF5F5F7</item>
-        <item name="android:textColorSecondary">#FF8E8E93</item>
-        <item name="colorAccent">#FF7BDAC8</item>
+    <!-- 设置里的选择弹窗：MD3 令牌（深浅色跟随宿主 Activity，主色跟随系统） -->
+    <style name="CarDeckAppPicker" parent="ThemeOverlay.AppCompat.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_picker_dialog</item>
+        <item name="android:colorBackground">@color/m3_surface_high</item>
+        <item name="android:textColorPrimary">@color/m3_on_surface</item>
+        <item name="android:textColorSecondary">@color/m3_on_var</item>
+        <item name="android:textColorAlertDialogListItem">@color/m3_on_surface</item>
+        <item name="colorAccent">@color/m3_primary</item>
+        <item name="colorControlActivated">@color/m3_primary</item>
+        <item name="colorControlNormal">@color/m3_on_var</item>
     </style>
 </resources>

@@ -41,6 +41,24 @@ object DisplayPrefs {
         }
     }
 
+    /** 窄屏仪表盘版面偏好（[io.github.shaonialife.cardeck.render.DashLayout] 的 PREF_*；默认左右分屏；宽屏不看）。下次连接生效。 */
+    fun dashboardLayout(context: Context): String =
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getString("dashboardLayout", io.github.shaonialife.cardeck.render.DashLayout.PREF_DOCK_BOTTOM)
+            ?: io.github.shaonialife.cardeck.render.DashLayout.PREF_DOCK_BOTTOM
+
+    fun setDashboardLayout(
+        context: Context,
+        value: String,
+    ) {
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit()
+            .putString("dashboardLayout", value)
+            .apply()
+    }
+
     /** 语音助理上车（实验）：默认关——要额外镜像手机主屏，且只在真机验证过的 ROM 上可靠。 */
     fun showAssistOverlay(context: Context): Boolean =
         context

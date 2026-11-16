@@ -14,14 +14,14 @@
         android:layout_marginTop="6dp"
         android:layout_marginBottom="11dp"
         android:text="@string/ui_098"
-        android:textColor="#FF8E8E93"
+        android:textColor="?attr/panelTextSecondary"
         android:textSize="12sp" />
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="@string/ui_099"
-        android:textColor="#FFF5F5F7"
+        android:textColor="?attr/panelTextPrimary"
         android:textSize="14sp" />
 
     <LinearLayout
@@ -44,7 +44,7 @@
             android:layout_height="wrap_content"
             android:layout_marginLeft="8dp"
             android:gravity="right"
-            android:textColor="#FF8E8E93"
+            android:textColor="?attr/panelTextSecondary"
             android:textSize="12sp" />
     </LinearLayout>
 
@@ -53,7 +53,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="14dp"
         android:text="@string/ui_100"
-        android:textColor="#FFF5F5F7"
+        android:textColor="?attr/panelTextPrimary"
         android:textSize="14sp" />
 
     <LinearLayout
@@ -76,7 +76,7 @@
             android:layout_height="wrap_content"
             android:layout_marginLeft="8dp"
             android:gravity="right"
-            android:textColor="#FF8E8E93"
+            android:textColor="?attr/panelTextSecondary"
             android:textSize="12sp" />
     </LinearLayout>
 
@@ -85,7 +85,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="14dp"
         android:text="@string/ui_101"
-        android:textColor="#FFF5F5F7"
+        android:textColor="?attr/panelTextPrimary"
         android:textSize="14sp" />
 
     <LinearLayout
@@ -108,7 +108,7 @@
             android:layout_height="wrap_content"
             android:layout_marginLeft="8dp"
             android:gravity="right"
-            android:textColor="#FF8E8E93"
+            android:textColor="?attr/panelTextSecondary"
             android:textSize="12sp" />
     </LinearLayout>
 
@@ -117,6 +117,6 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
         android:text="@string/ui_102"
-        android:textColor="#FF8E8E93"
+        android:textColor="?attr/panelTextSecondary"
         android:textSize="12sp" />
 </LinearLayout>

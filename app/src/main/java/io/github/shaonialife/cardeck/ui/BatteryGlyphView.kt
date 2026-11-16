@@ -32,10 +32,16 @@ class BatteryGlyphView
         private val boltPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFFFFFFF.toInt() }
         private val textPaint =
             Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                typeface = Typeface.create(Typeface.DEFAULT, DIGIT_WEIGHT, false)
                 textAlign = Paint.Align.CENTER
                 // 镂空：数字处擦掉电池身，透出背后的 dock 背景（iOS 16 的做法）
                 xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+            }
+        private val whiteTextPaint =
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                typeface = Typeface.create(Typeface.DEFAULT, DIGIT_WEIGHT, false)
+                textAlign = Paint.Align.CENTER
+                color = 0xFFFFFFFF.toInt()
             }
         private val body = RectF()
         private val clip = Path()
@@ -85,8 +91,14 @@ class BatteryGlyphView
             canvas.restore()
             textPaint.textSize = h * 0.78f
             val baseline = h / 2f - (textPaint.descent() + textPaint.ascent()) / 2f
-            canvas.drawText(percent.toString(), bodyW / 2f, baseline, textPaint)
+            // 常态镂空（透出背景）；充电（绿）/ 低电量（红）时改白字——镂空在彩色填充上发黑难认
+            val solidText = charging || percent <= 20
+            if (!solidText) canvas.drawText(percent.toString(), bodyW / 2f, baseline, textPaint)
             canvas.restoreToCount(layer)
+            if (solidText) {
+                whiteTextPaint.textSize = textPaint.textSize
+                canvas.drawText(percent.toString(), bodyW / 2f, baseline, whiteTextPaint)
+            }
 
             // 电极头
             val capH = h * 0.36f
@@ -101,7 +113,7 @@ class BatteryGlyphView
 
         private fun fillColor(): Int =
             when {
-                charging -> 0xFF34C759.toInt()
+                charging -> 0xFF66D15E.toInt()
                 percent <= 20 -> 0xFFFF3B30.toInt()
                 else -> 0xFFFFFFFF.toInt()
             }
@@ -125,6 +137,9 @@ class BatteryGlyphView
         }
 
         private companion object {
+            /** 电量数字字重（800 ≈ Heavy；Bold=700 在小尺寸下显细）。 */
+            const val DIGIT_WEIGHT = 800
+
             const val BODY_ASPECT = 2.1f
             const val CAP_GAP_RATIO = 0.08f
             const val CAP_W_RATIO = 0.12f

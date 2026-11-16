@@ -32,15 +32,6 @@
         android:paddingTop="1.52dp"
         android:paddingBottom="1.52dp">
 
-        <ImageView
-            android:id="@+id/dockRecents"
-            android:layout_width="38.10dp"
-            android:layout_height="match_parent"
-            android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:contentDescription="@string/recent_apps"
-            android:padding="9.90dp"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_recent_apps" />
 
     <ImageView
             android:id="@+id/dockHome"
@@ -58,21 +49,23 @@
             android:layout_marginLeft="2.29dp"
             android:layout_marginTop="2.29dp"
             android:layout_marginBottom="2.29dp"
-            android:background="#3A3A3C" />
+            android:background="#99FFFFFF" />
 
         <HorizontalScrollView
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:layout_marginLeft="2.29dp"
+            android:fillViewport="true"
             android:scrollbars="none">
 
+            <!-- 运行中应用居中排列（fillViewport 让少量图标时容器撑满再居中；多了照常滚动） -->
             <LinearLayout
                 android:id="@+id/dockApps"
                 android:layout_width="wrap_content"
                 android:layout_height="match_parent"
                 android:orientation="horizontal"
-                android:gravity="center_vertical" />
+                android:gravity="center" />
         </HorizontalScrollView>
 
         <LinearLayout
@@ -90,6 +83,12 @@
                 android:letterSpacing="0.03"
                 android:textColor="#FFFFFF"
                 android:textStyle="bold" />
+
+            <io.github.shaonialife.cardeck.ui.StatusGlyphsView
+                android:id="@+id/dockStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="9dp"
+                android:layout_marginTop="2dp" />
 
             <io.github.shaonialife.cardeck.ui.BatteryGlyphView
                 android:id="@+id/dockBattery"

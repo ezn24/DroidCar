@@ -29,13 +29,14 @@ fun mediaPaneBounds(
     if (swapped) {
         val regular = mediaPaneBounds(streamWidth, appHeight, dockWidth, splitCenter, portrait, false)
         return if (portrait) {
-            PaneBounds(margin, margin, streamWidth - margin, margin + regular.height)
+            PaneBounds(dockWidth + margin, margin, streamWidth - margin, margin + regular.height)
         } else {
             PaneBounds(dockWidth + margin, margin, dockWidth + margin + regular.width, appHeight - margin)
         }
     }
+    // portrait = 上下分屏；dock 在左侧时（音乐条版面）x 从 dock 右缘起，dock 在底部时 dockWidth=0
     return if (portrait) {
-        PaneBounds(margin, start, streamWidth - margin, appHeight - margin)
+        PaneBounds(dockWidth + margin, start, streamWidth - margin, appHeight - margin)
     } else {
         PaneBounds(start.coerceAtLeast(dockWidth + margin), margin, streamWidth - margin, appHeight - margin)
     }
@@ -53,9 +54,9 @@ fun mapPaneBounds(
     val media = mediaPaneBounds(streamWidth, appHeight, dockWidth, splitCenter, portrait, swapped)
     return if (portrait) {
         if (swapped) {
-            PaneBounds(margin, media.bottom + DASH_GAP_PX, streamWidth - margin, appHeight - margin)
+            PaneBounds(dockWidth + margin, media.bottom + DASH_GAP_PX, streamWidth - margin, appHeight - margin)
         } else {
-            PaneBounds(margin, margin, streamWidth - margin, media.top - DASH_GAP_PX)
+            PaneBounds(dockWidth + margin, margin, streamWidth - margin, media.top - DASH_GAP_PX)
         }
     } else {
         if (swapped) {
