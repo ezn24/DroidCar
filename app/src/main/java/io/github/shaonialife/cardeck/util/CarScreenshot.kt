@@ -13,7 +13,7 @@ import java.util.Locale
  * 车机画面截图：取合成器推给车机的那一帧，存成 PNG 到「下载/CarDeck」（与日志导出同目录）。
  *
  * 触发：手机「诊断」页按钮，或（截 Gemini 这类一闪而过的画面时）
- * `adb shell am broadcast -a io.github.shaonialife.cardeck.CAPTURE_CAR -p io.github.shaonialife.cardeck`。
+ * `adb shell am broadcast -a io.github.shaonialife.cardeck.CAPTURE_CAR -p io.github.ezn24.cardeck.neo`。
  */
 object CarScreenshot {
     data class Result(

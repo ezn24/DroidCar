@@ -90,7 +90,7 @@ Requires JDK 17 and the Android SDK. From the project root:
 The debug APK is in `app/build/outputs/apk/standard/debug/`. Stop the running app before installing (if you install mid-session, the system confirmation dialog can end up on the car screen):
 
 ```bash
-adb shell am force-stop io.github.shaonialife.cardeck
+adb shell am force-stop io.github.ezn24.cardeck.neo
 ```
 
 ```bash

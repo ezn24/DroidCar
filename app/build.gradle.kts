@@ -73,7 +73,8 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "io.github.shaonialife.cardeck"
+        // 2026-11-17 改为 Neo 自己的包名：与上游 CarDeck 可并存；namespace（源码包路径）不变
+        applicationId = "io.github.ezn24.cardeck.neo"
         minSdk = 31
         targetSdk = 34
         versionCode = effectiveVersionCode
