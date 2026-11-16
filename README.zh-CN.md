@@ -90,7 +90,7 @@ CarDeck Neo 是 [CarDeck](https://github.com/shaonialife/cardeck) 的界面改�
 Debug 版 APK 位于 `app/build/outputs/apk/standard/debug/`。安装前请先停止正在运行的 App（连接中直接安装，系统确认窗口可能会跑到车机画面上）：
 
 ```bash
-adb shell am force-stop io.github.shaonialife.cardeck
+adb shell am force-stop io.github.ezn24.cardeck.neo
 ```
 
 ```bash

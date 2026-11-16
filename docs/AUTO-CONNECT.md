@@ -131,7 +131,7 @@ AUTO: 车机蓝牙已断开 …——结束会话
 
 ```bash
 # 接收器是否已注册（清单里的 receiver 会出现在 package dump 中）
-adb shell dumpsys package io.github.shaonialife.cardeck | grep -i -A3 CarBluetoothReceiver
+adb shell dumpsys package io.github.ezn24.cardeck.neo | grep -i -A3 CarBluetoothReceiver
 # 开关一次车机蓝牙电源，观察日志里是否出现 AUTO: / SVC: 两行
 ```
 

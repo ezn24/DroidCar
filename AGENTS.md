@@ -1,3 +1,8 @@
+## 2026-11-17 包名改为 io.github.ezn24.cardeck.neo
+
+- 只改了 `applicationId`（与上游 CarDeck 可并存）；`namespace` 与源码包路径仍是 `io.github.shaonialife.cardeck`，类名/组件类路径不变。组件名一律 `packageName + "/" + X::class.java.name`，**不要**写死包名字符串。remote 变体为 `io.github.ezn24.cardeck.neo.rd`；外层 cardeck-bridge 若写死了旧包名需同步。
+- 换包名 = 新应用：Shizuku、通知使用权、悬浮窗、appops 放行等授权都要在新包上重新授予。
+
 ## 2026-11-17 MD3 手机端 / 跟手翻页 / 壁纸双槽
 
 - **手机端色彩**：`m3_*` 令牌在 `values/`（浅）与 `values-night/`（深）分别取系统 Material You 色板（`system_accent*/neutral*`，minSdk 31），surface 四档用 `res/color(-night)/` + `android:lStar` 精确色调；改色改 `colors_gen` 取值表。车机设置（SettingsActivity、竖屏转发的 PhoneSettings/SettingsContent）同样跟随手机深浅色（用户要求，与壁纸深/浅槽位一致）；dock/桌面仍是固定深色设计。
@@ -113,7 +118,7 @@ AirPlay（配对/控制/事件/流）→ 视频 + 音频推流。
 ./gradlew testStandardDebugUnitTest     # 单元测试（协议层/编解码为主）
 ./gradlew :app:lintStandardDebug        # Android Lint（存量问题在基线，新问题会失败）
 ./gradlew spotlessApply                 # 代码格式化（ktlint official 风格，规则在 .editorconfig）
-adb -s <serial> shell am force-stop io.github.shaonialife.cardeck   # 安装前必须先杀应用
+adb -s <serial> shell am force-stop io.github.ezn24.cardeck.neo   # 安装前必须先杀应用
 adb -s <serial> install -r app/build/outputs/apk/standard/debug/app-standard-debug.apk
 ```
 
@@ -137,7 +142,7 @@ UserService 子进程持有，**父应用卸载后该进程仍存活**，4 块�
 更糟的是每次尝试安装都会新叠一个 `PackageInstallerActivity`（实测堆积 11 个）。
 处置（按顺序）：
 1. `adb shell ps -A -o PID,NAME | grep car_input` 找到 `:<包名后缀>` 的 UserService 进程
-   （名形如 `io.github.shaonialife.cardeck:car_input`，UID 为 shell）；
+   （名形如 `io.github.ezn24.cardeck.neo:car_input`，UID 为 shell）；
 2. `adb shell kill <PID>` —— 进程退出，虚拟屏立即全部释放（实测 kill 后
    `dumpsys display | grep CarPlay` 为空）；
 3. `adb shell am force-stop com.android.packageinstaller` 清掉堆积的安装弹窗；
@@ -199,7 +204,7 @@ keystore 与密码只存本地/密码管理器：私钥泄露 = 任何人可签�
 
 **调试**：logcat 受限（HKS），运行日志走文件 `files/main_debug.log`（任意线程
 `SessionController.appendLog` 写入）：
-`adb shell "run-as io.github.shaonialife.cardeck grep/tail files/main_debug.log"`。
+`adb shell "run-as io.github.ezn24.cardeck.neo grep/tail files/main_debug.log"`。
 接收端画面验证：`adb -s <测试台serial> exec-out screencap -p`。
 
 ## 架构速览
