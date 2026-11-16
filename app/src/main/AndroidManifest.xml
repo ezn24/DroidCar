@@ -103,6 +103,16 @@
         <!-- 上车自动连接：ACL_CONNECTED / ACL_DISCONNECTED 在隐式广播豁免清单里，
              清单静态注册可在应用进程被杀时把进程拉起来（docs/AUTO-CONNECT.md）。
              exported=true 是因为系统蓝牙栈以独立 uid 发送；目标车机过滤在接收器里做。 -->
+        <!-- adb 触发车机画面截图（需 DUMP 权限：只有 shell 能发，其它应用无法利用） -->
+        <receiver
+            android:name=".util.CarScreenshotReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="io.github.shaonialife.cardeck.CAPTURE_CAR" />
+            </intent-filter>
+        </receiver>
+
         <receiver
             android:name=".bt.CarBluetoothReceiver"
             android:enabled="true"

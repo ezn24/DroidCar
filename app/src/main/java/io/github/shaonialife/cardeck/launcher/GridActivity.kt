@@ -38,6 +38,9 @@ class GridActivity : AppCompatActivity() {
 
         object Pinned : Cell
 
+        /** 背景应用入口（2026-11-17 从 dock 移到桌面，dock 腾给运行中的应用）。 */
+        object Recents : Cell
+
         data class App(
             val entry: VirtualLauncher.AppEntry,
         ) : Cell
@@ -455,7 +458,9 @@ class GridActivity : AppCompatActivity() {
                 isUserInputEnabled = !VirtualLauncher.dashboardMode
                 adapter = PageAdapter()
             }
+        VirtualLauncher.dashboardDragSink = dashboardDragSink
         dotsRow = findViewById(R.id.dotsRow)
+        dotsRow?.alpha = 0f // 页点平时隐藏，翻页时才淡入
         pager?.registerOnPageChangeCallback(
             object : ViewPager2.OnPageChangeCallback() {
                 override fun onPageSelected(position: Int) {
@@ -475,6 +480,8 @@ class GridActivity : AppCompatActivity() {
                 }
 
                 override fun onPageScrollStateChanged(state: Int) {
+                    // 页点只在翻页时出现（CarPlay 同款）：拖动/惯性滑动中显示，停下后稍等再淡出
+                    setDotsShowing(state != androidx.viewpager2.widget.ViewPager2.SCROLL_STATE_IDLE)
                     if (state == androidx.viewpager2.widget.ViewPager2.SCROLL_STATE_DRAGGING &&
                         pager?.currentItem == 1 &&
                         !VirtualLauncher.dashboardMode
@@ -606,6 +613,7 @@ class GridActivity : AppCompatActivity() {
         val cells =
             buildList {
                 add(Cell.Pinned) // 桌面第一格：车机设置（固定，不可取消）
+                add(Cell.Recents) // 第二格：背景应用（固定）
                 apps.filter { it.component.flattenToString() in selected }.forEach { add(Cell.App(it)) }
             }
         // 第 0 页 = 仪表盘，其后为桌面网格页：左右滑动即互相切换
@@ -752,7 +760,7 @@ class GridActivity : AppCompatActivity() {
         private fun bindSplitHandle(scale: Float) {
             val child = (itemView as? android.widget.FrameLayout)?.getChildAt(1) as? DashSplitHandle
             handle = child ?: return
-            val portrait = VirtualLauncher.dockAtBottom
+            val portrait = VirtualLauncher.splitVertical
             // 触达条比视觉中缝宽（DASH_HANDLE_TOUCH_PX > DASH_GAP_PX）：两侧各溢出
             // 一段压在卡片上扩大触控目标——地图侧溢出段被 tile 盖住不可见但可触摸
             val thickness = (DASH_HANDLE_TOUCH_PX * scale).toInt()
@@ -797,6 +805,12 @@ class GridActivity : AppCompatActivity() {
                         view.setOnClickListener { openSettings() }
                     }
 
+                    is Cell.Recents -> {
+                        icon.setImageResource(R.drawable.ic_app_recents)
+                        label.text = getString(R.string.recent_apps)
+                        view.setOnClickListener { VirtualLauncher.showRecentApps(this@GridActivity) }
+                    }
+
                     is Cell.App -> {
                         icon.setImageBitmap(AppIcons.rounded(cell.entry.icon, iconSizePx))
                         label.text = cell.entry.label
@@ -833,8 +847,18 @@ class GridActivity : AppCompatActivity() {
     private fun rebuildDots() {
         val row = dotsRow ?: return
         row.removeAllViews()
-        if (pages.size < 2) return // 单页不显示页点（对照原型）
+        // 单页不显示页点（对照原型）；胶囊底也一起藏，否则会剩一块空胶囊
+        row.visibility = if (pages.size < 2) View.GONE else View.VISIBLE
+        if (pages.size < 2) return
         val density = resources.displayMetrics.density
+        // CarPlay 样式：页点压在半透明深色胶囊上，叠在地图等亮背景上也看得清。
+        // 背景属于这一行 View，快照（publishDots 的 row.draw）会一并画进合成器层。
+        row.background =
+            android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = 100 * density
+                setColor(0xB31C1C1E.toInt())
+            }
+        row.setPadding((7 * density).toInt(), (5 * density).toInt(), (7 * density).toInt(), (5 * density).toInt())
         repeat(pages.size) {
             row.addView(
                 android.view.View(this).apply {
@@ -844,9 +868,9 @@ class GridActivity : AppCompatActivity() {
                             setColor(0x66FFFFFF)
                         }
                 },
-                LinearLayout.LayoutParams((6 * density).toInt(), (6 * density).toInt()).apply {
-                    marginStart = (3 * density).toInt()
-                    marginEnd = (3 * density).toInt()
+                LinearLayout.LayoutParams((7 * density).toInt(), (7 * density).toInt()).apply {
+                    marginStart = (3.5f * density).toInt()
+                    marginEnd = (3.5f * density).toInt()
                 },
             )
         }
@@ -884,10 +908,66 @@ class GridActivity : AppCompatActivity() {
 
     /** 页点归属切换（本地 ↔ 合成器上层）：仪表盘模式/滑动/地图全屏变化时调用。 */
     private fun syncDotsLayer() {
-        dotsRow?.alpha = if (VirtualLauncher.pageDotsOnTop()) 0f else 1f
+        val row = dotsRow ?: return
+        // 合成器上层接管时本地这份始终隐藏；否则跟随「翻页中」淡入淡出
+        val target = if (VirtualLauncher.pageDotsOnTop() || !dotsShowing) 0f else 1f
+        // 只在目标变化时起动画：onPageScrolled 每帧都会调到这里，逐帧重启会让淡入淡出拖慢
+        if (target == dotsTargetAlpha) return
+        dotsTargetAlpha = target
+        row.animate().cancel()
+        row
+            .animate()
+            .alpha(target)
+            .setDuration(if (target > 0f) 120L else 220L)
+            .start()
     }
 
+    private var dotsTargetAlpha = 0f
+
+    /** 页点当前是否应可见（翻页中 + 停下后的短暂停留）。 */
+    private var dotsShowing = false
+
+    private val hideDots = Runnable { applyDotsShowing(false) }
+
+    private fun setDotsShowing(moving: Boolean) {
+        val row = dotsRow ?: return
+        row.removeCallbacks(hideDots)
+        if (moving) applyDotsShowing(true) else row.postDelayed(hideDots, DOTS_LINGER_MS)
+    }
+
+    private fun applyDotsShowing(show: Boolean) {
+        if (dotsShowing == show) return
+        dotsShowing = show
+        VirtualLauncher.setPageDotsShowing(show)
+        syncDotsLayer()
+    }
+
+    /** 仪表盘跟手左拖：TouchRouter 的位移经主线程转成 pager fakeDrag（事件按投递顺序执行）。 */
+    private val dashboardDragSink =
+        object : VirtualLauncher.DashboardDragSink {
+            override fun begin(): Boolean {
+                if (pager == null) return false
+                tickHandler.post {
+                    val p = pager
+                    if (p == null || !p.beginFakeDrag()) {
+                        // pager 正在动画等原因拒绝：复位过渡状态，避免卡在「拖动中」吞触摸
+                        VirtualLauncher.finishDashboardPageSwitch(VirtualLauncher.dashboardMode)
+                    }
+                }
+                return true
+            }
+
+            override fun dragBy(px: Float) {
+                tickHandler.post { pager?.takeIf { it.isFakeDragging }?.fakeDragBy(px) }
+            }
+
+            override fun end() {
+                tickHandler.post { pager?.takeIf { it.isFakeDragging }?.endFakeDrag() }
+            }
+        }
+
     override fun onDestroy() {
+        if (VirtualLauncher.dashboardDragSink === dashboardDragSink) VirtualLauncher.dashboardDragSink = null
         tickHandler.removeCallbacks(mediaTick)
         WallpaperStore
             .removeListener(wallpaperListener)
@@ -906,6 +986,9 @@ class GridActivity : AppCompatActivity() {
 
     private companion object {
         const val COLUMNS = 4 // CarPlay 规格：强制 4 列
+
+        /** 翻页停下后页点再停留多久才淡出。 */
+        const val DOTS_LINGER_MS = 700L
 
         /** 横屏 CarPlay 规格行数（竖屏自适应时用作下限）。 */
         const val ROWS_MIN = 3

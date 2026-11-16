@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 浅色主题：系统栏用深色图标 -->
+    <bool name="m3_light_bars">true</bool>
+</resources>

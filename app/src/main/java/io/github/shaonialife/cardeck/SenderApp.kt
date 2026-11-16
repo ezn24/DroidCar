@@ -20,6 +20,9 @@ import io.github.shaonialife.cardeck.util.DebugFileLog
 open class SenderApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        // 车机壁纸跟随手机深浅色：配置变更时通知车机侧重载
+        io.github.shaonialife.cardeck.ui.WallpaperStore
+            .attach(this)
         // Retry pending restoration after process restart or Shizuku reconnect.
         rikka.shizuku.Shizuku.addBinderReceivedListenerSticky {
             ScreenDimmer.syncScreenTimeout(this)

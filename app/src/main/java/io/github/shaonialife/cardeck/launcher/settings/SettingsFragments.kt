@@ -203,7 +203,16 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
             segs.forEach { (view, segMode) ->
                 val active = segMode == mode
                 view.background = if (active) requireActivity().getDrawable(R.drawable.bg_segment_sel) else null
-                view.setTextColor(if (active) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+                view.setTextColor(
+                    if (active) {
+                        SettingsRows.color(
+                            requireContext(),
+                            R.attr.panelOnAccent,
+                        )
+                    } else {
+                        SettingsRows.color(requireContext(), R.attr.panelTextSecondary)
+                    },
+                )
             }
         }
     }
@@ -458,7 +467,7 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                     hint.text =
                         UiStrings
                             .text(R.string.ui_127)
-                    hint.setTextColor(0xFF8E8E93.toInt())
+                    hint.setTextColor(SettingsRows.color(requireContext(), R.attr.panelTextSecondary))
                     hint.visibility = View.VISIBLE
                     hint.setOnClickListener(null)
                     hint.isClickable = false
@@ -468,7 +477,7 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                     hint.text =
                         UiStrings
                             .text(R.string.ui_128)
-                    hint.setTextColor(0xFFFF6B6B.toInt())
+                    hint.setTextColor(SettingsRows.color(requireContext(), R.attr.panelDanger))
                     hint.visibility = View.VISIBLE
                     hint.isClickable = true
                     // 只清系统侧覆盖、不动偏好（偏好本来就是关的）；弹窗提示会重启应用
@@ -659,7 +668,7 @@ class DefaultMapPanelFragment : SettingsPanelFragment() {
                     setImageResource(R.drawable.ic_chevron_right)
                     imageTintList =
                         android.content.res.ColorStateList
-                            .valueOf(0xFF8E8E93.toInt())
+                            .valueOf(SettingsRows.color(requireContext(), R.attr.panelTextSecondary))
                 }
                 isFocusable = true
                 setOnClickListener {
@@ -798,7 +807,16 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             for ((button, selected) in listOf(on to current, off to !current)) {
                 button.isSelected = selected
                 button.setBackgroundResource(if (selected) R.drawable.bg_segment_sel else R.drawable.bg_segment)
-                button.setTextColor(if (selected) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+                button.setTextColor(
+                    if (selected) {
+                        SettingsRows.color(
+                            requireContext(),
+                            R.attr.panelOnAccent,
+                        )
+                    } else {
+                        SettingsRows.color(requireContext(), R.attr.panelTextSecondary)
+                    },
+                )
             }
         }
 
@@ -836,6 +854,32 @@ class DisplayPanelFragment : SettingsPanelFragment() {
                             io.github.shaonialife.cardeck.ui.AppLanguage
                                 .set(ctx, languageTags[index])
                         }
+                    }.show()
+            }
+        }
+
+        // 窄屏仪表盘版面（下次连接生效，只对窄横屏生效）：左右分屏 / Dock 在底部
+        val layoutKeys =
+            listOf(
+                io.github.shaonialife.cardeck.render.DashLayout.PREF_SIDE,
+                io.github.shaonialife.cardeck.render.DashLayout.PREF_DOCK_BOTTOM,
+            )
+        val layoutNames =
+            arrayOf(
+                getString(R.string.dash_layout_side),
+                getString(R.string.dash_layout_dock_bottom),
+            )
+        view.findViewById<TextView>(R.id.displayDashLayoutPicker).apply {
+            fun currentIndex() = layoutKeys.indexOf(DisplayPrefs.dashboardLayout(ctx)).coerceAtLeast(0)
+            text = layoutNames[currentIndex()]
+            setOnClickListener {
+                androidx.appcompat.app.AlertDialog
+                    .Builder(ctx, R.style.CarDeckAppPicker)
+                    .setTitle(R.string.dash_layout)
+                    .setSingleChoiceItems(layoutNames, currentIndex()) { dialog, index ->
+                        dialog.dismiss()
+                        DisplayPrefs.setDashboardLayout(ctx, layoutKeys[index])
+                        text = layoutNames[index]
                     }.show()
             }
         }
@@ -880,11 +924,29 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             screenOffOn.setBackgroundResource(
                 if (enabled) R.drawable.bg_segment_sel else R.drawable.bg_segment,
             )
-            screenOffOn.setTextColor(if (enabled) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+            screenOffOn.setTextColor(
+                if (enabled) {
+                    SettingsRows.color(
+                        requireContext(),
+                        R.attr.panelOnAccent,
+                    )
+                } else {
+                    SettingsRows.color(requireContext(), R.attr.panelTextSecondary)
+                },
+            )
             screenOffOff.setBackgroundResource(
                 if (enabled) R.drawable.bg_segment else R.drawable.bg_segment_sel,
             )
-            screenOffOff.setTextColor(if (enabled) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt())
+            screenOffOff.setTextColor(
+                if (enabled) {
+                    SettingsRows.color(
+                        requireContext(),
+                        R.attr.panelTextSecondary,
+                    )
+                } else {
+                    SettingsRows.color(requireContext(), R.attr.panelOnAccent)
+                },
+            )
         }
 
         refreshScreenOff(screenOffEnabled)
@@ -919,11 +981,29 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             autoConnectOn.setBackgroundResource(
                 if (enabled) R.drawable.bg_segment_sel else R.drawable.bg_segment,
             )
-            autoConnectOn.setTextColor(if (enabled) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+            autoConnectOn.setTextColor(
+                if (enabled) {
+                    SettingsRows.color(
+                        requireContext(),
+                        R.attr.panelOnAccent,
+                    )
+                } else {
+                    SettingsRows.color(requireContext(), R.attr.panelTextSecondary)
+                },
+            )
             autoConnectOff.setBackgroundResource(
                 if (enabled) R.drawable.bg_segment else R.drawable.bg_segment_sel,
             )
-            autoConnectOff.setTextColor(if (enabled) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt())
+            autoConnectOff.setTextColor(
+                if (enabled) {
+                    SettingsRows.color(
+                        requireContext(),
+                        R.attr.panelTextSecondary,
+                    )
+                } else {
+                    SettingsRows.color(requireContext(), R.attr.panelOnAccent)
+                },
+            )
         }
 
         refreshAutoConnect(autoConnectEnabled)
@@ -956,11 +1036,29 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             hidRawOn.setBackgroundResource(
                 if (enabled) R.drawable.bg_segment_sel else R.drawable.bg_segment,
             )
-            hidRawOn.setTextColor(if (enabled) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+            hidRawOn.setTextColor(
+                if (enabled) {
+                    SettingsRows.color(
+                        requireContext(),
+                        R.attr.panelOnAccent,
+                    )
+                } else {
+                    SettingsRows.color(requireContext(), R.attr.panelTextSecondary)
+                },
+            )
             hidRawOff.setBackgroundResource(
                 if (enabled) R.drawable.bg_segment else R.drawable.bg_segment_sel,
             )
-            hidRawOff.setTextColor(if (enabled) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt())
+            hidRawOff.setTextColor(
+                if (enabled) {
+                    SettingsRows.color(
+                        requireContext(),
+                        R.attr.panelTextSecondary,
+                    )
+                } else {
+                    SettingsRows.color(requireContext(), R.attr.panelOnAccent)
+                },
+            )
         }
 
         refreshHidRaw(hidRawEnabled)
@@ -1037,13 +1135,27 @@ class DisplayPanelFragment : SettingsPanelFragment() {
                 if (active30) R.drawable.bg_segment_sel else R.drawable.bg_segment,
             )
             fps30.setTextColor(
-                if (active30) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt(),
+                if (active30) {
+                    SettingsRows.color(
+                        requireContext(),
+                        R.attr.panelOnAccent,
+                    )
+                } else {
+                    SettingsRows.color(requireContext(), R.attr.panelTextSecondary)
+                },
             )
             fps60.setBackgroundResource(
                 if (active30) R.drawable.bg_segment else R.drawable.bg_segment_sel,
             )
             fps60.setTextColor(
-                if (active30) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt(),
+                if (active30) {
+                    SettingsRows.color(
+                        requireContext(),
+                        R.attr.panelTextSecondary,
+                    )
+                } else {
+                    SettingsRows.color(requireContext(), R.attr.panelOnAccent)
+                },
             )
         }
 

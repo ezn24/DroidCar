@@ -1,18 +1,43 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 图标前景：圆角屏幕 + 播放三角（车机投屏意象） -->
+<!-- CarDeck Neo 图标前景（2026-11-17）：车机屏上的「仪表盘」——左地图卡（路线 + 定位点）、
+     右侧音乐卡，下方底座。全部落在 66dp 安全区内。 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-
+    <!-- 屏幕外框 -->
     <path
-        android:pathData="M26,34 A8,8 0 0 1 34,26 L74,26 A8,8 0 0 1 82,34 L82,74 A8,8 0 0 1 74,82 L34,82 A8,8 0 0 1 26,74 Z"
-        android:strokeColor="#7EE3A0"
-        android:strokeWidth="4"
-        android:fillColor="#00000000" />
-
+        android:fillColor="#F5F8FF"
+        android:pathData="M34,36 L74,36 A7,7 0 0 1 81,43 L81,65 A7,7 0 0 1 74,72 L34,72 A7,7 0 0 1 27,65 L27,43 A7,7 0 0 1 34,36 Z" />
+    <!-- 地图卡 -->
     <path
-        android:pathData="M47,43 L67,54 L47,65 Z"
-        android:fillColor="#7EE3A0" />
+        android:fillColor="#17A2B0"
+        android:pathData="M35,40 L57,40 A3.5,3.5 0 0 1 60.5,43.5 L60.5,64.5 A3.5,3.5 0 0 1 57,68 L35,68 A3.5,3.5 0 0 1 31.5,64.5 L31.5,43.5 A3.5,3.5 0 0 1 35,40 Z" />
+    <!-- 路线 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M35.5,63.5 C41,61 41,53 47,51.5 C52,50.3 54,48.5 55.5,46"
+        android:strokeWidth="2.4"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round" />
+    <!-- 定位点 -->
+    <path
+        android:fillColor="#FFC94D"
+        android:pathData="M55.5,46 m-3,0 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0" />
+    <!-- 音乐卡：封面 -->
+    <path
+        android:fillColor="#6A5CFF"
+        android:pathData="M66.5,40 L73.5,40 A3,3 0 0 1 76.5,43 L76.5,50 A3,3 0 0 1 73.5,53 L66.5,53 A3,3 0 0 1 63.5,50 L63.5,43 A3,3 0 0 1 66.5,40 Z" />
+    <!-- 音乐卡：播放键 -->
+    <path
+        android:fillColor="#DCE3F0"
+        android:pathData="M66.5,56 L73.5,56 A3,3 0 0 1 76.5,59 L76.5,65 A3,3 0 0 1 73.5,68 L66.5,68 A3,3 0 0 1 63.5,65 L63.5,59 A3,3 0 0 1 66.5,56 Z" />
+    <path
+        android:fillColor="#1E2A44"
+        android:pathData="M68.6,59 L68.6,65 L73.4,62 Z" />
+    <!-- 底座 -->
+    <path
+        android:fillColor="#B3F5F8FF"
+        android:pathData="M44,76 L64,76 A2,2 0 0 1 66,78 A2,2 0 0 1 64,80 L44,80 A2,2 0 0 1 42,78 A2,2 0 0 1 44,76 Z" />
 </vector>

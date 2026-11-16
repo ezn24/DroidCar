@@ -28,7 +28,7 @@
         android:layout_weight="1"
         android:ellipsize="end"
         android:maxLines="1"
-        android:textColor="#FFF5F5F7"
+        android:textColor="?attr/panelTextPrimary"
         android:textSize="13sp" />
 
     <!-- 三态分段控件：自动 / 开启 / 关闭 -->
@@ -48,7 +48,7 @@
             android:paddingRight="11dp"
             android:paddingBottom="5dp"
             android:text="@string/ui_106"
-            android:textColor="#FFF5F5F7"
+            android:textColor="?attr/panelTextPrimary"
             android:textSize="12sp" />
 
         <TextView
@@ -60,7 +60,7 @@
             android:paddingRight="11dp"
             android:paddingBottom="5dp"
             android:text="@string/ui_107"
-            android:textColor="#FF8E8E93"
+            android:textColor="?attr/panelTextSecondary"
             android:textSize="12sp" />
 
         <TextView
@@ -72,7 +72,7 @@
             android:paddingRight="11dp"
             android:paddingBottom="5dp"
             android:text="@string/ui_108"
-            android:textColor="#FF8E8E93"
+            android:textColor="?attr/panelTextSecondary"
             android:textSize="12sp" />
     </LinearLayout>
 </LinearLayout>

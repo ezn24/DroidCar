@@ -8,8 +8,10 @@ import android.net.Uri
 import java.io.File
 
 /**
- * 车机壁纸存储：当前壁纸 = 用户选择的图片（files/wallpaper.jpg）或内置默认
- * （assets/wallpaper_default.jpg，Apple CarPlay 官方深色壁纸压缩版）。
+ * 车机壁纸存储。深色/浅色两个槽位（2026-11-17），跟随手机深浅色自动切换：
+ * 每个槽位的来源 = 内置默认（assets/wallpaper_default.jpg）/ 内置图案（[WallpaperPresets]，
+ * 代码绘制）/ 用户图片（深色 files/wallpaper.jpg 沿用旧文件名，浅色 files/wallpaper_light.jpg）；
+ * 浅色槽位默认「同深色」。
  *
  * 合成器以位图上传 GL 纹理；更换壁纸后经 [version] 递增通知重载。
  */
@@ -18,6 +20,100 @@ object WallpaperStore {
     const val DEFAULT_ASSET = "wallpaper_default.jpg"
 
     private const val USER_FILE = "wallpaper.jpg"
+    private const val USER_FILE_LIGHT = "wallpaper_light.jpg"
+    private const val PREFS = "wallpaper"
+
+    enum class Slot { DARK, LIGHT }
+
+    const val SRC_DEFAULT = "default"
+    const val SRC_USER = "user"
+    const val SRC_SAME = "same"
+    const val SRC_PRESET_PREFIX = "preset:"
+
+    private fun userFile(
+        context: Context,
+        slot: Slot,
+    ) = File(context.filesDir, if (slot == Slot.DARK) USER_FILE else USER_FILE_LIGHT)
+
+    fun hasUserImage(
+        context: Context,
+        slot: Slot,
+    ): Boolean = userFile(context, slot).let { it.exists() && it.length() > 0 }
+
+    /** 槽位来源；未设置时深色 = 旧版用户图（若有）否则默认，浅色 = 同深色。 */
+    fun source(
+        context: Context,
+        slot: Slot,
+    ): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(slot.name, null)
+            ?: when (slot) {
+                Slot.DARK -> if (hasUserImage(context, Slot.DARK)) SRC_USER else SRC_DEFAULT
+                Slot.LIGHT -> SRC_SAME
+            }
+
+    fun setSource(
+        context: Context,
+        slot: Slot,
+        source: String,
+    ) {
+        context
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(slot.name, source)
+            .apply()
+        markChanged()
+    }
+
+    /** 手机当前是否深色（应用级配置，不受 Activity 局部夜间模式影响）。 */
+    fun isNight(context: Context): Boolean =
+        (
+            context.applicationContext.resources.configuration.uiMode and
+                android.content.res.Configuration.UI_MODE_NIGHT_MASK
+        ) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+
+    /** 当前生效的槽位与来源（浅色模式且浅色槽位不是「同深色」才用浅色）。 */
+    private fun effective(context: Context): Pair<Slot, String> {
+        if (!isNight(context)) {
+            val light = source(context, Slot.LIGHT)
+            if (light != SRC_SAME) return Slot.LIGHT to light
+        }
+        return Slot.DARK to source(context, Slot.DARK)
+    }
+
+    @Volatile private var lastNight: Boolean? = null
+
+    /** 进程启动时挂一次：手机深浅色切换且两槽位不同 → 通知车机侧重载壁纸。 */
+    fun attach(app: android.app.Application) {
+        lastNight = isNight(app)
+        app.registerComponentCallbacks(
+            object : android.content.ComponentCallbacks {
+                override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+                    val night = isNight(app)
+                    if (night == lastNight) return
+                    lastNight = night
+                    if (source(app, Slot.LIGHT) != SRC_SAME) markChanged()
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun onLowMemory() = Unit
+            },
+        )
+    }
+
+    /** 按来源解码（[maxSize] 限边长）；失败回退内置默认。 */
+    fun decodeSource(
+        context: Context,
+        slot: Slot,
+        source: String,
+        maxSize: Int,
+    ): Bitmap? =
+        when {
+            source == SRC_USER -> decodeFile(userFile(context, slot), maxSize)
+            source.startsWith(SRC_PRESET_PREFIX) ->
+                WallpaperPresets.render(source.removePrefix(SRC_PRESET_PREFIX), maxSize)
+            else -> null
+        } ?: decodeDefault(context, maxSize)
 
     private val versionCounter =
         java.util.concurrent.atomic
@@ -44,26 +140,23 @@ object WallpaperStore {
         listeners.forEach { runCatching { it(version) } }
     }
 
-    /** 用户壁纸文件（null = 使用内置默认）。 */
-    fun userWallpaperFile(context: Context): File? = File(context.filesDir, USER_FILE).takeIf { it.exists() && it.length() > 0 }
-
     /**
-     * 解码当前壁纸（GL 线程调用；失败回退内置默认，再失败回退 null 由合成器画纯色）。
-     * 按 [maxSize] 限制边长（显存友好；aspectFill 由合成器按比例缩放绘制）。
+     * 解码当前壁纸（后台线程调用；失败回退内置默认，再失败回退 null 由调用方画纯色）。
+     * 按 [maxSize] 限制边长（aspectFill 由调用方按比例缩放绘制）。
      */
     fun decode(
         context: Context,
         maxSize: Int = 2560,
     ): Bitmap? {
-        decodeUser(context, maxSize)?.let { return it }
-        return decodeDefault(context, maxSize)
+        val (slot, source) = effective(context)
+        return decodeSource(context, slot, source, maxSize)
     }
 
-    private fun decodeUser(
-        context: Context,
+    private fun decodeFile(
+        file: File,
         maxSize: Int,
     ): Bitmap? {
-        val file = userWallpaperFile(context) ?: return null
+        if (!file.exists() || file.length() == 0L) return null
         return runCatching {
             val source = ImageDecoder.createSource(file)
             ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
@@ -96,26 +189,19 @@ object WallpaperStore {
             }
         }.getOrNull()
 
-    /** 复制用户选择的图片到内部存储并标记变更（重复选择同一图也覆盖，幂等）。 */
+    /** 复制用户选择的图片到该槽位并设为来源（重复选择同一图也覆盖，幂等）。 */
     fun setFromUri(
         context: Context,
         uri: Uri,
+        slot: Slot = Slot.DARK,
     ): Boolean =
         runCatching {
             context.contentResolver.openInputStream(uri)?.use { input ->
-                File(context.filesDir, USER_FILE).outputStream().use { output ->
+                userFile(context, slot).outputStream().use { output ->
                     input.copyTo(output)
                 }
             } ?: return false
-            markChanged()
-            true
-        }.getOrDefault(false)
-
-    /** 恢复内置默认壁纸。 */
-    fun resetToDefault(context: Context): Boolean =
-        runCatching {
-            File(context.filesDir, USER_FILE).delete()
-            markChanged()
+            setSource(context, slot, SRC_USER)
             true
         }.getOrDefault(false)
 

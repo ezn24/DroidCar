@@ -1,0 +1,109 @@
+<p align="center">
+  <img src="docs/images/icon.svg" width="120" alt="CarDeck Neo 图标">
+</p>
+
+<h1 align="center">CarDeck Neo</h1>
+
+<p align="center">
+  让 Android 手机以无线 CarPlay 连上车机，显示地图、音乐与 App 的车机桌面<br>
+  <a href="README.md">繁體中文</a> · <b>简体中文</b> · <a href="README.en.md">English</a>
+</p>
+
+---
+
+CarDeck Neo 是 [CarDeck](https://github.com/shaonialife/cardeck) 的界面改版。手机（无需 root）扮演 CarPlay 发送端，把自绘的车机桌面与手机上的 App 投到支持无线 CarPlay 的车机上，车机触摸再回传到手机操作。
+
+> **非官方项目**：与 Apple Inc. 及任何汽车制造商无关，未获授权或认证，**不是 MFi 产品**。CarPlay / AirPlay 是 Apple Inc. 的商标，仅用于说明兼容目标。
+>
+> **驾驶安全**：只在停车时连接与设置；行驶中可能断连，请以原厂导航作为安全冗余。完整条款见 [DISCLAIMER.md](DISCLAIMER.md)。
+
+## 界面预览
+
+### 车机
+
+<p align="center">
+  <img src="docs/screenshots/car-1920x720.png" alt="车机仪表盘 1920×720">
+  <br><sub>仪表盘：左边地图可直接操作，右边音乐控制（1920×720）</sub>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/car-gemini-1920x720.png" alt="车机上的 Gemini">
+  <br><sub>说「Hey Google」，Gemini 直接显示在车机上，可触摸操作（实验性）</sub>
+</p>
+
+### 不同分辨率与比例
+
+版面会按车机分辨率自动调整：宽屏左右分屏，窄屏把 Dock 移到底部，让地图有更多空间。
+
+| 1280×720（16:9） | 960×540（16:9） |
+| :---: | :---: |
+| <img src="docs/screenshots/car-1280x720.png" alt="1280×720"> | <img src="docs/screenshots/car-960x540.png" alt="960×540"> |
+| **800×480（5:3）** | **1280×488（8:3）** |
+| <img src="docs/screenshots/car-800x480.png" alt="800×480"> | <img src="docs/screenshots/car-1280x488.png" alt="1280×488"> |
+
+### 手机
+
+<p align="center">
+  <img src="docs/screenshots/phone-home.png" width="300" alt="手机主页">
+  <br><sub>手机主页（Material Design 3，深浅色跟随手机、主色跟随系统壁纸）</sub>
+</p>
+
+## 功能
+
+- **仪表盘**：连接后直接进入地图与音乐分屏。地图卡可以直接拖动、缩放；从仪表盘往左拖可翻到应用页，页面跟着手指移动。翻页时不会误触音乐卡。
+- **按分辨率自动排版**：宽屏（如 1920×720）左右分屏；窄屏（如 800×480、16:9）默认 Dock 在底部，也可以在设置改回左右分屏。
+- **地图**：记住最后使用的地图 App，下次连接沿用；也可以在 **车机设置 → 默认地图** 手动选择任何已安装的 App。
+- **音乐**：点音乐卡打开音乐 App；方向盘媒体键可切歌。
+- **声音走车机**：Shizuku 就绪时直接采集系统播放的声音，不需要录屏授权弹窗；只采集播放的声音，不使用麦克风。
+- **Gemini 上车（实验性）**：说「Hey Google」时，Gemini 的浮层与动画直接显示在车机上，可触摸操作。
+- **Dock**：显示时间、信号、Wi-Fi 与电量（充电时显示绿色），后台应用可从主屏幕的「后台应用」切换或关闭。
+- **车机壁纸**：内置多款壁纸，深色与浅色模式可分别设置，跟随手机自动切换；也能从相册选图。
+- **手机界面**：Material Design 3，底部分为「连接 / 车机 / 诊断」三页；深浅色跟随手机，主色跟随系统。
+- **多语言**：繁体中文、简体中文、英文，可在 **车机设置 → 显示 → 语言** 切换。
+- **车机画面截图**：在「诊断」页一键把当前车机画面存成 PNG（存到「下载/CarDeck」）。
+
+## 要求
+
+- Android 12 及以上的手机（「应用横屏」功能需要 Android 14 及以上）
+- 已安装并启动 [Shizuku](https://shizuku.rikka.app/)（通过无线调试激活，无需 root）。虚拟屏、触摸注入与声音采集都经由它完成，未就绪时无法连接
+- 支持无线 CarPlay 的车机，且手机已与车机完成蓝牙配对
+
+## 使用方法
+
+1. 安装 CarDeck Neo，首次打开时阅读并接受免责声明。
+2. 启动 Shizuku，并在 CarDeck Neo 主页授权。
+3. 在车机上打开无线 CarPlay（配对模式），回到手机点 **启动连接**。
+4. 连接后车机会显示仪表盘。车机相关设置可在手机「车机」页或车机上的设置 App 调整。
+
+## 从源码构建
+
+需要 JDK 17 与 Android SDK。在项目根目录执行：
+
+```powershell
+.\gradlew.bat :app:assembleStandardDebug
+```
+
+```powershell
+.\gradlew.bat :app:testStandardDebugUnitTest :app:lintStandardDebug
+```
+
+Debug 版 APK 位于 `app/build/outputs/apk/standard/debug/`。安装前请先停止正在运行的 App（连接中直接安装，系统确认窗口可能会跑到车机画面上）：
+
+```bash
+adb shell am force-stop io.github.shaonialife.cardeck
+```
+
+```bash
+adb install -r app/build/outputs/apk/standard/debug/app-standard-debug.apk
+```
+
+详细操作与验证方式见 [仪表盘使用说明](docs/DASHBOARD-UX.md)；给开发者与 AI 助手的项目约定见 [AGENTS.md](AGENTS.md)。
+
+## 致谢与上游
+
+- 本项目基于 [shaonialife/cardeck](https://github.com/shaonialife/cardeck)。上游的协议研究、开发记录与测试台搭建说明保存在 [docs/UPSTREAM-README.md](docs/UPSTREAM-README.md)，协议细节见 [docs/PROTOCOL-NOTES.md](docs/PROTOCOL-NOTES.md)。
+- 上游 CarDeck 原版下载见 [上游 Releases](https://github.com/shaonialife/cardeck/releases/latest)。
+
+## 许可证
+
+[MIT License](LICENSE)。使用前请阅读 [DISCLAIMER.md](DISCLAIMER.md)。

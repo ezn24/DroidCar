@@ -24,8 +24,8 @@
         android:paddingEnd="12dp"
         android:selectAllOnFocus="false"
         android:singleLine="true"
-        android:textColor="#FFF5F5F7"
-        android:textColorHint="#FF8E8E93"
+        android:textColor="?attr/panelTextPrimary"
+        android:textColorHint="?attr/panelTextSecondary"
         android:textSize="13sp" />
 
     <TextView
@@ -33,7 +33,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="end"
-        android:textColor="#FF8E8E93"
+        android:textColor="?attr/panelTextSecondary"
         android:textSize="12sp" />
 
     <FrameLayout
@@ -49,7 +49,7 @@
             android:layout_marginTop="18dp"
             android:gravity="center"
             android:text="@string/ui_082"
-            android:textColor="#7C8B8B"
+            android:textColor="?attr/panelTextHint"
             android:textSize="12.5sp" />
 
         <TextView
@@ -59,7 +59,7 @@
             android:layout_marginTop="18dp"
             android:gravity="center"
             android:text="@string/no_matching_apps"
-            android:textColor="#FF8E8E93"
+            android:textColor="?attr/panelTextSecondary"
             android:textSize="13sp"
             android:visibility="gone" />
 

@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 手机侧界面：Material 3 暗色重构（design/phone-ui-proto.html 的 Android 实现）。
-     结构：英雄卡（连接状态+主操作）→ 连接准备 → 车机显示 → 高级(折叠) → 日志(折叠)。
+<!-- 手机侧界面：Material 3（2026-11-17 重构：深浅色跟随手机、主色跟随系统 Material You）。
+     结构：底部导航三分页——连线（英雄卡 + 连接准备 + 快速设置）/ 车机（设置菜单 + 外观）/
+     诊断（Shell 状态 + 日志 + 关于）。
      不引入 Material 组件库：卡片/按钮/开关样式全部用 shape/selector 自绘。 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -12,9 +14,16 @@
          横屏时英雄卡会被移入 contentArea 左缘固定显示，滚动只作用于右栏
          （见 MainActivity.applyContentLayout）——英雄卡不随右侧列表滚走。 -->
     <LinearLayout
-        android:id="@+id/pageColumn"
+        android:id="@+id/rootColumn"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:orientation="vertical">
+
+    <LinearLayout
+        android:id="@+id/pageColumn"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
         android:orientation="vertical"
         android:paddingStart="16dp"
         android:paddingEnd="16dp">
@@ -36,8 +45,8 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="CarDeck"
-                        android:textColor="#EDF3F3"
+                        android:text="@string/app_name"
+                        android:textColor="@color/m3_on_surface"
                         android:textSize="21sp"
                         android:textStyle="bold" />
 
@@ -49,7 +58,7 @@
                         android:drawableStart="@drawable/ic_dot_small"
                         android:drawablePadding="5dp"
                         android:gravity="center_vertical"
-                        android:textColor="#7C8B8B"
+                        android:textColor="@color/m3_on_var"
                         android:textSize="11.5sp"
                         android:text="@string/ui_002" />
                 </LinearLayout>
@@ -72,11 +81,17 @@
 
             <!-- 内容区容器：竖屏时 ScrollView 包住英雄卡与详情；
                  横屏时英雄卡被移到本 FrameLayout 左缘固定，详情仍随 ScrollView 滚动 -->
+            <!-- 三个分页共用一个容器，底部导航切换可见性（MainActivity.selectTab） -->
             <FrameLayout
-                android:id="@+id/contentArea"
+                android:id="@+id/tabHost"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
                 android:layout_weight="1">
+
+            <FrameLayout
+                android:id="@+id/contentArea"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent">
 
                 <ScrollView
                     android:id="@+id/mainScroll"
@@ -152,7 +167,7 @@
                         android:layout_marginBottom="10dp"
                         android:letterSpacing="0.22"
                         android:text="CARDECK"
-                        android:textColor="#5C6B6B"
+                        android:textColor="@color/m3_hub_caption"
                         android:textSize="10sp"
                         android:textStyle="bold" />
                 </FrameLayout>
@@ -170,7 +185,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="@string/ui_005"
-                        android:textColor="#EDF4F4"
+                        android:textColor="@color/m3_on_surface"
                         android:textSize="25sp"
                         android:textStyle="bold" />
 
@@ -185,7 +200,7 @@
                         android:paddingEnd="11dp"
                         android:paddingBottom="5dp"
                         android:text="@string/ui_006"
-                        android:textColor="#FFB4AB"
+                        android:textColor="@color/m3_error"
                         android:textSize="11.5sp"
                         android:textStyle="bold"
                         android:visibility="gone" />
@@ -219,7 +234,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
                     android:text="@string/ui_008"
-                    android:textColor="#8E8E93"
+                    android:textColor="@color/m3_on_var"
                     android:textSize="11.5sp"
                     android:visibility="gone" />
 
@@ -301,7 +316,7 @@
                         android:layout_weight="1"
                         android:letterSpacing="0.06"
                         android:text="@string/ui_012"
-                        android:textColor="#8FA09F"
+                        android:textColor="@color/m3_primary"
                         android:textSize="12.5sp"
                         android:textStyle="bold" />
 
@@ -315,7 +330,7 @@
                         android:paddingEnd="9dp"
                         android:paddingBottom="2dp"
                         android:text="0/3"
-                        android:textColor="#6FC4CF"
+                        android:textColor="@color/m3_primary"
                         android:textSize="11sp"
                         android:textStyle="bold" />
                 </LinearLayout>
@@ -343,7 +358,8 @@
                             android:layout_height="20dp"
                             android:layout_gravity="center"
                             android:contentDescription="Shizuku"
-                            android:src="@drawable/ic_shizuku_shield" />
+                            android:src="@drawable/ic_shizuku_shield"
+                            app:tint="@color/m3_primary" />
                     </FrameLayout>
 
                     <LinearLayout
@@ -390,7 +406,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="1dp"
                     android:layout_marginStart="54dp"
-                    android:background="#5A394444" />
+                    android:background="@color/m3_outline_var" />
 
                 <!-- 蓝牙配对 -->
                 <LinearLayout
@@ -412,7 +428,8 @@
                             android:layout_height="20dp"
                             android:layout_gravity="center"
                             android:contentDescription="@string/ui_015"
-                            android:src="@drawable/ic_bluetooth" />
+                            android:src="@drawable/ic_bluetooth"
+                            app:tint="@color/m3_primary" />
                     </FrameLayout>
 
                     <LinearLayout
@@ -484,7 +501,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="1dp"
                     android:layout_marginStart="54dp"
-                    android:background="#5A394444" />
+                    android:background="@color/m3_outline_var" />
 
                 <!-- 车机热点 -->
                 <LinearLayout
@@ -506,7 +523,8 @@
                             android:layout_height="20dp"
                             android:layout_gravity="center"
                             android:contentDescription="@string/ui_019"
-                            android:src="@drawable/ic_wifi" />
+                            android:src="@drawable/ic_wifi"
+                            app:tint="@color/m3_primary" />
                     </FrameLayout>
 
                     <LinearLayout
@@ -537,8 +555,8 @@
                             android:paddingTop="6dp"
                             android:paddingEnd="10dp"
                             android:paddingBottom="6dp"
-                            android:textColor="#C4D2D1"
-                            android:textColorHint="#5A6B7A"
+                            android:textColor="@color/m3_on_surface"
+                            android:textColorHint="@color/m3_outline"
                             android:textSize="13.5sp"
                             android:textStyle="bold" />
                     </LinearLayout>
@@ -563,7 +581,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="1dp"
                     android:layout_marginStart="54dp"
-                    android:background="#5A394444" />
+                    android:background="@color/m3_outline_var" />
 
                 <!-- 车机侧声音 -->
                 <LinearLayout
@@ -585,7 +603,8 @@
                             android:layout_height="20dp"
                             android:layout_gravity="center"
                             android:contentDescription="@string/ui_023"
-                            android:src="@drawable/ic_speaker" />
+                            android:src="@drawable/ic_speaker"
+                            app:tint="@color/m3_primary" />
                     </FrameLayout>
 
                     <LinearLayout
@@ -630,7 +649,7 @@
                 </LinearLayout>
             </LinearLayout>
 
-            <!-- ==================== 车机显示 ==================== -->
+            <!-- ==================== 快速设置（常亮 / 暗幕） ==================== -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -645,8 +664,8 @@
                     android:layout_height="wrap_content"
                     android:paddingTop="14dp"
                     android:letterSpacing="0.06"
-                    android:text="@string/ui_027"
-                    android:textColor="#8FA09F"
+                    android:text="@string/md_quick_settings"
+                    android:textColor="@color/m3_primary"
                     android:textSize="12.5sp"
                     android:textStyle="bold" />
 
@@ -670,7 +689,8 @@
                             android:layout_height="20dp"
                             android:layout_gravity="center"
                             android:contentDescription="@string/ui_028"
-                            android:src="@drawable/ic_brightness" />
+                            android:src="@drawable/ic_brightness"
+                            app:tint="@color/m3_primary" />
                     </FrameLayout>
 
                     <LinearLayout
@@ -710,7 +730,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="1dp"
                     android:layout_marginStart="54dp"
-                    android:background="#5A394444" />
+                    android:background="@color/m3_outline_var" />
 
                 <!-- 立即假息屏 -->
                 <LinearLayout
@@ -738,7 +758,8 @@
                             android:layout_height="20dp"
                             android:layout_gravity="center"
                             android:contentDescription="@string/ui_031"
-                            android:src="@drawable/ic_moon" />
+                            android:src="@drawable/ic_moon"
+                            app:tint="@color/m3_primary" />
                     </FrameLayout>
 
                     <LinearLayout
@@ -769,15 +790,70 @@
                         android:layout_width="22dp"
                         android:layout_height="22dp"
                         android:contentDescription="@string/ui_034"
-                        android:src="@drawable/ic_chev_right" />
+                        android:src="@drawable/ic_chev_right"
+                        app:tint="@color/m3_on_var" />
                 </LinearLayout>
 
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:layout_marginStart="54dp"
-                    android:background="#5A394444" />
+            </LinearLayout>
+            </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+            </FrameLayout>
 
+            <!-- ==================== 车机分页 ==================== -->
+            <ScrollView
+                android:id="@+id/tabCar"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:clipToPadding="false"
+                android:fillViewport="true"
+                android:paddingBottom="28dp"
+                android:scrollbars="none"
+                android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/tabCarColumn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginTop="12dp"
+                    android:layout_marginBottom="8dp"
+                    android:text="@string/md_car_settings"
+                    android:textColor="@color/m3_primary"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+                <!-- 车机设置菜单：与车机双栏共用 SettingsMenus，MainActivity.buildCarMenu 填充 -->
+                <LinearLayout
+                    android:id="@+id/carMenuList"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_card"
+                    android:orientation="vertical"
+                    android:paddingTop="6dp"
+                    android:paddingBottom="6dp" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginTop="16dp"
+                    android:layout_marginBottom="8dp"
+                    android:text="@string/md_appearance"
+                    android:textColor="@color/m3_primary"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_card"
+                    android:orientation="vertical"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp">
                 <!-- 车机壁纸 -->
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -798,7 +874,8 @@
                             android:layout_height="20dp"
                             android:layout_gravity="center"
                             android:contentDescription="@string/ui_035"
-                            android:src="@drawable/ic_wallpaper" />
+                            android:src="@drawable/ic_wallpaper"
+                            app:tint="@color/m3_primary" />
                     </FrameLayout>
 
                     <LinearLayout
@@ -824,43 +901,80 @@
                             android:textColor="@color/m3_on_var"
                             android:textSize="12sp" />
                     </LinearLayout>
+                </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/btnWallpaperPick"
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/wp_dark_title"
+                    android:textColor="@color/m3_on_var"
+                    android:textSize="12.5sp"
+                    android:textStyle="bold" />
+
+                <HorizontalScrollView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:layout_marginBottom="10dp"
+                    android:clipToPadding="false"
+                    android:scrollbars="none">
+
+                    <!-- 壁纸选项缩略图：MainActivity.buildWallpaperStrips 填充 -->
+                    <LinearLayout
+                        android:id="@+id/wallpaperDarkStrip"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:background="@drawable/bg_tbtn"
-                        android:gravity="center"
-                        android:paddingStart="12dp"
-                        android:paddingTop="9dp"
-                        android:paddingEnd="12dp"
-                        android:paddingBottom="9dp"
-                        android:text="@string/ui_038"
-                        android:textColor="@color/m3_primary"
-                        android:textSize="13sp"
-                        android:textStyle="bold" />
+                        android:orientation="horizontal" />
+                </HorizontalScrollView>
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/wp_light_title"
+                    android:textColor="@color/m3_on_var"
+                    android:textSize="12.5sp"
+                    android:textStyle="bold" />
 
-                    <TextView
-                        android:id="@+id/btnWallpaperReset"
+                <HorizontalScrollView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:layout_marginBottom="10dp"
+                    android:clipToPadding="false"
+                    android:scrollbars="none">
+
+                    <!-- 壁纸选项缩略图：MainActivity.buildWallpaperStrips 填充 -->
+                    <LinearLayout
+                        android:id="@+id/wallpaperLightStrip"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="4dp"
-                        android:background="@drawable/bg_tbtn"
-                        android:gravity="center"
-                        android:paddingStart="12dp"
-                        android:paddingTop="9dp"
-                        android:paddingEnd="12dp"
-                        android:paddingBottom="9dp"
-                        android:text="@string/ui_039"
-                        android:textColor="@color/m3_primary"
-                        android:textSize="13sp"
-                        android:textStyle="bold" />
+                        android:orientation="horizontal" />
+                </HorizontalScrollView>
                 </LinearLayout>
             </LinearLayout>
+            </ScrollView>
 
-            <!-- 强制应用横屏（跳转新页） -->
+            <!-- ==================== 诊断分页 ==================== -->
+            <ScrollView
+                android:id="@+id/tabDiag"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:clipToPadding="false"
+                android:fillViewport="true"
+                android:paddingBottom="28dp"
+                android:scrollbars="none"
+                android:visibility="gone">
+
             <LinearLayout
-                android:id="@+id/btnCarSettings"
+                android:id="@+id/tabDiagColumn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+            <!-- 车机画面截图（合成后的整幅画面，见 util/CarScreenshot） -->
+            <LinearLayout
+                android:id="@+id/btnCarScreenshot"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
@@ -884,8 +998,9 @@
                         android:layout_width="20dp"
                         android:layout_height="20dp"
                         android:layout_gravity="center"
-                        android:contentDescription="@string/ui_040"
-                        android:src="@drawable/ic_menu_grid" />
+                        android:contentDescription="@string/md_car_screenshot"
+                        android:src="@drawable/ic_car"
+                        app:tint="@color/m3_primary" />
                 </FrameLayout>
 
                 <LinearLayout
@@ -898,7 +1013,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="@string/ui_041"
+                        android:text="@string/md_car_screenshot"
                         android:textColor="@color/m3_on_surface"
                         android:textSize="14.5sp"
                         android:textStyle="bold" />
@@ -907,7 +1022,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
-                        android:text="@string/ui_042"
+                        android:text="@string/md_car_screenshot_desc"
                         android:textColor="@color/m3_on_var"
                         android:textSize="12sp" />
                 </LinearLayout>
@@ -916,7 +1031,8 @@
                     android:layout_width="22dp"
                     android:layout_height="22dp"
                     android:contentDescription="@string/ui_034"
-                    android:src="@drawable/ic_chev_right" />
+                    android:src="@drawable/ic_chev_right"
+                    app:tint="@color/m3_on_var" />
             </LinearLayout>
 
             <!-- ==================== 高级：Shell 全局状态（默认折叠） ==================== -->
@@ -956,7 +1072,8 @@
                             android:layout_height="20dp"
                             android:layout_gravity="center"
                             android:contentDescription="@string/ui_043"
-                            android:src="@drawable/ic_terminal" />
+                            android:src="@drawable/ic_terminal"
+                            app:tint="@color/m3_primary" />
                     </FrameLayout>
 
                     <LinearLayout
@@ -988,7 +1105,8 @@
                         android:layout_width="22dp"
                         android:layout_height="22dp"
                         android:contentDescription="@string/ui_046"
-                        android:src="@drawable/ic_chev_down" />
+                        android:src="@drawable/ic_chev_down"
+                        app:tint="@color/m3_on_var" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -1034,7 +1152,8 @@
                                 android:layout_width="15dp"
                                 android:layout_height="15dp"
                                 android:contentDescription="@string/ui_048"
-                                android:src="@drawable/ic_refresh" />
+                                android:src="@drawable/ic_refresh"
+                                app:tint="@color/m3_primary" />
 
                             <TextView
                                 android:layout_width="wrap_content"
@@ -1063,7 +1182,8 @@
                                 android:layout_width="15dp"
                                 android:layout_height="15dp"
                                 android:contentDescription="@string/ui_049"
-                                android:src="@drawable/ic_restart" />
+                                android:src="@drawable/ic_restart"
+                                app:tint="@color/m3_primary" />
 
                             <TextView
                                 android:layout_width="wrap_content"
@@ -1116,7 +1236,8 @@
                             android:layout_height="20dp"
                             android:layout_gravity="center"
                             android:contentDescription="@string/ui_051"
-                            android:src="@drawable/ic_doc" />
+                            android:src="@drawable/ic_doc"
+                            app:tint="@color/m3_primary" />
                     </FrameLayout>
 
                     <LinearLayout
@@ -1148,7 +1269,8 @@
                         android:layout_width="22dp"
                         android:layout_height="22dp"
                         android:contentDescription="@string/ui_046"
-                        android:src="@drawable/ic_chev_down" />
+                        android:src="@drawable/ic_chev_down"
+                        app:tint="@color/m3_on_var" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -1195,7 +1317,8 @@
                             android:background="@drawable/bg_ripple_circle"
                             android:contentDescription="@string/ui_055"
                             android:padding="9dp"
-                            android:src="@drawable/ic_trash" />
+                            android:src="@drawable/ic_trash"
+                            app:tint="@color/m3_on_var" />
 
                         <ImageView
                             android:id="@+id/btnCopyLog"
@@ -1205,7 +1328,8 @@
                             android:background="@drawable/bg_ripple_circle"
                             android:contentDescription="@string/ui_056"
                             android:padding="9dp"
-                            android:src="@drawable/ic_copy" />
+                            android:src="@drawable/ic_copy"
+                            app:tint="@color/m3_on_var" />
 
                         <ImageView
                             android:id="@+id/btnExportLog"
@@ -1215,7 +1339,8 @@
                             android:background="@drawable/bg_ripple_circle"
                             android:contentDescription="@string/ui_057"
                             android:padding="9dp"
-                            android:src="@drawable/ic_export" />
+                            android:src="@drawable/ic_export"
+                            app:tint="@color/m3_on_var" />
                     </LinearLayout>
 
                     <FrameLayout
@@ -1249,7 +1374,8 @@
                             android:elevation="4dp"
                             android:padding="7dp"
                             android:src="@drawable/ic_chev_down"
-                            android:visibility="gone" />
+                            android:visibility="gone"
+                            app:tint="@color/m3_on_var" />
                     </FrameLayout>
                 </LinearLayout>
             </LinearLayout>
@@ -1281,7 +1407,8 @@
                         android:layout_height="20dp"
                         android:layout_gravity="center"
                         android:contentDescription="@string/ui_059"
-                        android:src="@drawable/ic_info_circle" />
+                        android:src="@drawable/ic_info_circle"
+                        app:tint="@color/m3_primary" />
                 </FrameLayout>
 
                 <LinearLayout
@@ -1312,7 +1439,8 @@
                     android:layout_width="22dp"
                     android:layout_height="22dp"
                     android:contentDescription="@string/ui_034"
-                    android:src="@drawable/ic_chev_right" />
+                    android:src="@drawable/ic_chev_right"
+                    app:tint="@color/m3_on_var" />
             </LinearLayout>
 
             <!-- 远程调试入口：仅 remote 调试包里该组件存在（代码探测后显示），正式包恒隐藏 -->
@@ -1343,7 +1471,8 @@
                         android:layout_height="20dp"
                         android:layout_gravity="center"
                         android:contentDescription="@string/ui_061"
-                        android:src="@drawable/ic_remote_debug" />
+                        android:src="@drawable/ic_remote_debug"
+                        app:tint="@color/m3_primary" />
                 </FrameLayout>
 
                 <LinearLayout
@@ -1374,7 +1503,8 @@
                     android:layout_width="22dp"
                     android:layout_height="22dp"
                     android:contentDescription="@string/ui_034"
-                    android:src="@drawable/ic_chev_right" />
+                    android:src="@drawable/ic_chev_right"
+                    app:tint="@color/m3_on_var" />
             </LinearLayout>
 
             <TextView
@@ -1383,7 +1513,7 @@
                 android:layout_marginTop="8dp"
                 android:gravity="center"
                 android:text="@string/ui_063"
-                android:textColor="#576767"
+                android:textColor="@color/m3_outline"
                 android:textSize="11sp" />
 
             <TextView
@@ -1392,15 +1522,133 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="3dp"
                 android:gravity="center"
-                android:textColor="#47565A"
+                android:textColor="@color/m3_outline"
                 android:textSize="10.5sp"
                 tools:text="CarDeck v0.0.0" />
             </LinearLayout>
-            </LinearLayout>
-        </LinearLayout>
-    </ScrollView>
+            </ScrollView>
             </FrameLayout>
         </LinearLayout>
+
+    <!-- ==================== 底部导航（MD3 Navigation bar；横屏改为左侧导航栏） ==================== -->
+    <LinearLayout
+        android:id="@+id/bottomNav"
+        android:layout_width="match_parent"
+        android:layout_height="80dp"
+        android:background="@color/m3_surface_low"
+        android:orientation="horizontal"
+        android:paddingTop="12dp"
+        android:paddingBottom="16dp">
+
+        <LinearLayout
+            android:id="@+id/navConnect"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <FrameLayout
+                android:id="@+id/navConnectPill"
+                android:layout_width="64dp"
+                android:layout_height="32dp">
+
+                <ImageView
+                    android:id="@+id/navConnectIcon"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_car"
+                    app:tint="@color/m3_on_var" />
+            </FrameLayout>
+
+            <TextView
+                android:id="@+id/navConnectLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/md_nav_connect"
+                android:textColor="@color/m3_on_var"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/navCar"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <FrameLayout
+                android:id="@+id/navCarPill"
+                android:layout_width="64dp"
+                android:layout_height="32dp">
+
+                <ImageView
+                    android:id="@+id/navCarIcon"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_menu_display"
+                    app:tint="@color/m3_on_var" />
+            </FrameLayout>
+
+            <TextView
+                android:id="@+id/navCarLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/md_nav_car"
+                android:textColor="@color/m3_on_var"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/navDiag"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <FrameLayout
+                android:id="@+id/navDiagPill"
+                android:layout_width="64dp"
+                android:layout_height="32dp">
+
+                <ImageView
+                    android:id="@+id/navDiagIcon"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_terminal"
+                    app:tint="@color/m3_on_var" />
+            </FrameLayout>
+
+            <TextView
+                android:id="@+id/navDiagLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/md_nav_diag"
+                android:textColor="@color/m3_on_var"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+    </LinearLayout>
 
     <!-- Snackbar（自绘 M3 反色胶囊） -->
     <TextView
@@ -1410,11 +1658,11 @@
         android:layout_gravity="bottom"
         android:layout_marginStart="18dp"
         android:layout_marginEnd="18dp"
-        android:layout_marginBottom="26dp"
+        android:layout_marginBottom="96dp"
         android:background="@drawable/bg_card"
         android:backgroundTint="@color/m3_inverse"
         android:drawableStart="@drawable/ic_check_circle_small"
-        android:drawableTint="#8FD8E2"
+        android:drawableTint="@color/m3_inverse_primary"
         android:drawablePadding="9dp"
         android:elevation="8dp"
         android:gravity="center_vertical"

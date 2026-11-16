@@ -163,27 +163,70 @@ object TouchRouter {
                 !launcher.isLayoutTransitioning() &&
                 splitMapPane?.contains(px.toFloat(), py.toFloat()) != true &&
                 (if (launcher.dockAtBottom) py < launcher.appHeightPx else px >= launcher.dockWidthPx)
-        when (
+        val gesture =
             dashboardSwipe.update(
                 contact.slot,
                 contact.down,
                 px.toFloat(),
                 py.toFloat(),
                 canStartSwipe,
-                maxOf(48f, minOf(launcher.streamWidthPx, launcher.streamHeightPx) * 0.10f),
+                maxOf(16f, minOf(launcher.streamWidthPx, launcher.streamHeightPx) * 0.025f),
             )
-        ) {
-            DashboardSwipeGesture.Result.TRIGGER -> {
-                if (pressed) runCatching { CarInputClient.service?.pointerUp(pressedDisplay, 0, 0) }
-                pressed = false
-                pressedDisplay = -1
-                logSink?.invoke("LAUNCHER: 仪表盘左滑 → 应用页")
-                Bg.run("dashboard-swipe") { launcher.showDesktop() }
+        when (gesture) {
+            DashboardSwipeGesture.Result.NONE -> Unit
+            DashboardSwipeGesture.Result.CONSUME -> return
+            DashboardSwipeGesture.Result.BEGIN_DRAG -> {
+                logSink?.invoke("LAUNCHER: 仪表盘左拖 → 跟手翻页")
+                if (!launcher.beginDashboardDragOut()) {
+                    // 没有 pager 可拖（桌面未就绪）：退回旧行为，直接切到应用页
+                    Bg.run("dashboard-swipe") { launcher.showDesktop() }
+                    return
+                }
+                launcher.dashboardDragBy(dashboardDragPixels(launcher, dashboardSwipe.dragDelta))
                 return
             }
-            DashboardSwipeGesture.Result.CONSUME -> return
-            DashboardSwipeGesture.Result.NONE -> Unit
+            DashboardSwipeGesture.Result.DRAG -> {
+                launcher.dashboardDragBy(dashboardDragPixels(launcher, dashboardSwipe.dragDelta))
+                return
+            }
+            DashboardSwipeGesture.Result.END_DRAG -> {
+                launcher.endDashboardDrag()
+                return
+            }
+            DashboardSwipeGesture.Result.TAP -> {
+                // 定性为点按：在按下点补发完整的 down + up
+                val sx = dashboardSwipe.startX.toInt()
+                val sy = dashboardSwipe.startY.toInt()
+                inject(context, contact.copy(down = true), sx, sy)
+                inject(context, contact.copy(down = false), sx, sy)
+                return
+            }
+            DashboardSwipeGesture.Result.RELEASE -> {
+                // 竖滑/右滑交还给应用：先在按下点补发 down，再照常注入当前位置
+                inject(context, contact.copy(down = true), dashboardSwipe.startX.toInt(), dashboardSwipe.startY.toInt())
+            }
         }
+        inject(context, contact, px, py)
+    }
+
+    /** 流像素位移 → 桌面（Grid）屏像素：横屏 dock 在左时桌面屏可能超采样。 */
+    private fun dashboardDragPixels(
+        launcher: VirtualLauncher,
+        dx: Float,
+    ): Float = if (launcher.dockAtBottom) dx else dx * launcher.gridScale().coerceAtLeast(1f)
+
+    /** 坐标分流 + 注入（手势判定之后的部分）。 */
+    private fun inject(
+        context: Context,
+        contact: Contact,
+        px: Int,
+        py: Int,
+    ) {
+        val launcher = VirtualLauncher
+        val splitMapPane = splitMapPane(launcher)
+        val assistLayer =
+            io.github.shaonialife.cardeck.assist.AssistOverlayController
+                .isOnAssistLayer()
         if (launcher.isLayoutTransitioning()) {
             if (!contact.down) {
                 if (pressed) runCatching { CarInputClient.service?.pointerUp(pressedDisplay, 0, 0) }
@@ -269,9 +312,12 @@ object TouchRouter {
                 routedToMap = true
             }
             if (!routedToMap) {
-                targetDisplay = if (inDock) launcher.dockDisplayId else launcher.appDisplayId
-                localX = px
-                localY = if (inDock) py - appH else py
+                // 横屏底部 dock（Android Auto 式）也有超采样应用屏：走活动应用屏 + 倍率
+                // （竖屏车机无超采样屏，activeAppScale 恒 1，行为与旧版一致）
+                targetDisplay = if (inDock) launcher.dockDisplayId else launcher.activeAppDisplayId()
+                val scale = if (inDock) 1f else launcher.activeAppScale().coerceAtLeast(1f)
+                localX = if (inDock) px else (px * scale).toInt()
+                localY = if (inDock) py - appH else (py * scale).toInt()
             }
         } else {
             inDock = px < dockW

@@ -30,6 +30,50 @@ class DockActivity : AppCompatActivity() {
     private var appsContainer: LinearLayout? = null
     private var clockView: TextView? = null
     private var batteryView: io.github.shaonialife.cardeck.ui.BatteryGlyphView? = null
+    private var statusView: io.github.shaonialife.cardeck.ui.StatusGlyphsView? = null
+
+    /** 蜂窝信号回调（SignalStrengthsListener 无需权限）。 */
+    private val signalCallback =
+        object :
+            android.telephony.TelephonyCallback(),
+            android.telephony.TelephonyCallback.SignalStrengthsListener {
+            override fun onSignalStrengthsChanged(signalStrength: android.telephony.SignalStrength) {
+                statusView?.setCellLevel(cellLevelOf(signalStrength.level))
+            }
+        }
+
+    /** 无 SIM / 未就绪时整排信号点置暗（-1）。 */
+    private fun cellLevelOf(level: Int): Int {
+        val tm = getSystemService(android.telephony.TelephonyManager::class.java) ?: return -1
+        return if (tm.simState == android.telephony.TelephonyManager.SIM_STATE_READY) level else -1
+    }
+
+    /**
+     * Wi-Fi 格数：跟踪任一 Wi-Fi 网络的 RSSI（会话中即车机热点）。回调在后台线程，
+     * 投回主线程更新；断开时隐藏图标。
+     */
+    private val wifiCallback =
+        object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onCapabilitiesChanged(
+                network: android.net.Network,
+                caps: android.net.NetworkCapabilities,
+            ) {
+                val rssi = caps.signalStrength
+                val wm = applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
+                val level =
+                    if (rssi == android.net.NetworkCapabilities.SIGNAL_STRENGTH_UNSPECIFIED || wm == null) {
+                        3
+                    } else {
+                        val max = wm.maxSignalLevel.coerceAtLeast(1)
+                        ((wm.calculateSignalLevel(rssi) * 3f / max) + 0.5f).toInt().coerceIn(0, 3)
+                    }
+                runOnUiThread { statusView?.setWifiLevel(level) }
+            }
+
+            override fun onLost(network: android.net.Network) {
+                runOnUiThread { statusView?.setWifiLevel(-1) }
+            }
+        }
     private var barForm = false
 
     /**
@@ -92,9 +136,9 @@ class DockActivity : AppCompatActivity() {
 
         clockView = findViewById(R.id.dockClock)
         batteryView = findViewById(R.id.dockBattery)
+        statusView = findViewById(R.id.dockStatus)
         appsContainer = findViewById(R.id.dockApps)
         wallpaperView = findViewById(R.id.dockWallpaper)
-        findViewById<View>(R.id.dockRecents).setOnClickListener { VirtualLauncher.showRecentApps(this) }
         findViewById<ImageView>(R.id.dockHome).apply {
             setOnClickListener { Bg.run("dock-home") { VirtualLauncher.onHomePressed() } }
             // 图标随模式切换：仪表盘激活=房屋（点按回桌面）；否则=田字格（点按进仪表盘）。
@@ -116,9 +160,11 @@ class DockActivity : AppCompatActivity() {
         clockHandler.post(clockTicker)
         // 字号按「设计 px × designScale」设置（不进 XML：荣耀 ROM 上 autoSize 对窄 dock
         // 不生效，仍需布局完成后按实测宽度手工缩钟表——见 fitClockText；13/22 为原型值）
-        clockView?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 22f * designScale)
+        clockView?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 30f * designScale)
         // 电池图标高度与原百分比文字同一设计基准（13 设计 px），随 dock 缩放
-        batteryView?.let { v -> v.layoutParams = v.layoutParams.apply { height = (13f * designScale).toInt().coerceAtLeast(1) } }
+        batteryView?.let { v -> v.layoutParams = v.layoutParams.apply { height = (21f * designScale).toInt().coerceAtLeast(1) } }
+        statusView?.let { v -> v.layoutParams = v.layoutParams.apply { height = (17f * designScale).toInt().coerceAtLeast(1) } }
+        startStatusTracking()
         clockView?.post { fitClockText(clockView!!) }
         setupWallpaper()
         // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
@@ -140,6 +186,12 @@ class DockActivity : AppCompatActivity() {
             .removeListener(wallpaperListener)
         DockPrefs.removeListener(dockPrefsListener)
         runCatching { unregisterReceiver(batteryReceiver) }
+        runCatching {
+            getSystemService(android.telephony.TelephonyManager::class.java)?.unregisterTelephonyCallback(signalCallback)
+        }
+        runCatching {
+            getSystemService(android.net.ConnectivityManager::class.java)?.unregisterNetworkCallback(wifiCallback)
+        }
         super.onDestroy()
     }
 
@@ -257,6 +309,23 @@ class DockActivity : AppCompatActivity() {
         runOnUiThread { batteryView?.setLevel(percent, charging) }
     }
 
+    /** 时间下方的信号/Wi-Fi 状态行：注册系统回调（失败只影响这一行，不影响 dock）。 */
+    private fun startStatusTracking() {
+        runCatching {
+            val tm = getSystemService(android.telephony.TelephonyManager::class.java) ?: return@runCatching
+            statusView?.setCellLevel(cellLevelOf(tm.signalStrength?.level ?: 0))
+            tm.registerTelephonyCallback(mainExecutor, signalCallback)
+        }
+        runCatching {
+            val request =
+                android.net.NetworkRequest
+                    .Builder()
+                    .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                    .build()
+            getSystemService(android.net.ConnectivityManager::class.java)?.registerNetworkCallback(request, wifiCallback)
+        }
+    }
+
     private var lastRendered: List<String> = emptyList()
 
     /** 上次渲染用的图标表（桌面扫描换新后需重绘：dock 常比扫描先完成首绘）。 */
@@ -279,10 +348,8 @@ class DockActivity : AppCompatActivity() {
 
     private fun refresh() {
         val container = appsContainer ?: return
-        val current =
-            synchronized(VirtualLauncher.runningApps) {
-                VirtualLauncher.runningApps.map { it.flattenToString() }
-            }
+        val apps = VirtualLauncher.dockApps()
+        val current = apps.map { it.flattenToString() }
         val iconCache = VirtualLauncher.iconCache
         if (current == lastRendered && iconCache === lastIconCache) return
         lastRendered = current
@@ -291,7 +358,6 @@ class DockActivity : AppCompatActivity() {
         val density = resources.displayMetrics.density
         val iconPx = ((if (barForm) 32 else 30) * density).toInt()
         val pad = (6 * density).toInt()
-        val apps = synchronized(VirtualLauncher.runningApps) { VirtualLauncher.runningApps.toList() }
         apps.forEach { component ->
             val drawable = iconFor(component, iconCache)
             // 位图化渲染（与桌面网格同一路径）：直接 setImageDrawable 会让 ImageView

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" formatted="false">CarDeck</string>
+    <string name="app_name" formatted="false">CarDeck Neo</string>
     <string name="app_subtitle" formatted="false">Experimental CarPlay compatible sender</string>
     <string name="car_settings" formatted="false">Car settings</string>
     <string name="accessibility_description" formatted="false">Inject car touch gestures into the phone display without reading its content</string>
@@ -30,7 +30,6 @@
     <string name="ui_024" formatted="false">Car audio</string>
     <string name="ui_025" formatted="false">Optional screen capture permission is required for car audio.</string>
     <string name="ui_026" formatted="false">Allow</string>
-    <string name="ui_027" formatted="false">Car display</string>
     <string name="ui_028" formatted="false">Keep awake</string>
     <string name="ui_029" formatted="false">Keep awake + dim</string>
     <string name="ui_030" formatted="false">Keep the phone unlocked; turn its panel off when idle. Car display stays on.</string>
@@ -40,12 +39,7 @@
     <string name="ui_034" formatted="false">Open</string>
     <string name="ui_035" formatted="false">Wallpaper</string>
     <string name="ui_036" formatted="false">Car wallpaper</string>
-    <string name="ui_037" formatted="false">Fill display</string>
-    <string name="ui_038" formatted="false">Change</string>
-    <string name="ui_039" formatted="false">Reset to default</string>
-    <string name="ui_040" formatted="false">Landscape</string>
-    <string name="ui_041" formatted="false">Car settings</string>
-    <string name="ui_042" formatted="false">Apps · Orientation · Quality · Dock · Default map</string>
+    <string name="ui_037" formatted="false">Follows the phone dark/light mode</string>
     <string name="ui_043" formatted="false">Terminal</string>
     <string name="ui_044" formatted="false">System state</string>
     <string name="ui_045" formatted="false">Letterboxing, virtual displays and window overrides for troubleshooting</string>
@@ -190,8 +184,6 @@
     <string name="screen_034" formatted="false">If prompted about no internet access, choose to stay connected</string>
     <string name="screen_035" formatted="false">The hotspot password will be retrieved over Bluetooth</string>
     <string name="screen_036" formatted="false">Dimming will be available after connection</string>
-    <string name="screen_037" formatted="false">Default wallpaper restored</string>
-    <string name="screen_038" formatted="false">Could not restore</string>
     <string name="screen_039" formatted="false">No logs</string>
     <string name="screen_040" formatted="false">CarDeck logs</string>
     <string name="screen_041" formatted="false">Keep awake and dimming enabled.</string>
@@ -351,17 +343,62 @@
     <string name="new_notification">New notification</string>
     <string name="recent_apps">Background apps</string>
     <string name="recent_back">Back</string>
-    <string name="recent_refresh">Refresh</string>
     <string name="recent_close_all">Close all</string>
-    <string name="recent_close">Close</string>
-    <string name="recent_help">Manage apps open on the car display. Tap an app to switch. Music may keep playing after its window closes.</string>
-    <string name="recent_loading">Loading open apps…</string>
     <string name="recent_empty">No open apps</string>
-    <string name="recent_count">%1$d open apps</string>
     <string name="recent_read_failed">Could not load apps. Try again.</string>
     <string name="recent_open_failed">Could not open app. Refresh and try again.</string>
     <string name="recent_close_failed">Some windows could not close. Refresh and try again.</string>
     <string name="recent_open_app">Open %1$s</string>
     <string name="recent_close_app">Close %1$s</string>
     <string name="search_map_apps">Search apps</string>
+    <string name="dash_layout">Narrow-screen dashboard layout</string>
+    <string name="dash_layout_side">Side by side</string>
+    <string name="dash_layout_dock_bottom">Dock at bottom</string>
+    <string name="dash_layout_note">Only applies to narrow head units (e.g. 800×480, 16:9); wide ones always use side by side. Portrait head units are not affected. Applies on next connection.</string>
+    <string name="ui_041" formatted="false">Car settings</string>
+    <!-- 手机侧 MD3 分页（2026-11-17） -->
+    <string name="md_nav_connect">Connect</string>
+    <string name="md_nav_car">Car</string>
+    <string name="md_nav_diag">Diagnostics</string>
+    <string name="md_quick_settings">Quick settings</string>
+    <string name="md_car_settings">Car settings</string>
+    <string name="md_appearance">Appearance</string>
+    <!-- 车机壁纸：深浅色两套 + 内置图案（2026-11-17） -->
+    <string name="wp_dark_title">Dark mode</string>
+    <string name="wp_light_title">Light mode</string>
+    <string name="wp_default">Default</string>
+    <string name="wp_custom">My photo</string>
+    <string name="wp_pick">Photos</string>
+    <string name="wp_same">Same as dark</string>
+    <string name="wp_preset_midnight">Midnight</string>
+    <string name="wp_preset_aurora">Aurora</string>
+    <string name="wp_preset_ember">Ember</string>
+    <string name="wp_preset_graphite">Graphite</string>
+    <string name="wp_preset_dawn">Dawn</string>
+    <string name="wp_preset_mist">Mist</string>
+    <string name="wp_preset_meadow">Meadow</string>
+    <!-- 免责声明（2026-11-17 多语言化；改正文须同步 Disclaimer.CURRENT_VERSION +1） -->
+    <string name="disclaimer_s1_title">What this is</string>
+    <string name="disclaimer_s1_body">CarDeck Neo is an unofficial, experimental project: it lets a non-rooted Android phone act as a CarPlay sender (the iPhone role), showing a car launcher and third-party apps from the phone on a supported receiver, and feeding the receiver\'s touch input back into virtual displays on the phone.\n\nThis project is not affiliated with Apple Inc. or any car manufacturer, has no authorization or certification of any kind, and is not an MFi-certified product. \"CarPlay\" and \"AirPlay\" are trademarks of Apple Inc., used here only to describe compatibility; this implies no affiliation or endorsement.</string>
+    <string name="disclaimer_s2_title">Work in progress — things may break at any time</string>
+    <string name="disclaimer_s2_body">This is a development build. Features, UI and the protocol implementation may change at any time, and there may be undiscovered bugs. No stability, compatibility or availability is promised.\n\nThe only combinations that have been tested are:\n· Sender: Honor Magic7 Pro (Android 17)\n· Receiver: Audi MIB3 head unit (real car)\n· Receiver: DiPlay test bench on a Redmi K40 (Android 13)\n\nOther phones, Android versions and car models have not been verified. They may not work at all, or may show display glitches, misaligned touches or repeated disconnects.\n\n\"Force landscape\" requires Android 14 or later; it is not available on Android 13 and earlier (the settings panel says so).</string>
+    <string name="disclaimer_s3_title">Driving safety (please read)</string>
+    <string name="disclaimer_s3_body">This app is not a safety-critical system and cannot replace the factory navigation or vehicle instruments.\n\n· Connect, pair and change all settings while parked;\n· While driving, any interaction must be done by a passenger — the driver must not hold or operate the phone;\n· The wireless link can drop at any time due to interference, system sleep, hotspot switching, Bluetooth reconnection and so on, showing up as a frozen or black screen, unresponsive touch or interrupted navigation;\n· A disconnect while driving can make you miss a turn, lose your route or get distracted. Always keep the factory navigation as a safety backup, and you are fully responsible for how you drive.</string>
+    <string name="disclaimer_s4_title">Permissions and data</string>
+    <string name="disclaimer_s4_body">To work, this app requests and uses the following capabilities. Please make sure you understand them before granting:\n\n· Shizuku (shell permission): to create trusted virtual displays, inject touch events, write system compatibility settings (such as forcing apps to landscape) and read window and display state. The app does not use it to run commands unrelated to its own service;\n· Notification access / media sessions: only to show what is playing on the car launcher (title, artist, artwork, progress);\n· Bluetooth: to pair with the receiver (pairing only, no Bluetooth audio connection);\n· Screen recording (cast) permission: only to capture audio when \"car audio\" is turned on.\n\nPairing information, target device names, wallpapers and settings are stored only on this device and are never uploaded to any server. The app contains no analytics or advertising SDKs.</string>
+    <string name="disclaimer_s5_title">Disclaimer of liability</string>
+    <string name="disclaimer_s5_body">This app is provided \"as is\", without warranties of any kind, express or implied, including but not limited to merchantability, fitness for a particular purpose and non-infringement.\n\nTo the maximum extent permitted by applicable law, the authors and contributors are not liable for any direct or indirect loss arising from the use of, or inability to use, this app — including but not limited to lost connections, interrupted navigation or calls, data loss, device malfunction, vehicle system malfunction, and accidents or losses caused by operating the phone or being distracted while driving.\n\nWhether you use this app, how you configure and operate it, and in what situations, is entirely your own decision and at your own risk. If you do not agree with any of the above, tap \"Decline\" and uninstall the app.</string>
+    <string name="disclaimer_s6_title">Open source and feedback</string>
+    <string name="disclaimer_s6_body">This is a personal experimental project, open-sourced under the MIT License. Bug reports are welcome, but no fix timeline is promised. Because it involves protocol implementation and differences between third-party ROMs, some issues may never be solvable.\n\nThe full terms (unofficial status, trademarks, safety warnings, tested scope) are in DISCLAIMER.md at the root of the repository, from the same source as this page.</string>
+    <string name="disclaimer_subtitle_first">Please read this in full before first use. After accepting you can reopen it from the main screen at any time.</string>
+    <string name="disclaimer_subtitle_view">You can come back to this notice at any time (current version v%1$d).</string>
+    <string name="disclaimer_accept">Accept</string>
+    <string name="disclaimer_accept_wait">Accept (%1$ds)</string>
+    <string name="disclaimer_close">Close</string>
+    <string name="disclaimer_hint_scroll_wait">Scroll to the bottom and wait %1$d s</string>
+    <string name="disclaimer_hint_wait">Please wait %1$d s before accepting</string>
+    <string name="disclaimer_hint_scroll">Scroll to the bottom to continue</string>
+    <string name="md_car_screenshot">Capture car screen</string>
+    <string name="md_car_screenshot_desc">Save the current car screen as a PNG to Download/CarDeck (while connected)</string>
+    <string name="md_car_screenshot_failed">Capture failed: connect to a car first</string>
 </resources>

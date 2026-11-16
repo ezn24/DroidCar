@@ -3,7 +3,7 @@
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item>
         <shape android:shape="oval">
-            <solid android:color="#FF0A84FF" />
+            <solid android:color="?attr/panelAccent" />
         </shape>
     </item>
     <item
@@ -12,7 +12,7 @@
         android:right="5dp"
         android:bottom="5dp">
         <shape android:shape="oval">
-            <solid android:color="#FFFFFFFF" />
+            <solid android:color="?attr/panelOnAccent" />
         </shape>
     </item>
 </layer-list>

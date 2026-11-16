@@ -37,6 +37,16 @@ sealed class SettingsRow {
  * 「排序错误」（2026-10-16 用户反馈：高德在桌面 → G 排在导航条第一个）。
  */
 object SettingsRows {
+    /** 面板主题色（车机主题 = 原深色值，手机主题 = MD3 令牌；属性定义见 attrs.xml）。 */
+    fun color(
+        context: Context,
+        attr: Int,
+    ): Int {
+        val value = android.util.TypedValue()
+        context.theme.resolveAttribute(attr, value, true)
+        return if (value.resourceId != 0) context.getColor(value.resourceId) else value.data
+    }
+
     fun build(
         context: Context,
         apps: List<VirtualLauncher.AppEntry>,
@@ -94,7 +104,7 @@ object SettingsRows {
                     TextView(fragment.requireContext()).apply {
                         text = letter
                         textSize = 9f
-                        setTextColor(0xFF8E8E93.toInt())
+                        setTextColor(color(context, io.github.shaonialife.cardeck.R.attr.panelTextSecondary))
                         setPadding(0, (1.5f * density).toInt(), 0, (1.5f * density).toInt())
                         setOnClickListener {
                             val target =

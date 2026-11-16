@@ -28,8 +28,9 @@ class SettingsActivity :
     private var currentMenu = -1
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // 深浅色跟随手机（与车机壁纸深/浅槽位同一判据），主色跟随系统 Material You
         super.onCreate(savedInstanceState)
-        if (VirtualLauncher.dockAtBottom) {
+        if (VirtualLauncher.isPortraitCanvas()) {
             // 竖屏窄屏：双栏挤压——转发手机侧二级菜单（列表 → 内容页）
             startActivity(
                 android.content.Intent(
@@ -108,7 +109,7 @@ class SettingsActivity :
             for (c in 0 until menu.childCount) {
                 val child = menu.getChildAt(c)
                 if (child is TextView) {
-                    child.setTextColor(if (i == index) 0xFFF5F5F7.toInt() else 0xFF8E8E93.toInt())
+                    child.setTextColor(getColor(if (i == index) R.color.m3_on_sec_container else R.color.m3_on_var))
                     child.paint.isFakeBoldText = i == index
                 }
             }

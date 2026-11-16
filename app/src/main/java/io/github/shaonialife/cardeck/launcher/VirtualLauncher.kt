@@ -15,6 +15,8 @@ import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
 import io.github.shaonialife.cardeck.media.NotificationAccess
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.render.DASH_GAP_PX
+import io.github.shaonialife.cardeck.render.DashLayout
+import io.github.shaonialife.cardeck.render.DashMetrics
 import io.github.shaonialife.cardeck.render.DualDisplayComposer
 import io.github.shaonialife.cardeck.render.OverlayCard
 import io.github.shaonialife.cardeck.shizuku.CarInputClient
@@ -67,8 +69,45 @@ object VirtualLauncher {
     // ---- 仪表盘固定分屏（保留旧几何辅助接口以兼容坐标调用）----
     // 比例 = tile 主轴长占「可用长度」（应用区主轴 − 两端边距 − 把手宽）的比例。
 
-    /** 固定 3:1 地图/媒体比例；旧版用户拖动偏好不再参与运行时布局。 */
+    /** 1920×720 基准下的地图/媒体比例（3:1）；其它分辨率按 [dashSplitFractionFor] 自适应。 */
     const val DASH_SPLIT_DEFAULT_FRACTION = 3f / 4f
+
+    /**
+     * 媒体卡「宽高比」目标（横屏 = 媒体卡宽 / 卡高）。取自 1920×720 下 3:1 的实际形状
+     * （424/688 ≈ 0.62）——媒体卡保持这个形状，地图吃掉其余宽度。竖屏车机媒体卡在下方，
+     * 目标为「卡高 / 卡宽」。
+     */
+    private const val MEDIA_CARD_ASPECT_LANDSCAPE = 0.62f
+    private const val MEDIA_CARD_ASPECT_PORTRAIT = 0.45f
+
+    /** 自适应比例的钳制：地图至少过半、至多 80%（超宽屏不让媒体卡缩成细条）。 */
+    private const val ADAPTIVE_SPLIT_MIN = 0.55f
+    private const val ADAPTIVE_SPLIT_MAX = 0.8f
+
+    /**
+     * 按应用区尺寸算地图/媒体分屏比例（纯函数，单测钉死）：媒体卡保持固定形状，
+     * 地图占其余。1920×720 → ≈0.75（与旧 3:1 一致）；16:9（如 1280×720）→ ≈0.61；
+     * 超宽屏封顶 0.8；窄屏不低于 0.55。
+     *
+     * @param mainLen 分屏主轴长（横屏 = 应用区宽，竖屏 = 应用区高）
+     * @param crossLen 另一轴长（横屏 = 应用区高，竖屏 = 应用区宽）
+     */
+    fun dashSplitFractionFor(
+        mainLen: Int,
+        crossLen: Int,
+        portrait: Boolean,
+    ): Float {
+        val usable = (mainLen - CARD_MARGIN_PX * 2 - DASH_GAP_PX).coerceAtLeast(1f)
+        val cardCross = (crossLen - CARD_MARGIN_PX * 2).coerceAtLeast(1)
+        val mediaLen = cardCross * if (portrait) MEDIA_CARD_ASPECT_PORTRAIT else MEDIA_CARD_ASPECT_LANDSCAPE
+        return (1f - mediaLen / usable).coerceIn(ADAPTIVE_SPLIT_MIN, ADAPTIVE_SPLIT_MAX)
+    }
+
+    /** 横屏底部 dock 相对侧栏的厚度系数（侧栏宽 ≈ 画布短边 23%，底部条取其 72% ≈ 17%）。 */
+    private const val BOTTOM_DOCK_FACTOR = 0.72f
+
+    /** 本会话生效的分屏比例（合成器默认中线公式用）。 */
+    fun currentDashSplitFraction(): Float = dashSplitFraction
 
     /** 比例钳制域：任一卡最小占 20%，防拖成一条线（按钮/圆角全挤没）。 */
     const val DASH_SPLIT_MIN_FRACTION = 0.2f
@@ -115,7 +154,7 @@ object VirtualLauncher {
     }
 
     /** 分屏主轴长度（应用区坐标系）：横=appAreaWidth、竖=appAreaHeight。 */
-    private fun splitMainLen(): Int = if (dockAtBottom) appAreaHeight else appAreaWidth
+    private fun splitMainLen(): Int = if (splitVertical) appAreaHeight else appAreaWidth
 
     val runningApps = LinkedHashSet<ComponentName>()
 
@@ -179,10 +218,23 @@ object VirtualLauncher {
     var dockWidthPx: Int = 0
         private set
 
-    /** 竖屏车机（屏幕高>宽）：dock 改为底部横条。 */
+    /** dock 在底部横条（竖屏车机，或横屏选了「Dock 在底部」版面）；只表达 dock 位置，分屏方向见 [splitVertical]。 */
     @Volatile
     var dockAtBottom: Boolean = false
         private set
+
+    /** 地图在上、媒体在下（竖屏车机 / 音乐条版面）；false = 左右分屏。 */
+    @Volatile
+    var splitVertical: Boolean = false
+        private set
+
+    /** 本会话版面（attach 时按偏好与画布解析，见 [DashLayout.resolve]）。 */
+    @Volatile
+    var dashLayout: DashLayout = DashLayout.SIDE_BY_SIDE
+        private set
+
+    /** 车机画布是竖屏（设置页等按「窄屏」处理的依据，与 dock 位置无关）。 */
+    fun isPortraitCanvas(): Boolean = streamHeightPx > streamWidthPx
 
     /** dock 横条高度（竖屏；TouchRouter 按 y 分流）。 */
     @Volatile
@@ -245,6 +297,19 @@ object VirtualLauncher {
     @Volatile
     private var activeMapComponent: ComponentName? = null
 
+    /** 当前在媒体区（CarPlayMedia 屏）的应用；dock 不重复显示它与当前地图。 */
+    @Volatile
+    private var activeMediaComponent: ComponentName? = null
+
+    /**
+     * dock 显示的运行中应用：会话内开过的应用，**去掉当前地图与媒体区应用**——
+     * 它们在仪表盘上已有固定位置，dock 留给额外打开的应用（2026-11-17 用户要求）。
+     */
+    fun dockApps(): List<ComponentName> {
+        val hidden = setOfNotNull(activeMapComponent?.packageName, activeMediaComponent?.packageName)
+        return synchronized(runningApps) { runningApps.filter { it.packageName !in hidden } }
+    }
+
     fun setDashboardPanesSwapped(
         context: Context,
         swapped: Boolean,
@@ -264,7 +329,7 @@ object VirtualLauncher {
             appAreaHeight,
             if (dockAtBottom) 0 else dockWidthPx,
             dashSplitPos,
-            dockAtBottom,
+            splitVertical,
             dashboardPanesSwapped,
         )
 
@@ -293,7 +358,7 @@ object VirtualLauncher {
             appAreaHeight,
             if (dockAtBottom) 0 else dockWidthPx,
             dashSplitPos,
-            dockAtBottom,
+            splitVertical,
             dashboardPanesSwapped,
         )
 
@@ -315,6 +380,52 @@ object VirtualLauncher {
         setTileSlide(1f)
         composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
         refreshOverlayCard()
+    }
+
+    /** 截取合成后的车机画面（未连接返回 false）；回调在 GL 线程。 */
+    fun requestCarFrame(callback: (android.graphics.Bitmap?) -> Unit): Boolean {
+        val c = composer ?: return false
+        c.requestCapture(callback)
+        return true
+    }
+
+    /** 桌面 pager 的 fakeDrag 接口（GridActivity 注册；回调内自行切主线程）。 */
+    interface DashboardDragSink {
+        fun begin(): Boolean
+
+        fun dragBy(px: Float)
+
+        fun end()
+    }
+
+    @Volatile
+    var dashboardDragSink: DashboardDragSink? = null
+
+    /**
+     * 仪表盘向左跟手拖（TouchRouter 认领手势后调用）：GL 地图层由 pager 的 onPageScrolled
+     * 驱动随手指滑出，松手后 pager 落定、IDLE 时按落点提交模式（与应用页右拖回仪表盘同一收尾）。
+     */
+    fun beginDashboardDragOut(): Boolean {
+        if (!dashboardMode || mapFullscreen) return false
+        val sink = dashboardDragSink ?: return false
+        dashboardUserDragging = true
+        dashboardPageAnimating = true
+        setTileSlide(0f)
+        composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
+        if (!sink.begin()) {
+            dashboardUserDragging = false
+            dashboardPageAnimating = false
+            return false
+        }
+        return true
+    }
+
+    fun dashboardDragBy(px: Float) {
+        if (dashboardUserDragging) dashboardDragSink?.dragBy(px)
+    }
+
+    fun endDashboardDrag() {
+        dashboardDragSink?.end()
     }
 
     fun finishDashboardPageSwitch(dashboard: Boolean) {
@@ -358,6 +469,7 @@ object VirtualLauncher {
         val result = startMapApp(component, target, forceNewTask = !onTarget, extraArgs = "--windowingMode 1")
         val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
         if (ok) {
+            activeMediaComponent = component
             mediaPaneOpen = true
             composer?.showMediaPane = true
             notifyMapLayout()
@@ -443,8 +555,13 @@ object VirtualLauncher {
     @Volatile
     private var appHiDisplayH = 0
 
-    /** 地图屏密度（创建时固定 200dpi，resize 不变——逻辑尺寸随像素缩放）。 */
-    private const val MAP_DISPLAY_DPI = 200
+    /**
+     * 地图屏 / 媒体屏密度：以 720 短边 = 200dpi 为基准随画布等比（2026-11-17）。
+     * 此前固定 200dpi——800×480 的地图屏只有 ~534×271dp，Google 地图的搜索栏与底部面板
+     * 占满高度、地图只剩一条缝；等比后 ~800×408dp，与 1920×720 的观感比例一致。
+     * resize 不变密度（逻辑尺寸随像素缩放）。下限 120 防 ROM 拒绝异常密度。
+     */
+    private val MAP_DISPLAY_DPI: Int get() = (200f * DashMetrics.scale).toInt().coerceIn(120, 600)
 
     /** 仪表盘（分屏）模式是否激活。 */
     @Volatile
@@ -596,6 +713,17 @@ object VirtualLauncher {
      */
     fun pageDotsOnTop(): Boolean = (dashboardMode || dashboardPageAnimating) && !mapFullscreen
 
+    /** 页点是否该显示（只在翻页中显示，由 GridActivity 按 pager 滑动状态驱动）。 */
+    @Volatile
+    var pageDotsShowing: Boolean = false
+        private set
+
+    fun setPageDotsShowing(show: Boolean) {
+        if (pageDotsShowing == show) return
+        pageDotsShowing = show
+        composer?.setPageDotsVisible(show)
+    }
+
     /**
      * GridActivity 上报页点位图。[left]/[top] 为页点在**桌面所在屏**内的像素坐标；
      * 桌面屏可能是超采样屏（像素 = 输出 × [gridScale]），换算回输出画面再平移到 [appAreaRect]。
@@ -723,14 +851,21 @@ object VirtualLauncher {
         // 密度**同乘**比例——内容 dp 布局不变、渲染进更少像素，整条 dock（图标/时钟/
         // 文字）等比变窄；只缩厚度不缩密度会让内容溢出或留白。下限 80px 同乘缩放防
         // 极端画布下压没。密度下限 120 防 ROM 拒绝异常密度。
-        val dockScale = DockPrefs.widthPercent(context) / 100f
+        // 版面：dock 位置与分屏方向（窄横屏可选音乐条 / 底部 dock；竖屏车机固定）
+        val layout = DashLayout.resolve(DisplayPrefs.dashboardLayout(context), totalWidth, totalHeight)
+        dashLayout = layout
+        splitVertical = layout.splitVertical
+        // 横屏底部 dock 比侧栏薄（Android Auto 式）：厚度与 dock 屏密度同乘，内容等比缩小不溢出
+        val dockScale = DockPrefs.widthPercent(context) / 100f * if (layout == DashLayout.DOCK_BOTTOM) BOTTOM_DOCK_FACTOR else 1f
         val thicknessPx =
             (DOCK_WIDTH_DP * density * dockScale)
                 .toInt()
                 .coerceAtLeast((80 * dockScale).toInt().coerceAtLeast(1))
         val dockDensityDpi = (densityDpi * dockScale).toInt().coerceAtLeast(120)
         // 车机方向决定 dock 位置：横屏 → 左侧竖条；竖屏 → 底部横条（2026-10-11 用户要求）
-        dockAtBottom = totalHeight > totalWidth
+        dockAtBottom = layout.dockAtBottom
+        // 版式缩放要先于一切几何推导（边距/中缝/圆角都随它走）
+        DashMetrics.configure(totalWidth, totalHeight)
         streamWidthPx = totalWidth
         streamHeightPx = totalHeight
         val appWidth: Int
@@ -754,10 +889,20 @@ object VirtualLauncher {
             (appWidth / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(160, 640)
         // 地图屏：按应用区全尺寸创建，分屏/全屏间动态 resize（见 resizeMapDisplay）。
         // tile 尺寸 = SPLIT 绘制矩形，边距统一用契约值 CARD_MARGIN_PX（勿再裸写数字）。
-        // 固定 3:1 比例；忽略旧版拖动比例。几何推导集中在 [dashSplitGeom]
-        // 纯函数（单测钉死四方一致性）。tile 主轴长（横=宽、竖=高）=比例×可用长度。
-        dashSplitFraction = DASH_SPLIT_DEFAULT_FRACTION
-        if (dockAtBottom) {
+        // 比例按应用区形状自适应（[dashSplitFractionFor]，1920×720 下即 3:1）；忽略旧版
+        // 拖动比例。几何推导集中在 [dashSplitGeom] 纯函数（单测钉死四方一致性）。
+        // tile 主轴长（横=宽、竖=高）=比例×可用长度。
+        dashSplitFraction =
+            when {
+                splitVertical -> dashSplitFractionFor(appHeightPx, appWidth, portrait = true)
+                else -> dashSplitFractionFor(appWidth, appHeightPx, portrait = false)
+            }
+        log(
+            "LAUNCHER: 仪表盘版式 画布=${totalWidth}x$totalHeight 版面=$layout 缩放=${"%.2f".format(DashMetrics.scale)} " +
+                "地图比例=${"%.2f".format(dashSplitFraction)}",
+        )
+        if (splitVertical) {
+            // 上下分屏：主轴 = y，原点即流顶缘（dock 不在上方）
             val geom = dashSplitGeom(appHeightPx, dashSplitFraction)
             mapTileWidth = appWidth - CARD_MARGIN_PX * 2
             mapTileHeight = geom.tileLen
@@ -766,15 +911,15 @@ object VirtualLauncher {
             val geom = dashSplitGeom(appWidth, dashSplitFraction)
             mapTileWidth = geom.tileLen
             mapTileHeight = appHeightPx - CARD_MARGIN_PX * 2
-            // 横屏应用区从 dock 右缘起（竖屏 x 原点即流原点，无偏移）
-            dashSplitPos = geom.splitCenter + dockWidthPx
+            // 左右分屏：应用区从 dock 右缘起；dock 在底部时 x 原点即流原点
+            dashSplitPos = geom.splitCenter + if (dockAtBottom) 0 else dockWidthPx
         }
         // 横屏应用屏的密度选择（2026-10-11 实测标定）：
         // 竖屏锁定应用（如头条）在横屏屏上被系统 letterbox 成窄条窗口，窗口逻辑宽度
         // = 屏高px/letterbox宽高比，再由屏幕密度换算 dp。密度偏高 → 窗口只有 ~343dp，
         // 应用呈现「大字大搜索框」的窄屏布局；密度 ~200 → 窗口 ~411dp ≈ 手机宽度，
         // 应用呈现紧凑手机布局（截图验证）。目标：letterbox 窗口 ≈ LETTERBOX_TARGET_DP。
-        val landscapeApp = appWidth > appHeightPx && !dockAtBottom
+        val landscapeApp = appWidth > appHeightPx
         // 超采样：部分应用（头条实测）按「手机状态栏物理像素」预留顶部区域
         // （28dp@560dpi=98px 原始像素，与显示密度无关），在 540px 高的流里占 18%、
         // 手机上仅 3.5%——无法去除（应用内部绘制），只能靠「渲染更多像素再缩回」
@@ -825,7 +970,7 @@ object VirtualLauncher {
         val useTrusted = svc != null
         log("LAUNCHER: 虚拟屏模式=${if (useTrusted) "受信屏(shell)" else "应用屏(回退)"}")
 
-        val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom)
+        val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom, splitVertical)
         composer.targetFps =
             DisplayPrefs
                 .fps(context)
@@ -893,7 +1038,7 @@ object VirtualLauncher {
                                 "CarPlayMap",
                                 appWidth,
                                 appHeightPx,
-                                200,
+                                MAP_DISPLAY_DPI,
                                 mapSurface,
                                 true,
                             )
@@ -1146,6 +1291,7 @@ object VirtualLauncher {
         hintOverlay = null
         notificationOverlay = null
         pageDotsCard = null
+        pageDotsShowing = false
         assistCoversDashboard = false
         ScreenDimmer
             .detach()
@@ -1208,6 +1354,7 @@ object VirtualLauncher {
         dashboardPageAnimating = false
         dashboardUserDragging = false
         activeMapComponent = null
+        activeMediaComponent = null
         dockDisplayId = -1
         appDisplayId = -1
         appHiDisplayId = -1
@@ -1237,6 +1384,8 @@ object VirtualLauncher {
         dockHeightPx = 0
         appHeightPx = 0
         dockAtBottom = false
+        splitVertical = false
+        dashLayout = DashLayout.SIDE_BY_SIDE
         hiScale = 1f
         streamWidthPx = 0
         streamHeightPx = 0
@@ -1436,10 +1585,10 @@ object VirtualLauncher {
     }
 
     /** 流坐标把手中心 → 应用区坐标系偏移（横屏减 dock 宽；竖屏 y 原点即流原点）。 */
-    private fun splitMainOffset(): Float = if (dockAtBottom) 0f else dockWidthPx.toFloat()
+    private fun splitMainOffset(): Float = if (splitVertical || dockAtBottom) 0f else dockWidthPx.toFloat()
 
     /** 主轴可用长度 = 应用区主轴 − 两端边距 − 中缝宽（与 dashSplitGeom 同式）。 */
-    private fun splitUsableLen(): Int = (if (dockAtBottom) appAreaHeight else appAreaWidth) - CARD_MARGIN_PX * 2 - DASH_GAP_PX.toInt()
+    private fun splitUsableLen(): Int = (if (splitVertical) appAreaHeight else appAreaWidth) - CARD_MARGIN_PX * 2 - DASH_GAP_PX.toInt()
 
     /**
      * 钳制流坐标把手中心；未 attach 返回 null。
@@ -1608,6 +1757,7 @@ object VirtualLauncher {
         val closed = requested.filter { it !in after }.toSet()
         synchronized(runningApps) { runningApps.removeAll { it.packageName in closed } }
         if (activeMapComponent?.packageName in closed) activeMapComponent = null
+        if (activeMediaComponent?.packageName in closed) activeMediaComponent = null
         if (closed.any { it in mediaPackages }) closeMediaPane()
         notifyRunningAppsChanged()
         return requested.none { it in after }

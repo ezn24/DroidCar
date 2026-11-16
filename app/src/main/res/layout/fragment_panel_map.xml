@@ -16,7 +16,7 @@
         android:layout_marginTop="6dp"
         android:layout_marginBottom="11dp"
         android:text="@string/ui_103"
-        android:textColor="#FF8E8E93"
+        android:textColor="?attr/panelTextSecondary"
         android:textSize="12sp" />
 
     <LinearLayout

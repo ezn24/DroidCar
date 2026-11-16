@@ -1,3 +1,24 @@
+## 2026-11-17 MD3 手机端 / 跟手翻页 / 壁纸双槽
+
+- **手机端色彩**：`m3_*` 令牌在 `values/`（浅）与 `values-night/`（深）分别取系统 Material You 色板（`system_accent*/neutral*`，minSdk 31），surface 四档用 `res/color(-night)/` + `android:lStar` 精确色调；改色改 `colors_gen` 取值表。车机设置（SettingsActivity、竖屏转发的 PhoneSettings/SettingsContent）同样跟随手机深浅色（用户要求，与壁纸深/浅槽位一致）；dock/桌面仍是固定深色设计。
+- **设置面板颜色走主题属性 `panel*`**（attrs.xml）：Launcher 主题给旧 iOS 深色值，App 主题与 Settings 主题给 m3 令牌。面板布局/drawable/代码里不要再写十六进制色，用 `?attr/panel…` 或 `SettingsRows.color()`。
+- **仪表盘左滑 = 跟手 fakeDrag**：`DashboardSwipeGesture` 按下先不注入，定性后才放行——左拖 → `beginDashboardDragOut` + pager `fakeDragBy`（GL 地图层随 onPageScrolled 走），点按 → 起点补发 down+up，竖滑/右滑 → 起点补 down 后照常注入。这是音乐卡防误触的关键：翻页手势全程不给媒体卡/音乐 App 任何事件。
+- **声音授权**：Shizuku 就绪走 `SilentProjectionActivity`（appops 放行，不弹窗）；否则录音 → 投屏**依次**弹（同时弹两个系统窗会互相顶位，即长期的「弹窗动一下」）。
+- **壁纸深/浅两槽**（`WallpaperStore.Slot`），跟随手机深浅色（`attach` 监听配置变更，两槽不同才 markChanged）；浅色默认「同深色」。内置图案 `WallpaperPresets` 为代码绘制渐变（原创，非第三方素材）。
+
+## 2026-11-17 仪表盘版式随分辨率自适应
+
+- **地图屏/媒体屏密度随画布等比**（`MAP_DISPLAY_DPI` = 200 × DashMetrics.scale，下限 120）：此前固定 200dpi，800×480 下地图屏只有 ~534×271dp，Google 地图搜索栏+底部面板吃满高度、地图只剩一条缝——这才是「小分辨率地图显得很小」的根因，与分屏方式无关。
+- 版面偏好**只对窄横屏生效**（宽高比 < 1.9）；宽屏一律左右分屏；**窄屏默认 Dock 在底部**，只有显式选「左右分屏」才左右分屏（旧「自动」/「音乐在底部」值按默认处理）。
+
+- **版面（DashLayout）**：「dock 在哪」(`dockAtBottom`) 与「怎么分屏」(`splitVertical`) 已拆开——SIDE_BY_SIDE / MUSIC_BOTTOM（dock 左 + 上地图下音乐条）/ DOCK_BOTTOM（Android Auto 式，横屏 dock 底部、厚度 ×0.72）/ PORTRAIT（竖屏车机固定）。偏好在 设置→显示→仪表盘版面（下次连接生效），「自动」= 画布宽高比 < 1.9 用音乐条。**新代码判断几何时先想清楚要的是 dock 位置还是分屏方向**；设置页的「窄屏」用 `isPortraitCanvas()`。
+- 音乐条版面媒体 App 不嵌进细长条（`launchMediaApp` 转 `launchApp` 正常打开）；卡片用 `view_dashboard_strip.xml`（id 与竖卡相同）。`PaneBounds` 上下分屏分支的 x 从 dockWidth 起（竖屏车机传 0，行为不变）。
+- 横屏 dock 底部时也有超采样应用屏：TouchRouter 的 dockAtBottom 分支走 `activeAppDisplayId()` + `activeAppScale()`。
+
+- 流像素常量（`CARD_MARGIN_PX`/`DASH_GAP_PX`/`DASH_HANDLE_TOUCH_PX`/`TILE_CORNER_RADIUS`）不再写死：随 `DashMetrics.scale`（流画布短边 / 720）等比，1920×720 下与旧值一致。`DashMetrics.configure` 必须先于 attach 里任何几何推导。新增流像素尺寸一律乘 scale，勿裸写数字。
+- 地图/媒体比例按应用区形状算（`VirtualLauncher.dashSplitFractionFor`，单测 `DashSplitAdaptiveTest`）：媒体卡保持「宽/高 ≈ 0.62」（竖屏「高/宽 ≈ 0.45」），地图吃掉其余，钳制 0.55~0.8。1920×720 → 0.75（即 3:1），1280×720 → ~0.60。日志行 `LAUNCHER: 仪表盘版式 画布=… 缩放=… 地图比例=…`。
+- 卡片内容（GridActivity 媒体卡）用 dp，应用屏密度本就随屏高等比（逻辑高 ~432dp 恒定），不需另行缩放；真正要随分辨率调的是**横向比例**。
+
 ## 2026-11-16 效能约定（改动前先看）
 
 - **手机主页在会话中多半看不见**（暗幕/物理面板断电），但 Activity 仍是前台：任何循环动画或定时刷新都要随 `ScreenDimmer.isCovering()` / `addCoverListener` 和 onPause 暂停（见 `MainActivity.syncPhoneUiActivity`）。实测此前主页波纹动画让 RenderThread 成为全进程最耗 CPU 的线程（~7%）。

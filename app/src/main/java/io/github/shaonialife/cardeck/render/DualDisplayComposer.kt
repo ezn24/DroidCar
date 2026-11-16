@@ -23,14 +23,34 @@ import java.util.concurrent.atomic.AtomicBoolean
  * TouchRouter tile 触摸命中域。此前 16 在四个文件各自定义/裸写、仅靠注释结盟，
  * 改一处即静默错位（触摸命中域/卡片布局/绘制矩形三者不一致，坏味道审查 P1 收敛）。
  */
-const val CARD_MARGIN_PX = 16
+val CARD_MARGIN_PX: Int get() = (16f * DashMetrics.scale).toInt().coerceAtLeast(4)
+
+/**
+ * 仪表盘版式缩放（2026-11-17：此前所有流像素常量按 1920×720 写死，换分辨率后
+ * 边距/中缝/圆角比例全变）。以**流画布短边 720px 为 1.0** 等比缩放——1920×720 车机
+ * 下所有值与旧版完全一致。会话 attach 时由 VirtualLauncher 按画布设定；单测不设即 1.0。
+ */
+object DashMetrics {
+    const val BASE_SHORT_SIDE = 720f
+
+    @Volatile
+    var scale: Float = 1f
+        private set
+
+    fun configure(
+        streamWidth: Int,
+        streamHeight: Int,
+    ) {
+        scale = (minOf(streamWidth, streamHeight) / BASE_SHORT_SIDE).coerceIn(0.4f, 3f)
+    }
+}
 
 /**
  * 仪表盘分屏中缝宽（流像素）——地图 tile 与音乐卡之间**视觉**缝隙，几何契约同
  * [CARD_MARGIN_PX]：tile 内容侧边缘 = 把手中心 − DASH_GAP_PX/2，音乐卡内容侧
  * 边缘 = 把手中心 + DASH_GAP_PX/2（VirtualLauncher.dashSplitGeom 统一推导）。
  */
-const val DASH_GAP_PX = 24f
+val DASH_GAP_PX: Float get() = 24f * DashMetrics.scale
 
 /**
  * 分屏把手**触达**宽（流像素）：把手 View 宽度与 TouchRouter 粘性路由域按此值，
@@ -38,7 +58,7 @@ const val DASH_GAP_PX = 24f
  * （音乐卡侧把手叠在其上层；地图侧溢出段被 tile 盖住不可见但可触摸——
  * 视觉与触摸分层，2026-10-22 用户反馈「中缝太宽」的解法）。
  */
-const val DASH_HANDLE_TOUCH_PX = 60f
+val DASH_HANDLE_TOUCH_PX: Float get() = 60f * DashMetrics.scale
 
 /**
  * 双虚拟屏 GL 合成器：dock 屏 + 应用屏（原生 / 超采样两块，按活动切换）→ 拼接输出到编码器输入 Surface。
@@ -54,6 +74,8 @@ class DualDisplayComposer(
     private val outHeight: Int,
     /** true：dock 是底部横条（竖屏车机）；false：dock 是左侧竖条（横屏车机）。 */
     private val dockAtBottom: Boolean = false,
+    /** 地图在上、媒体在下（竖屏车机 / 音乐条）；默认随 dock 位置（旧行为）。 */
+    private val splitVertical: Boolean = dockAtBottom,
 ) {
     /** 仪表盘↔桌面滑动进度（0=tile 原位，1=完全滑出左侧），由 GridActivity 随滑动驱动。 */
     @Volatile
@@ -83,7 +105,7 @@ class DualDisplayComposer(
         private const val TAG = "DualComposer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
 
-        private const val TILE_CORNER_RADIUS = 24f
+        private val TILE_CORNER_RADIUS: Float get() = 24f * DashMetrics.scale
 
         /** 2D 纹理程序用的单位纹理矩阵（Bitmap 已按目标方向摆好顶点）。 */
         private val IDENTITY_ST =
@@ -158,12 +180,72 @@ class DualDisplayComposer(
     @Volatile
     private var overlayDirty = false
 
+    /** 待处理的截图请求（GL 线程下一次合成后读回并回调；回调在 GL 线程，调用方自行切线程）。 */
+    @Volatile
+    private var captureRequest: ((android.graphics.Bitmap?) -> Unit)? = null
+
+    /**
+     * 截取合成后的整幅车机画面（与推流同一帧：dock + 桌面/应用 + 地图/媒体卡 + 叠加层）。
+     * 各虚拟屏单独 screencap 只能拿到碎片，完整画面只在这里存在。
+     */
+    fun requestCapture(callback: (android.graphics.Bitmap?) -> Unit) {
+        captureRequest = callback
+        wake()
+    }
+
+    /** glReadPixels 读回输出画面（GL 原点在左下，需上下翻转）。 */
+    private fun readOutputFrame(): android.graphics.Bitmap? =
+        runCatching {
+            val buffer =
+                java.nio.ByteBuffer
+                    .allocateDirect(outWidth * outHeight * 4)
+                    .order(java.nio.ByteOrder.nativeOrder())
+            GLES20.glReadPixels(0, 0, outWidth, outHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer)
+            buffer.rewind()
+            val raw = android.graphics.Bitmap.createBitmap(outWidth, outHeight, android.graphics.Bitmap.Config.ARGB_8888)
+            raw.copyPixelsFromBuffer(buffer)
+            val flip = android.graphics.Matrix().apply { preScale(1f, -1f) }
+            android.graphics.Bitmap
+                .createBitmap(raw, 0, 0, outWidth, outHeight, flip, false)
+                .also { raw.recycle() }
+        }.getOrNull()
+
     /**
      * 桌面页点（输出画面坐标）。页点本在应用屏的 GridActivity 里，但仪表盘的地图/媒体
      * 卡在 GL 层画在应用屏之上，会把页点盖掉；所以由 GridActivity 把页点快照成位图交给
      * 这里，在卡片之后、dock 之前补画。是否绘制由 [VirtualLauncher.pageDotsOnTop] 决定，
      * 与 GridActivity 隐藏自身页点用同一判据（避免两份重叠或都不显示）。
      */
+
+    /** 页点显隐淡入淡出（与 GridActivity 本地页点同节奏：入 120ms / 出 220ms）。 */
+    @Volatile
+    private var pageDotsTarget = 0f
+
+    @Volatile
+    private var pageDotsFrom = 0f
+
+    @Volatile
+    private var pageDotsChangedAt = 0L
+
+    fun setPageDotsVisible(visible: Boolean) {
+        val target = if (visible) 1f else 0f
+        if (target == pageDotsTarget) return
+        val now = android.os.SystemClock.uptimeMillis()
+        pageDotsFrom = pageDotsAlphaAt(now)
+        pageDotsTarget = target
+        pageDotsChangedAt = now
+        wake()
+    }
+
+    private fun pageDotsDuration(): Long = if (pageDotsTarget > 0f) 120L else 220L
+
+    private fun pageDotsAlphaAt(now: Long): Float {
+        val t = ((now - pageDotsChangedAt).toFloat() / pageDotsDuration()).coerceIn(0f, 1f)
+        return pageDotsFrom + (pageDotsTarget - pageDotsFrom) * t
+    }
+
+    private fun pageDotsFading(now: Long): Boolean = now - pageDotsChangedAt < pageDotsDuration()
+
     @Volatile
     var pageDots: OverlayCard? = null
         set(value) {
@@ -494,6 +576,7 @@ class DualDisplayComposer(
         val oaTexCoord = GLES20.glGetAttribLocation(overlayProgram, "aTexCoord")
         val ouSTMatrix = GLES20.glGetUniformLocation(overlayProgram, "uSTMatrix")
         val ouTexture = GLES20.glGetUniformLocation(overlayProgram, "uTexture")
+        val ouAlpha = GLES20.glGetUniformLocation(overlayProgram, "uAlpha")
 
         /** 上传/更新叠加卡片纹理（仅 GL 线程；卡片引用变化时才重新上传）。 */
         fun syncOverlayTexture(
@@ -532,9 +615,11 @@ class DualDisplayComposer(
             top: Float,
             right: Float,
             bottom: Float,
+            alpha: Float = 1f,
         ) {
             GLES20.glUseProgram(overlayProgram)
             GLES20.glUniform1i(ouTexture, 0)
+            GLES20.glUniform1f(ouAlpha, alpha)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, slot.texture)
             GLES20.glEnable(GLES20.GL_BLEND)
@@ -696,8 +781,8 @@ class DualDisplayComposer(
                 val entry = LayoutMotion.progress(nowMs - appEntryAt)
                 val inset = (1f - entry) * (outWidth - appLeft) * 0.035f
                 val mediaStart = VirtualLauncher.dashSplitPos + DASH_GAP_PX / 2f
-                val originLeft = if (dockAtBottom) CARD_MARGIN_PX.toFloat() else mediaStart
-                val originTop = if (dockAtBottom) mediaStart else CARD_MARGIN_PX.toFloat()
+                val originLeft = if (splitVertical) appLeft + CARD_MARGIN_PX else mediaStart
+                val originTop = if (splitVertical) mediaStart else CARD_MARGIN_PX.toFloat()
 
                 fun expand(
                     from: Float,
@@ -729,13 +814,18 @@ class DualDisplayComposer(
                         ?: if (tileLayout == TileLayout.FULLSCREEN) 1f else 0f
                 val margin = CARD_MARGIN_PX.toFloat()
                 val slide = tileSlideFraction * (outWidth - appLeft) * (1f - expanded)
-                val mainLen = if (dockAtBottom) outHeight - dockH else outWidth - dockW
+                val mainLen =
+                    if (splitVertical) {
+                        outHeight - if (dockAtBottom) dockH else 0
+                    } else {
+                        outWidth - if (dockAtBottom) 0 else dockW
+                    }
                 val tileEdge =
                     if (tileEdgeOverride > 0f) {
                         tileEdgeOverride
                     } else {
-                        (if (dockAtBottom) 0f else appLeft) +
-                            VirtualLauncher.dashSplitGeom(mainLen, VirtualLauncher.DASH_SPLIT_DEFAULT_FRACTION).tileEdge
+                        (if (splitVertical) 0f else appLeft) +
+                            VirtualLauncher.dashSplitGeom(mainLen, VirtualLauncher.currentDashSplitFraction()).tileEdge
                     }
                 val mapPane = VirtualLauncher.mapPaneBounds()
                 val splitLeft = mapPane.left - slide
@@ -773,9 +863,10 @@ class DualDisplayComposer(
                 )
             }
             // 页点压在地图/媒体卡之上（固定不随 tile 滑动，与 GridActivity 原位置一致）
-            if (VirtualLauncher.pageDotsOnTop()) {
+            val dotsAlpha = pageDotsAlphaAt(nowMs)
+            if (VirtualLauncher.pageDotsOnTop() && dotsAlpha > 0.001f) {
                 syncOverlayTexture(pageDotsSlot, pageDots)?.let { dots ->
-                    drawOverlay(pageDotsSlot, dots.left, dots.top, dots.right, dots.bottom)
+                    drawOverlay(pageDotsSlot, dots.left, dots.top, dots.right, dots.bottom, dotsAlpha)
                 }
             }
             if (assistLayerVisible && assistLayer.hasContent) {
@@ -795,6 +886,11 @@ class DualDisplayComposer(
             // 叠加卡片最后绘制（最上层，不受分支影响）：卡片坐标为输出画面坐标（顶部原点）
             syncOverlayTexture(overlaySlot, overlayCard)?.let { card ->
                 drawOverlay(overlaySlot, card.left, card.top, card.right, card.bottom)
+            }
+            // 截图请求：读回刚合成好的这一帧（即推给车机的画面），在交换缓冲之前读
+            captureRequest?.let { callback ->
+                captureRequest = null
+                callback(readOutputFrame())
             }
             if (fullRedraw ||
                 overlayDirty ||
@@ -833,6 +929,7 @@ class DualDisplayComposer(
                 // 但不为看不见的内容白烧 GPU/带宽。
                 val hasNew =
                     isLayoutTransitioning() ||
+                        pageDotsFading(android.os.SystemClock.uptimeMillis()) ||
                         (assistLayerVisible && assistLayerInput?.hasNewFrame == true) ||
                         overlayDirty ||
                         dock.hasNewFrame ||
@@ -919,8 +1016,10 @@ class DualDisplayComposer(
                 precision mediump float;
                 varying vec2 vTexCoord;
                 uniform sampler2D uTexture;
+                uniform float uAlpha;
                 void main() {
-                    gl_FragColor = texture2D(uTexture, vTexCoord);
+                    // 位图是预乘 alpha：四个通道同乘才是正确的整体淡化
+                    gl_FragColor = texture2D(uTexture, vTexCoord) * uAlpha;
                 }
                 """.trimIndent()
             }

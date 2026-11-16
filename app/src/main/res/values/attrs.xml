@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 设置面板配色（车机主题 / 手机主题各自赋值，见 themes.xml） -->
+    <attr name="panelTextPrimary" format="color" />
+    <attr name="panelTextSecondary" format="color" />
+    <attr name="panelTextHint" format="color" />
+    <attr name="panelHeader" format="color" />
+    <attr name="panelAccent" format="color" />
+    <attr name="panelOnAccent" format="color" />
+    <attr name="panelRowBg" format="color" />
+    <attr name="panelRipple" format="color" />
+    <attr name="panelSegmentBg" format="color" />
+    <attr name="panelControlOff" format="color" />
+    <attr name="panelWarn" format="color" />
+    <attr name="panelWarnBg" format="color" />
+    <attr name="panelDanger" format="color" />
+    <attr name="panelDangerBg" format="color" />
+</resources>

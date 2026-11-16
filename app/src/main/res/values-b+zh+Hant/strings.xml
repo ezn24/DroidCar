@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" formatted="false">CarDeck 車機投屏</string>
+    <string name="app_name" formatted="false">CarDeck Neo</string>
     <string name="app_subtitle" formatted="false">非官方實驗性 CarPlay 相容傳送端</string>
     <string name="car_settings" formatted="false">車機設定</string>
     <string name="accessibility_description" formatted="false">映象模式：把車機觸控手勢注入手機螢幕，不讀取螢幕內容</string>
@@ -30,7 +30,6 @@
     <string name="ui_024" formatted="false">車機側聲音</string>
     <string name="ui_025" formatted="false">需要「投屏」許可權，可選 · 關閉時車機無聲音</string>
     <string name="ui_026" formatted="false">授權</string>
-    <string name="ui_027" formatted="false">車機顯示</string>
     <string name="ui_028" formatted="false">常亮</string>
     <string name="ui_029" formatted="false">常亮 + 暗幕</string>
     <string name="ui_030" formatted="false">手機不鎖屏，無操作時真息屏（斷電） · 車機不受影響</string>
@@ -40,12 +39,7 @@
     <string name="ui_034" formatted="false">進入</string>
     <string name="ui_035" formatted="false">桌布</string>
     <string name="ui_036" formatted="false">車機桌布</string>
-    <string name="ui_037" formatted="false">全屏 aspectFill</string>
-    <string name="ui_038" formatted="false">更換</string>
-    <string name="ui_039" formatted="false">恢復預設</string>
-    <string name="ui_040" formatted="false">橫屏</string>
-    <string name="ui_041" formatted="false">車機設定</string>
-    <string name="ui_042" formatted="false">桌面應用 · 應用橫屏 · 超取樣 · dock 欄 · 預設地圖</string>
+    <string name="ui_037" formatted="false">跟隨手機深淺色自動切換</string>
     <string name="ui_043" formatted="false">終端</string>
     <string name="ui_044" formatted="false">Shell 全域性狀態</string>
     <string name="ui_045" formatted="false">letterbox / 虛擬屏 / wm 覆蓋 —— 除錯排查用</string>
@@ -190,8 +184,6 @@
     <string name="screen_034" formatted="false">若提示\"無法訪問網際網路\"請選擇保持連線</string>
     <string name="screen_035" formatted="false">暫無熱點密碼——藍芽連上後自動獲取</string>
     <string name="screen_036" formatted="false">暗幕未就緒（連線成功後自動啟用）</string>
-    <string name="screen_037" formatted="false">已恢復預設桌布</string>
-    <string name="screen_038" formatted="false">恢復失敗</string>
     <string name="screen_039" formatted="false">日誌為空</string>
     <string name="screen_040" formatted="false">CarDeck 日誌</string>
     <string name="screen_041" formatted="false">「常亮+暗幕」已開啟。</string>
@@ -351,17 +343,62 @@
     <string name="new_notification">新通知</string>
     <string name="recent_apps">背景應用</string>
     <string name="recent_back">返回</string>
-    <string name="recent_refresh">重新整理</string>
     <string name="recent_close_all">全部關閉</string>
-    <string name="recent_close">關閉</string>
-    <string name="recent_help">管理車機上已開啟的視窗，點選 App 可切換。關閉視窗後，音樂可能繼續播放。</string>
-    <string name="recent_loading">正在讀取已開啟的應用程式…</string>
     <string name="recent_empty">目前沒有已開啟的應用程式</string>
-    <string name="recent_count">%1$d 個已開啟的應用程式</string>
     <string name="recent_read_failed">無法讀取應用程式清單，請重試</string>
     <string name="recent_open_failed">無法開啟應用程式，請重新整理後重試</string>
     <string name="recent_close_failed">部分視窗未能關閉，請重新整理後重試</string>
     <string name="recent_open_app">開啟 %1$s</string>
     <string name="recent_close_app">關閉 %1$s</string>
     <string name="search_map_apps">搜尋應用程式</string>
+    <string name="dash_layout">窄螢幕儀表板版面</string>
+    <string name="dash_layout_side">左右分屏</string>
+    <string name="dash_layout_dock_bottom">Dock 在底部</string>
+    <string name="dash_layout_note">只在窄螢幕車機（如 800×480、16:9）生效，寬螢幕車機始終左右分屏；直式車機不受影響。下次連線生效。</string>
+    <string name="ui_041" formatted="false">車機設定</string>
+    <!-- 手机侧 MD3 分页（2026-11-17） -->
+    <string name="md_nav_connect">連線</string>
+    <string name="md_nav_car">車機</string>
+    <string name="md_nav_diag">診斷</string>
+    <string name="md_quick_settings">快速設定</string>
+    <string name="md_car_settings">車機設定</string>
+    <string name="md_appearance">外觀</string>
+    <!-- 车机壁纸：深浅色两套 + 内置图案（2026-11-17） -->
+    <string name="wp_dark_title">深色模式</string>
+    <string name="wp_light_title">淺色模式</string>
+    <string name="wp_default">預設</string>
+    <string name="wp_custom">我的圖片</string>
+    <string name="wp_pick">從相簿</string>
+    <string name="wp_same">同深色</string>
+    <string name="wp_preset_midnight">午夜</string>
+    <string name="wp_preset_aurora">極光</string>
+    <string name="wp_preset_ember">餘燼</string>
+    <string name="wp_preset_graphite">石墨</string>
+    <string name="wp_preset_dawn">晨曦</string>
+    <string name="wp_preset_mist">薄霧</string>
+    <string name="wp_preset_meadow">草原</string>
+    <!-- 免责声明（2026-11-17 多语言化；改正文须同步 Disclaimer.CURRENT_VERSION +1） -->
+    <string name="disclaimer_s1_title">這是什麼</string>
+    <string name="disclaimer_s1_body">CarDeck Neo 是一個非官方的實驗性專案：讓一台未 root 的 Android 手機扮演 CarPlay 發送端（iPhone 角色），把手機上的車機桌面與第三方應用程式投到支援的接收端上顯示，並把接收端的觸控回注到手機端的虛擬螢幕。\n\n本專案與 Apple Inc.、任何汽車製造商均無關聯，未獲得任何授權或認證，也不是 MFi 認證產品。「CarPlay」「AirPlay」是 Apple Inc. 的商標，此處僅用於說明相容目標，不代表任何關聯或背書。</string>
+    <string name="disclaimer_s2_title">開發中，可能隨時出問題</string>
+    <string name="disclaimer_s2_body">目前為開發測試版本，功能、介面與協定實作都可能隨時變更，可能存在尚未發現的缺陷。不保證任何穩定性、相容性或可用性。\n\n已經測試過的組合只有：\n· 發送端：榮耀 Magic7 Pro（Android 17）\n· 接收端：奧迪 MIB3 車機（實車）\n· 接收端：Redmi K40 上的 DiPlay 測試台（Android 13）\n\n其他手機、其他 Android 版本、其他車款均未驗證，可能完全無法運作，也可能出現畫面異常、觸控錯位或反覆斷線。\n\n「應用橫屏」功能需要 Android 14 以上系統；Android 13 及更早的機型無法使用此功能（設定面板會提示不支援）。</string>
+    <string name="disclaimer_s3_title">駕駛安全（請務必閱讀）</string>
+    <string name="disclaimer_s3_body">本應用程式不是安全關鍵系統，不能取代原廠導航與車輛儀表。\n\n· 請在停車狀態下完成連線、配對與所有設定；\n· 行駛中如需操作，必須由車上乘客進行，駕駛人不得手持或操作手機；\n· 無線連線可能因訊號干擾、系統休眠、熱點切換、藍牙重連等原因隨時中斷，表現為畫面凍結、黑屏、觸控失靈或導航中斷；\n· 行駛中斷線可能導致錯過路口、路線遺失或分心。請始終以原廠導航作為安全備援，並對實際駕駛行為負全部責任。</string>
+    <string name="disclaimer_s4_title">系統權限與資料</string>
+    <string name="disclaimer_s4_body">為了正常運作，本應用程式會要求並使用以下能力，請確認你理解後再授權：\n\n· Shizuku（shell 權限）：用於建立受信任的虛擬螢幕、注入觸控事件、寫入系統相容性設定（如強制應用橫屏）、讀取視窗與顯示狀態。本應用程式不會用它執行與本服務無關的指令；\n· 通知存取權 / 媒體工作階段：僅用於在車機桌面顯示目前播放的音樂資訊（歌名、歌手、封面、播放進度）；\n· 藍牙：用於與接收端配對（只配對，不建立藍牙音訊連線）；\n· 螢幕錄製（投放）授權：僅在開啟「車機端聲音」時用於擷取音訊。\n\n配對資訊、目標裝置名稱、桌布與設定僅儲存在本機，不會上傳到任何伺服器；本應用程式不含統計分析或廣告 SDK。</string>
+    <string name="disclaimer_s5_title">免責條款</string>
+    <string name="disclaimer_s5_body">本應用程式依「現狀」提供，不附帶任何明示或默示的擔保，包括但不限於適售性、特定用途適用性與不侵權擔保。\n\n在適用法律允許的最大範圍內，作者與貢獻者不對因使用或無法使用本應用程式而產生的任何直接或間接損失負責，包括但不限於：連線中斷、導航或通話中斷、資料遺失、裝置異常、車輛系統異常，以及因駕駛中操作或分心所導致的事故與損失。\n\n是否使用本應用程式、如何設定與操作、以及在何種情境下使用，完全由你自行判斷並自行承擔風險。若你不同意上述任何一條，請點選「放棄使用」並解除安裝本應用程式。</string>
+    <string name="disclaimer_s6_title">開源與回饋</string>
+    <string name="disclaimer_s6_body">本專案為個人實驗性作品，以 MIT 授權條款開源，歡迎回報問題，但不保證修復時程。由於涉及協定實作與第三方 ROM 差異，部分問題可能無法解決。\n\n完整條款（非官方聲明、商標歸屬、安全警告、已測試範圍）請見儲存庫根目錄的 DISCLAIMER.md，與本頁內容同源。</string>
+    <string name="disclaimer_subtitle_first">首次使用前請完整閱讀。接受後可在主畫面隨時重新查看。</string>
+    <string name="disclaimer_subtitle_view">你可以隨時回來查看本聲明（目前版本 v%1$d）。</string>
+    <string name="disclaimer_accept">接受</string>
+    <string name="disclaimer_accept_wait">接受（%1$ds）</string>
+    <string name="disclaimer_close">關閉</string>
+    <string name="disclaimer_hint_scroll_wait">請捲動閱讀至底部，並等待 %1$d 秒</string>
+    <string name="disclaimer_hint_wait">請等待 %1$d 秒後接受</string>
+    <string name="disclaimer_hint_scroll">請捲動閱讀至底部</string>
+    <string name="md_car_screenshot">截取車機畫面</string>
+    <string name="md_car_screenshot_desc">把目前的車機畫面存成 PNG 到「下載/CarDeck」（需已連線）</string>
+    <string name="md_car_screenshot_failed">截圖失敗：請先連線車機</string>
 </resources>
