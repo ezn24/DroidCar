@@ -1766,6 +1766,42 @@ object VirtualLauncher {
      * 部分定制固件/版本上可能不存在，写死单点会让地图屏黑着且日志只有一句 `Starting:` 缺失。
      * 因此首个候选失败即回退到 launcher 解析出的 component，并把每次尝试记进日志。
      */
+
+    /**
+     * 第三方 App 按「点桌面图标」的方式启动（2026-11-18）：Android 12+ 对 MAIN+LAUNCHER 启动的任务，
+     * 在根页面按返回只「移到后台」、保留状态；裸 `am start -n` 启动的则直接 finish——仪表盘里的地图 /
+     * 音乐 App 一按返回就整个退出（用户实测）。
+     */
+    private const val LAUNCHER_INTENT = "-a android.intent.action.MAIN -c android.intent.category.LAUNCHER"
+
+    /**
+     * 返回键发到地图 / 媒体屏后调用（后台线程）：若那块屏因此空了（根页面被移到后台或结束），
+     * 立刻把它带回来——仪表盘的地图卡 / 音乐区不能变成空白。带 LAUNCHER 启动的任务仍在后台，
+     * 带回前台是热恢复、状态不丢。
+     */
+    fun restorePaneAfterBack(displayId: Int) {
+        if (displayId < 0 || (displayId != mapDisplayId && displayId != mediaDisplayId)) return
+        Thread.sleep(600)
+        if (displayHasVisibleTask(displayId)) return
+        logSink?.invoke("LAUNCHER: 返回后屏 $displayId 已无可见任务——带回前台")
+        if (displayId == mapDisplayId) {
+            ensureMapTask()
+            // ensureMapTask 只在「没有任务」时才启动；任务只是被移到后台时要显式带回
+            if (!displayHasVisibleTask(displayId)) activeMapComponent?.let { startMapApp(it, displayId, forceNewTask = false) }
+        } else {
+            activeMediaComponent?.let { startMapApp(it, displayId, forceNewTask = false, extraArgs = "--windowingMode 1") }
+        }
+    }
+
+    /** 该屏上是否有可见任务（解析 dumpsys 的 Task 行 visible=true）。读不到就当有，免得误拉起。 */
+    private fun displayHasVisibleTask(displayId: Int): Boolean {
+        val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
+        val header = Regex("""^Display #$displayId\b""", RegexOption.MULTILINE).find(dump) ?: return true
+        val rest = dump.substring(header.range.last)
+        val end = Regex("""^Display #\d+""", RegexOption.MULTILINE).find(rest)?.range?.first ?: rest.length
+        return Regex("""\* Task\{[^\n]*visible=true""").containsMatchIn(rest.substring(0, end))
+    }
+
     private fun startMapApp(
         component: ComponentName,
         displayId: Int,
@@ -1779,7 +1815,11 @@ object VirtualLauncher {
                 (if (extraArgs.isEmpty()) "" else " $extraArgs")
         var last: Shell.Result? = null
         for (target in mapLaunchCandidates(component)) {
-            val result = Shell.exec("am start -n ${target.asShellArgument()} --display $displayId$suffix", timeoutMs = 8000)
+            val result =
+                Shell.exec(
+                    "am start $LAUNCHER_INTENT -n ${target.asShellArgument()} --display $displayId$suffix",
+                    timeoutMs = 8000,
+                )
             val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
             if (ok) return result
             logSink?.invoke(
@@ -1788,7 +1828,10 @@ object VirtualLauncher {
             last = result
         }
         return last
-            ?: Shell.exec("am start -n ${component.flattenToShortString().asShellArgument()} --display $displayId$suffix", timeoutMs = 8000)
+            ?: Shell.exec(
+                "am start $LAUNCHER_INTENT -n ${component.flattenToShortString().asShellArgument()} --display $displayId$suffix",
+                timeoutMs = 8000,
+            )
     }
 
     /**
@@ -2056,15 +2099,22 @@ object VirtualLauncher {
             val target = component.flattenToShortString()
             result =
                 if (onTarget) {
-                    Shell.exec("am start -n ${target.asShellArgument()} --display $targetDisplay", timeoutMs = 8000)
+                    Shell.exec("am start $LAUNCHER_INTENT -n ${target.asShellArgument()} --display $targetDisplay", timeoutMs = 8000)
                 } else {
                     // MULTIPLE_TASK：即使该应用在其他屏有任务，也强制在目标屏新建实例
-                    Shell.exec("am start -n ${target.asShellArgument()} --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
+                    Shell.exec(
+                        "am start $LAUNCHER_INTENT -n ${target.asShellArgument()} --display $targetDisplay -f 0x18000000",
+                        timeoutMs = 8000,
+                    )
                 }
             ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
             if (!ok && onTarget) {
                 // 复用路径失败（任务可能已被系统移走）：退回 MULTIPLE_TASK 新建
-                val retry = Shell.exec("am start -n ${target.asShellArgument()} --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
+                val retry =
+                    Shell.exec(
+                        "am start $LAUNCHER_INTENT -n ${target.asShellArgument()} --display $targetDisplay -f 0x18000000",
+                        timeoutMs = 8000,
+                    )
                 ok = retry.ok && retry.output.contains("Starting:", ignoreCase = true)
             }
         }
