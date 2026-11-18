@@ -40,6 +40,10 @@
         <package android:name="moe.shizuku.privileged.api" />
         <package android:name="com.autonavi.amapauto" />
         <package android:name="com.autonavi.minimap" />
+        <!-- 判断「音乐 App」：查各包是否提供媒体浏览服务（仪表盘媒体区只收音乐 App） -->
+        <intent>
+            <action android:name="android.media.browse.MediaBrowserService" />
+        </intent>
         <!-- 应用桌面需要枚举全部可启动应用（Android 11+ 包可见性） -->
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -81,6 +85,10 @@
         <activity
             android:name=".SettingsContentActivity"
             android:exported="false" />
+        <activity
+            android:name=".AutomationActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
 
         <service
             android:name=".service.CarPlayService"
@@ -110,6 +118,7 @@
             android:permission="android.permission.DUMP">
             <intent-filter>
                 <action android:name="io.github.shaonialife.cardeck.CAPTURE_CAR" />
+                <action android:name="io.github.shaonialife.cardeck.EXPORT_LOG" />
             </intent-filter>
         </receiver>
 

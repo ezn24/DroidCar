@@ -50,6 +50,21 @@ class VehicleTasksTest {
         assertEquals(mapOf("com.spotify.music" to listOf("5", "6")), scoped)
     }
 
+    @Test fun staleTaskReferenceFieldsAreNotOpenTasks() {
+        // 关掉的任务仍可能留在 mLastFocusedRootTask 等字段里，不能算「还开着」
+        val parsed =
+            parseTaskDisplays(
+                """
+                Display #40 (activities from top to bottom):
+                      mPreferredTopFocusableRootTask=Task{c1 #19649 type=standard A=10342:com.sec.android.app.voicenote}
+                      mLastFocusedRootTask=Task{c1 #19649 type=standard A=10342:com.sec.android.app.voicenote}
+                      rootOfTask=true task=Task{c2 #19653 type=standard A=10758:com.whatsapp}
+                      * Task{c2 #19653 type=standard A=10758:com.whatsapp U=0 visible=true}
+                """.trimIndent(),
+            )
+        assertEquals(mapOf("com.whatsapp" to listOf("19653")), parsed[40])
+    }
+
     @Test fun malformedOutputCannotInventTaskTargets() {
         assertTrue(parseTaskDisplays("Permission denied").isEmpty())
         assertTrue(parseTaskDisplays("Task{abc #10 type=standard A=1000:com.example.app U=0}").isEmpty())

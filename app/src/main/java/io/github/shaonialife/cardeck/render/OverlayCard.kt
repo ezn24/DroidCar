@@ -15,7 +15,15 @@ class OverlayCard(
     val top: Float,
     val right: Float,
     val bottom: Float,
+    /** 整体不透明度（进出场淡入淡出用）。 */
+    val alpha: Float = 1f,
 ) {
+    /** 同一张位图挪位置 / 改透明度：合成器只认位图身份决定是否重传纹理，动画每帧不重传。 */
+    fun moved(
+        top: Float,
+        alpha: Float,
+    ): OverlayCard = OverlayCard(bitmap, left, top, right, top + (bottom - this.top), alpha)
+
     fun contains(
         x: Float,
         y: Float,

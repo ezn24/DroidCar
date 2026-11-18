@@ -57,4 +57,20 @@ interface ICarInput {
     // 两个 AppOp 是否 active（AppOpsManager.isOpActive，shell 持有 WATCH_APPOPS）。
     // 2026-11-15 S24 实测：录音配置列表看不到 Gemini 的 HOTWORD 录音，但这两个 op 可靠。
     boolean isAssistantListening();
+
+    // 车机麦克风注入（2026-11-17，见 docs/MIC-RESEARCH.md）：注册 AudioPolicy 录音注入
+    // （loopback + capture preset 规则，需 MODIFY_AUDIO_ROUTING——shell 持有），返回管道写端；
+    // 应用往里写 s16le 单声道 PCM（sampleRate），期间其它应用的 MIC / 语音识别 / 通话录音
+    // 都录到这路声音。管道 EOF（应用死掉）或 stopMicInjection 即注销，恢复真实麦克风。
+    ParcelFileDescriptor startMicInjection(int sampleRate);
+    void stopMicInjection();
+
+    // 当前正在录音（RECORD_AUDIO op active）的应用，"uid:包名" 逗号分隔。
+    // 用 AppOpsManager.startWatchingActive（shell 持有 WATCH_APPOPS）维护，首次调用时开始监听。
+    String activeMicApps();
+
+    // 彻底移除任务（含手机「最近使用」记录）：IActivityTaskManager.removeTask，shell 持有
+    // REMOVE_TASKS。`am stack remove` 只删任务、最近使用记录仍留在手机（2026-11-18 实测）。
+    // 返回成功移除的个数。
+    int removeTasks(in int[] taskIds);
 }

@@ -39,6 +39,24 @@ import io.github.shaonialife.cardeck.util.Bg
 object VirtualLauncher {
     private const val TAG = "VirtualLauncher"
 
+    /** 会登记媒体会话、但不是音乐播放器的常见 App（聊天/录音），不进仪表盘媒体区。 */
+    private val NON_MUSIC_PACKAGES =
+        setOf(
+            "org.telegram.messenger",
+            "org.thunderdog.challegram",
+            "com.whatsapp",
+            "com.tencent.mm",
+            "jp.naver.line.android",
+            "com.facebook.orca",
+            "com.sec.android.app.voicenote",
+            "com.google.android.apps.recorder",
+        )
+
+    /** 关闭背景应用：最多几轮「移除 → 复查」、每轮最多等多久、复查间隔。 */
+    private const val CLOSE_ROUNDS = 3
+    private const val CLOSE_VERIFY_MS = 1_500L
+    private const val CLOSE_POLL_MS = 250L
+
     /**
      * dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。CarPlay 化后含时钟/电量。
      * 密度基准 420dpi（↔ 奥迪设计画布 1160×540），由 SessionController 按画布短边
@@ -283,6 +301,10 @@ object VirtualLauncher {
     @Volatile
     var mediaDisplayId: Int = -1
         private set
+
+    /** 最近一次按下注入的屏（小白点在仪表盘里「返回」发给最后操作的地图 / 音乐 App）。 */
+    @Volatile
+    var lastTouchedDisplay: Int = -1
 
     @Volatile
     var mediaPaneOpen: Boolean = false
@@ -620,6 +642,28 @@ object VirtualLauncher {
             "com.tomtom.gplay.navapp",
         )
 
+    /**
+     * 能进仪表盘媒体区的「音乐 App」：提供系统媒体浏览服务（MediaBrowserService，车用媒体 App 的标配），
+     * 且不是聊天类。Telegram 播语音、三星录音机录音/回放都会登记「正在播放」的媒体会话，
+     * 曾因此被音乐卡开进媒体屏，之后从桌面点也被带回媒体区（2026-11-17 用户反馈）。
+     */
+    fun isMusicApp(
+        context: Context,
+        packageName: String,
+    ): Boolean {
+        if (packageName in NON_MUSIC_PACKAGES) return false
+        val pm = context.packageManager
+        val category =
+            runCatching { pm.getApplicationInfo(packageName, 0).category }
+                .getOrDefault(android.content.pm.ApplicationInfo.CATEGORY_UNDEFINED)
+        if (category == android.content.pm.ApplicationInfo.CATEGORY_SOCIAL) return false
+        val browser =
+            android.content
+                .Intent("android.media.browse.MediaBrowserService")
+                .setPackage(packageName)
+        return runCatching { pm.queryIntentServices(browser, 0).isNotEmpty() }.getOrDefault(false)
+    }
+
     fun isMapPackage(packageName: String): Boolean =
         packageName in MAP_PACKAGES_PRIORITY ||
             packageName == activeMapComponent?.packageName ||
@@ -654,7 +698,7 @@ object VirtualLauncher {
     fun activeAppDisplayId(): Int = if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) appHiDisplayId else appDisplayId
 
     /** 当前活动应用屏的坐标倍率（超采样屏=hiScale，原生屏=1）。 */
-    fun activeAppScale(): Float = if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) hiScale else 1f
+    fun activeAppScale(): Float = if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) hiScale else ChatMode.scaleFor(appDisplayId)
 
     /** 应用区在输出画面中的矩形（顶部原点）——叠加卡片定位用。 */
     fun appAreaRect(): RectF? {
@@ -694,6 +738,10 @@ object VirtualLauncher {
     fun setNotificationOverlay(card: OverlayCard?) {
         notificationOverlay = card
         refreshOverlayCard()
+    }
+
+    fun setAssistiveDot(card: OverlayCard?) {
+        composer?.assistiveDot = card
     }
 
     fun isNotificationOverlayVisible(): Boolean = hintOverlay == null && notificationOverlay != null
@@ -1100,6 +1148,11 @@ object VirtualLauncher {
                 Bg.run("notification-access-session") {
                     NotificationAccess.ensureGranted(context.applicationContext, log)
                 }
+                // 晚 8 秒再补删：会话起步正忙着建屏/拉地图/出首帧，dumpsys 与之争 CPU 和 binder
+                Bg.run("stale-car-tasks") {
+                    Thread.sleep(8_000)
+                    if (appContextRef != null) purgeRememberedTasks(context.applicationContext)
+                }
                 // 覆盖写入是异步的（probe 内部会 awaitPending 等它排空）；
                 // 应用若已在运行且此前被当成竖窗恢复，这里就能发现并给出提示。
                 LetterboxHintController.scheduleProbe(context, "会话建立")
@@ -1271,6 +1324,7 @@ object VirtualLauncher {
                 .attach(context)
             io.github.shaonialife.cardeck.assist.AssistOverlayController
                 .start(context, log)
+            AssistiveDot.attach(context)
             dockOk && gridOk
         } catch (error: IllegalStateException) {
             log("LAUNCHER: GL 合成器启动失败 - ${error.message}")
@@ -1284,6 +1338,7 @@ object VirtualLauncher {
     private var displaysViaService = false
 
     fun detach() {
+        AssistiveDot.detach()
         io.github.shaonialife.cardeck.assist.AssistOverlayController
             .stop()
         io.github.shaonialife.cardeck.notifications.NotificationBannerController
@@ -1313,21 +1368,38 @@ object VirtualLauncher {
                 orientationIds.forEach { runCatching { setIgnoreOrientationRequest(it, false, verify = false) } }
             }
         }
-        if (displaysViaService) {
-            val svc = CarInputClient.service
-            if (svc != null) {
-                if (dockDisplayId >= 0) runCatching { svc.releaseDisplay(dockDisplayId) }
-                if (appDisplayId >= 0) runCatching { svc.releaseDisplay(appDisplayId) }
-                if (appHiDisplayId >= 0) runCatching { svc.releaseDisplay(appHiDisplayId) }
-                // 地图屏同样由 shell 持有：不释放会在断开后残留（重装后由启动检测兜底发现）
-                if (mapDisplayId >= 0) runCatching { svc.releaseDisplay(mapDisplayId) }
-                if (mediaDisplayId >= 0) runCatching { svc.releaseDisplay(mediaDisplayId) }
-            }
-            displaysViaService = false
-        }
-        val assistId = assistDisplayId
+        // 先移除车机屏上的任务、再释放屏（2026-11-18 用户实测：每断开一次手机最近任务多一张
+        // 地图卡）。屏带 DESTROY_CONTENT_ON_REMOVAL 只会结束活动，任务仍以「最近使用」留在手机；
+        // removeTask 才会连最近使用记录一起删（`am stack remove` 也不删记录）。dumpsys/remove 是 shell 往返，detach 可能在
+        // 主线程（用户点断开），故与释放一起挪到后台、按顺序执行。
+        val svc = if (displaysViaService) CarInputClient.service else null
+        val releaseIds =
+            intArrayOf(dockDisplayId, appDisplayId, appHiDisplayId, mapDisplayId, mediaDisplayId)
+                .filter { svc != null && it >= 0 } + listOfNotNull(assistDisplayId.takeIf { it >= 0 })
+        val ownPkg = appContextRef?.packageName
+        val ownCtx = appContextRef
+        displaysViaService = false
         assistDisplayId = -1
-        if (assistId >= 0) runCatching { CarInputClient.service?.releaseDisplay(assistId) }
+        if (releaseIds.isNotEmpty()) {
+            Bg.run("detach-release") {
+                val snapshot = taskIdsByDisplayPkg()
+                rememberCarTasks(snapshot, releaseIds)
+                var removed = 0
+                releaseIds.forEach { id ->
+                    snapshot[id].orEmpty().forEach { (pkg, tasks) ->
+                        if (pkg == ownPkg) return@forEach
+                        tasks.filter { it.all(Char::isDigit) }.forEach { task ->
+                            if (removeTask(task)) removed++
+                        }
+                    }
+                }
+                logSink?.invoke("LAUNCHER: 断开前移除车机屏任务 $removed 个（removeTask，不留在手机最近任务）")
+                // 地图屏同样由 shell 持有：不释放会在断开后残留（重装后由启动检测兜底发现）
+                val service = svc ?: CarInputClient.service
+                releaseIds.forEach { id -> runCatching { service?.releaseDisplay(id) } }
+                ownCtx?.let { purgeRememberedTasks(it) }
+            }
+        }
         appContextRef = null
         watchdogActive = false
         // 还原 letterbox 宽高比为系统默认（不把会话调参留在系统里）。
@@ -1359,6 +1431,7 @@ object VirtualLauncher {
         appDisplayId = -1
         appHiDisplayId = -1
         gridDisplayId = -1
+        ChatMode.forget()
         synchronized(runningApps) { runningApps.clear() }
         notifyRunningAppsChanged()
         mapDisplayId = -1
@@ -1413,6 +1486,8 @@ object VirtualLauncher {
         val pkg = appContextRef?.packageName ?: return
         Bg.run("go-grid") {
             if (!startOn(grid, "$pkg/${GridActivity::class.java.name}")) Log.w(TAG, "回桌面失败")
+            // 离开聊天 App：撤掉聊天密度（桌面在超采样屏，聊天 App 多在应用屏，还原时桌面不会闪）
+            ChatMode.restore { logSink?.invoke(it) }
         }
         composer?.requestActiveApp(appHiDisplayId >= 0 && grid == appHiDisplayId)
         // 桌面上的提示没有意义（顶层不是第三方应用），直接收起
@@ -1721,6 +1796,68 @@ object VirtualLauncher {
      * 此前三个查询函数各自 dump 一遍（launchApp 一次启动最多跑 3 遍、每遍 4s 超时
      * 的 shell 命令）——统一从这里取快照复用。
      */
+
+    /**
+     * 车机屏上见过的任务 ID（持久化）。连接结束时理应全部移除；若那次没走到（App 被强停、
+     * 崩溃、UserService 换代），下次会话开始时据此补删——否则手机「最近使用」每重连一次多一张
+     * （2026-11-18 用户实测）。屏带 DESTROY_CONTENT_ON_REMOVAL，车机任务不会搬到手机继续用，
+     * 记下的 ID 只要还在就一定是残留。
+     */
+    private const val KEY_CAR_TASKS = "carTaskIds"
+
+    private fun rememberCarTasks(
+        snapshot: Map<Int, Map<String, List<String>>>,
+        displays: Collection<Int>,
+    ) {
+        val ctx = appContextRef ?: return
+        val own = ctx.packageName
+        val ids =
+            displays
+                .flatMap { id ->
+                    snapshot[id]
+                        .orEmpty()
+                        .filterKeys { it != own }
+                        .values
+                        .flatten()
+                }.filter { it.all(Char::isDigit) }
+        if (ids.isEmpty()) return
+        val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val merged = prefs.getStringSet(KEY_CAR_TASKS, emptySet()).orEmpty() + ids
+        prefs.edit().putStringSet(KEY_CAR_TASKS, merged).apply()
+    }
+
+    /**
+     * 补删上次会话留下的车机任务（后台线程）。当前会话车机屏上正在用的任务一律保留——
+     * 新会话可能已经开了 App 并记进同一份名单。
+     */
+    private fun purgeRememberedTasks(ctx: Context) {
+        val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val remembered = prefs.getStringSet(KEY_CAR_TASKS, emptySet()).orEmpty()
+        if (remembered.isEmpty()) return
+        val live = listOf(appDisplayId, appHiDisplayId, mapDisplayId, mediaDisplayId).filter { it >= 0 }
+        val snapshot = if (live.isEmpty()) emptyMap() else taskIdsByDisplayPkg()
+        val keep = live.flatMap { id -> snapshot[id].orEmpty().values.flatten() }.toSet()
+        val ids = remembered - keep
+        if (ids.isEmpty()) return
+        val removed =
+            runCatching {
+                CarInputClient.service?.removeTasks(ids.mapNotNull { it.toIntOrNull() }.toIntArray())
+            }.getOrNull()
+        prefs.edit().putStringSet(KEY_CAR_TASKS, keep).apply()
+        logSink?.invoke("LAUNCHER: 清理上次会话残留的车机任务 ${ids.size} 个（removeTask 成功 ${removed ?: "服务不可用"}）")
+    }
+
+    /**
+     * 彻底移除任务：优先 UserService 的 removeTask（连手机「最近使用」记录一起删），
+     * 不可用时退回 `am stack remove`（只删任务，最近使用会留一张卡）。后台线程调用。
+     */
+    fun removeTask(taskId: String): Boolean {
+        val id = taskId.toIntOrNull() ?: return false
+        val viaService = runCatching { CarInputClient.service?.removeTasks(intArrayOf(id)) }.getOrNull()
+        if (viaService == 1) return true
+        return Shell.exec("am stack remove $id", timeoutMs = 4000).ok
+    }
+
     private fun taskIdsByDisplayPkg(): Map<Int, Map<String, List<String>>> {
         val dump = Shell.exec("dumpsys -t 3 activity activities", timeoutMs = 4000).output
         return runCatching { parseTaskDisplays(dump) }.getOrElse {
@@ -1747,13 +1884,28 @@ object VirtualLauncher {
     fun closeVehicleApps(packages: Set<String>): Boolean {
         val requested = packages.intersect(sessionApps().map { it.packageName }.toSet())
         if (requested.isEmpty()) return true
-        val before = vehicleAppTasks()
         val mediaPackages = taskIdsByDisplayPkg()[mediaDisplayId]?.keys.orEmpty()
-        requested.flatMap { before[it].orEmpty() }.distinct().forEach { id ->
-            check(id.all(Char::isDigit))
-            Shell.exec("am stack remove $id", timeoutMs = 4000)
+        // 移除后立刻复查会误报：任务移除有时间差，导航/音乐/聊天类应用被移除后还会立刻重建任务。
+        // 最多三轮「移除 → 分次等待复查」，仍在的才算失败，并把包名与任务号写进日志。
+        var after = vehicleAppTasks()
+        for (round in 1..CLOSE_ROUNDS) {
+            val ids = requested.flatMap { after[it].orEmpty() }.distinct()
+            if (ids.isEmpty()) break
+            ids.forEach { id ->
+                check(id.all(Char::isDigit))
+                removeTask(id)
+            }
+            val deadline = SystemClock.uptimeMillis() + CLOSE_VERIFY_MS
+            do {
+                Thread.sleep(CLOSE_POLL_MS)
+                after = vehicleAppTasks()
+            } while (requested.any { it in after } && SystemClock.uptimeMillis() < deadline)
+            if (requested.none { it in after }) break
+            logSink?.invoke(
+                "RECENTS: 第 $round 轮关闭后仍在：" +
+                    requested.filter { it in after }.joinToString { "$it${after[it]}" },
+            )
         }
-        val after = vehicleAppTasks()
         val closed = requested.filter { it !in after }.toSet()
         synchronized(runningApps) { runningApps.removeAll { it.packageName in closed } }
         if (activeMapComponent?.packageName in closed) activeMapComponent = null
@@ -1854,13 +2006,28 @@ object VirtualLauncher {
                 appHiDisplayId >= 0 &&
                 SupersamplePrefs.shouldSupersample(ctx, component)
         val targetDisplay = if (wantHi) appHiDisplayId else appDisplayId
+        // 聊天模式：聊天 App 启动前先把目标屏调成平板密度（启动即是双栏，不闪一次手机版）；其它 App 还原
+        if (ctx != null) ChatMode.beforeLaunch(ctx, targetDisplay, component.packageName) { logSink?.invoke(it) }
         // 任务查询共用一次 dumpsys 快照（此前 onTarget + 清理两块屏最多连跑 3 遍 4s 超时命令）
         val tasks = taskIdsByDisplayPkg()
+        rememberCarTasks(tasks, listOf(appDisplayId, appHiDisplayId, mapDisplayId, mediaDisplayId).filter { it >= 0 })
         // singleTask 媒体入口会复用媒体屏上的任务，切到普通应用屏只会看到空白。
         // 按用户设定留在媒体区域，并把仪表盘带回前台。
-        if (mediaDisplayId >= 0 && tasksOf(tasks, component.packageName, mediaDisplayId).isNotEmpty()) {
+        val onMedia = mediaDisplayId >= 0 && tasksOf(tasks, component.packageName, mediaDisplayId).isNotEmpty()
+        if (onMedia && ctx != null && isMusicApp(ctx, component.packageName)) {
             showDashboard()
             return launchMediaApp(component)
+        }
+        if (onMedia) {
+            // 非音乐 App 误入了媒体屏：移走它，照常开在应用屏，不再每次被带回媒体区
+            tasksOf(tasks, component.packageName, mediaDisplayId).forEach { taskId ->
+                if (taskId.all(Char::isDigit)) removeTask(taskId)
+            }
+            if (activeMediaComponent?.packageName == component.packageName) {
+                activeMediaComponent = null
+                closeMediaPane()
+            }
+            logSink?.invoke("MEDIA: ${component.packageName} 不是音乐 App，从媒体区移回应用屏")
         }
         val onTarget = tasksOf(tasks, component.packageName, targetDisplay).isNotEmpty()
         if (!onTarget) {
@@ -1868,7 +2035,7 @@ object VirtualLauncher {
             val otherDisplay = if (targetDisplay == appHiDisplayId) appDisplayId else appHiDisplayId
             if (otherDisplay >= 0) {
                 tasksOf(tasks, component.packageName, otherDisplay).forEach { taskId ->
-                    Shell.exec("am stack remove $taskId", timeoutMs = 4000)
+                    removeTask(taskId)
                     Log.i(TAG, "清理旧屏任务 pkg=${component.packageName} task=$taskId display=$otherDisplay")
                 }
             }

@@ -1,3 +1,22 @@
+## 2026-11-18 断线收尾三坑
+
+- **推流中忽略车机蓝牙 ACL 断开**：接收端交接到 WiFi 后放掉蓝牙是正常行为（WinPlay RECORD 后 ~3s 断 ACL），「上车自动连接」的 ACL_DISCONNECTED 曾把健康会话当下车拆掉（「刚连上就断」）。真下车靠 WiFi onLost / onEnded 收尾。
+- **`cmd wifi forget-network` 只认 netId**，传 SSID 必失败。静默入网（connect-network）存的热点记在 prefs `wifi/appSavedSsids`，会话末按 netId 清除；用户自己保留的同名网络不删。
+- **虚拟屏带 `DESTROY_CONTENT_ON_REMOVAL`(1<<8)** 只结束活动，任务仍以「最近使用」留在手机；detach 时先 `am stack remove` 车机屏任务（连最近使用一起删）再释放屏，两步在同一后台任务里按序执行（detach 可能在主线程）。
+- **React Native App（Discord）量字用手机屏密度、画字用所在屏密度**：车机屏密度≠手机就裁字，与运行中改密度无关。解法 `ChatMode.matchPhone`：应用屏 `wm size` 逻辑放大到「密度=手机密度时 dp 不变」，`activeAppScale()` 乘同一倍率。桌面在 AppHi 屏，别动那块。
+- 平板版面实测：ChatGPT、YouTube 188dpi 下是平板版；微信任何密度都是单栏（主页标题重复是微信自身问题）。2026-11-18 再测：150dpi（sw768 xlarge）、逻辑 2920×1200@240（短边 800dp）+ force-stop 冷启动，微信版面与 267dpi 完全相同——它不用系统密度/配置决定版面，外部调不出平板双栏。
+- 车机任务 ID 持久记在 prefs `settings/carTaskIds`：detach 与下次 attach 都按它 removeTask 补删（保留当前车机屏上的任务），覆盖强停/崩溃没走 detach 的路径。
+- **VideoSender.onEnded(byPeer)**：本机 `stop()`（换轮次、断开）也会走到 onEnded，用 `byPeer` 区分。连线页「车机断开后等待回连」（`DisplayPrefs.waitForReconnect`，默认关）关闭时，仅对端断开才整个 `disconnect`。「车机声音」开关（`DisplayPrefs.carAudio`，默认开）取代连接前的声音弹窗，自动连接同样遵守。
+- adb 导出日志（release 包不能 run-as）：`am broadcast -a io.github.shaonialife.cardeck.EXPORT_LOG -p <包名> --ez all true`，结果数据即文件路径。
+- 聊天模式排除微信、Discord：不支持运行中改密度（标题重复 / 字形乱码）。通知横幅动画只换 OverlayCard 位置，合成器按位图身份决定是否重传纹理。
+
+## 2026-11-17 车机麦克风上行（v1，待真车验证）
+
+- 全部协议事实与实验数据在 `docs/MIC-RESEARCH.md`。要点：手机发 `type=100 audioType=speechRecognition input=true` 的 SETUP，`dataPort` 填**手机自己**的 UDP 端口；车机包格式与我们下行同构，密钥标签 `DataStream-Input-Encryption-Key`，PCM 是**大端**。
+- Android 侧靠 shell 的 `MODIFY_AUDIO_ROUTING` 注册 AudioPolicy 录音注入（`startMicInjection`）：注入期间**手机自己的麦克风对所有 App 失效**，只能在语音进行中存在；热词（HOTWORD/SoundTrigger）注入不到。
+- 触发：会话中任何 App 录音（UserService `activeMicApps`，AppOps 监视）自动切换；车机语音键 `requestSiri` 另外唤起助理。会话退役与 onEnded 两端都要 `CarMicController.detach`，新增会话收尾路径时别漏。
+- WinPlay 已端到端验证（2026-11-17）。四个隐蔽坑见 MIC-RESEARCH「WinPlay 端到端打通」：注入轨道要 `setContext(shell)`、tags 只能 `addr=` 开头、麦克风流期间必须发下行（静音）接收端才开麦、**不要校验麦克风包的 RTP 版本位**（WinPlay 包头 bug）。
+
 ## 2026-11-17 包名改为 io.github.ezn24.cardeck.neo
 
 - 只改了 `applicationId`（与上游 CarDeck 可并存）；`namespace` 与源码包路径仍是 `io.github.shaonialife.cardeck`，类名/组件类路径不变。组件名一律 `packageName + "/" + X::class.java.name`，**不要**写死包名字符串。remote 变体为 `io.github.ezn24.cardeck.neo.rd`；外层 cardeck-bridge 若写死了旧包名需同步。

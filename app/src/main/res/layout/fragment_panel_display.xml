@@ -70,7 +70,58 @@
 
         <include android:id="@+id/displaySwapPanes" layout="@layout/item_display_toggle" />
 
+        <include android:id="@+id/displayChatMode" layout="@layout/item_display_toggle" />
+
+        <include android:id="@+id/displayAssistiveDot" layout="@layout/item_display_toggle" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/assistive_dot_size"
+            android:textColor="?attr/panelTextPrimary"
+            android:textSize="14sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:layout_marginBottom="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <SeekBar
+                android:id="@+id/assistiveDotSizeSeek"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/assistiveDotSizeValue"
+                android:layout_width="52dp"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="8dp"
+                android:gravity="right"
+                android:textColor="?attr/panelTextSecondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+
         <include android:id="@+id/displayCarNotifications" layout="@layout/item_display_toggle" />
+
+        <!-- 车机通知只显示哪些 App（独立名单；空 = 全部） -->
+        <TextView
+            android:id="@+id/displayNotificationApps"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:background="@drawable/bg_app_row"
+            android:drawableEnd="@drawable/ic_chevron_right"
+            android:drawablePadding="10dp"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:padding="12dp"
+            android:textColor="?attr/panelTextPrimary"
+            android:textSize="14sp" />
 
         <include android:id="@+id/displayAssistOverlay" layout="@layout/item_display_toggle" />
 

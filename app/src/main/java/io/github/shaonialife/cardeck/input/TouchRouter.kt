@@ -97,6 +97,12 @@ object TouchRouter {
         val px = (contact.xPixels * coordScaleX).toInt().coerceAtLeast(0)
         val py = (contact.yPixels * coordScaleY).toInt().coerceAtLeast(0)
 
+        // 辅助小白点画在最上层，最先问它
+        if (io.github.shaonialife.cardeck.launcher.AssistiveDot
+                .onContact(contact.down, px.toFloat(), py.toFloat(), pressed)
+        ) {
+            return
+        }
         // 叠加卡片（「强制横屏未生效」提示）优先消费触摸：它画在应用区的黑边上，
         // 必须先于注入判定命中，否则触摸会穿透到下面的应用。
         run {
@@ -413,6 +419,7 @@ object TouchRouter {
                     contact.down && !pressed -> {
                         pressed = true
                         pressedDisplay = targetDisplay
+                        launcher.lastTouchedDisplay = targetDisplay
                         svc.pointerDown(targetDisplay, localX, localY)
                     }
 
@@ -420,6 +427,7 @@ object TouchRouter {
                         // 跨屏拖动：先在旧屏收笔，再在新屏按下
                         runCatching { svc.pointerUp(pressedDisplay, 0, 0) }
                         pressedDisplay = targetDisplay
+                        launcher.lastTouchedDisplay = targetDisplay
                         svc.pointerDown(targetDisplay, localX, localY)
                     }
 

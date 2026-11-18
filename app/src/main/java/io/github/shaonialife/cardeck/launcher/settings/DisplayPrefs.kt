@@ -21,6 +21,56 @@ object DisplayPrefs {
 
     const val FPS_DEFAULT = 30
 
+    /**
+     * 车机通知只显示这些 App（包名）；空集合 = 全部 App。与桌面显示哪些 App 无关，是独立名单。
+     */
+    fun notificationApps(context: Context): Set<String> =
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getStringSet("notificationApps", emptySet())
+            .orEmpty()
+            .toSet()
+
+    fun setNotificationApps(
+        context: Context,
+        packages: Set<String>,
+    ) {
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet("notificationApps", packages)
+            .apply()
+    }
+
+    /** 连接时推送车机侧声音（连线页开关；取代每次连接前的弹窗）。 */
+    fun carAudio(context: Context): Boolean = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("carAudio", true)
+
+    fun setCarAudio(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("carAudio", enabled)
+            .apply()
+    }
+
+    /** 车机主动断开后是否继续等待它回连（默认否：直接收起蓝牙/热点）。 */
+    fun waitForReconnect(context: Context): Boolean =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("waitForReconnect", false)
+
+    fun setWaitForReconnect(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("waitForReconnect", enabled)
+            .apply()
+    }
+
     fun showCarNotifications(context: Context): Boolean =
         context
             .getSharedPreferences("settings", Context.MODE_PRIVATE)

@@ -306,59 +306,13 @@ class MainActivity : AppCompatActivity() {
             .AtomicBoolean(false)
 
     /**
-     * 「启动连接」前的音频选择弹窗：
-     * 音频与视频同时推流会显著增加负载（实测 48k 立体声 PCM ≈1.5Mbps + 视频 ≈4Mbps），
-     * 测试台出现画面卡顿与断连；真车链路能力未知。因此默认不推音频，需用户显式开启。
-     *
-     * 三个选项竖排（横排会挤爆窄屏）：推荐项「仅视频」放第一位并用实心强调
-     * ——与正文「以看视频为主时建议暂不开启」一致；取消在最下。
+     * 「启动连接」前的声音选择：原先每次弹窗问，现在改读连线页的「车机声音」开关（2026-11-18 用户要求）。
+     * 保留这个入口名，授权回调等多处续连路径都经由它。
      */
     private fun showAudioChoiceDialog() {
-        // 默认档 = 高质量媒体通路（type=102 + AAC-LC，真 iPhone 走这条）；
-        // 「兼容档」= 强制只走 PCM 旧通路（type=100），AAC 被车机直接拒掉时的人工退路。
-        // 按钮竖排每个约 36dp：横屏屏高只有 ~300dp，再多一个「取消」就会顶出屏幕，
-        // 因此横屏省略「取消」（弹窗默认可返回键/点外部关闭）。
-        val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        val actions =
-            buildList {
-                add(
-                    DarkMessageDialog.Action(
-                        UiStrings
-                            .text(R.string.screen_004),
-                        DarkMessageDialog.Emphasis.PRIMARY,
-                    ) { beginWithAudio(enabled = false) },
-                )
-                add(
-                    DarkMessageDialog.Action(
-                        UiStrings
-                            .text(R.string.screen_005),
-                    ) {
-                        beginWithAudio(enabled = true)
-                    },
-                )
-                if (!landscape) {
-                    add(
-                        DarkMessageDialog.Action(
-                            UiStrings
-                                .text(R.string.ui_081),
-                        ) {
-                        },
-                    )
-                }
-            }
-        DarkMessageDialog.show(
-            activity = this,
-            title =
-                UiStrings
-                    .text(R.string.screen_006),
-            message =
-                UiStrings
-                    .text(R.string.screen_007) +
-                    UiStrings
-                        .text(R.string.screen_008) +
-                    UiStrings
-                        .text(R.string.screen_009),
-            actions = actions,
+        beginWithAudio(
+            io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
+                .carAudio(this),
         )
     }
 
@@ -1019,6 +973,25 @@ class MainActivity : AppCompatActivity() {
         btnAudio.setOnClickListener { requestAudioCapture() }
 
         // ---- 车机显示 ----
+        // 连线页开关：车机声音（取代连接前弹窗）、车机断开后是否等待回连
+        findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchCarAudio).apply {
+            isChecked =
+                io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
+                    .carAudio(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
+                    .setCarAudio(this@MainActivity, checked)
+            }
+        }
+        findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchWaitReconnect).apply {
+            isChecked =
+                io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
+                    .waitForReconnect(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
+                    .setWaitForReconnect(this@MainActivity, checked)
+            }
+        }
         findViewById<LinearLayout>(R.id.rowDim).setOnClickListener {
             if (!ScreenDimmer
                     .isAttached()
@@ -1102,6 +1075,9 @@ class MainActivity : AppCompatActivity() {
         buildCarMenu()
 
         // ---- 车机画面截图（合成后的整幅画面） ----
+        findViewById<View>(R.id.btnSessionHooks).setOnClickListener {
+            startActivity(android.content.Intent(this, AutomationActivity::class.java))
+        }
         findViewById<View>(R.id.btnCarScreenshot).setOnClickListener {
             io.github.shaonialife.cardeck.util.CarScreenshot.capture(this) { result ->
                 runOnUiThread {

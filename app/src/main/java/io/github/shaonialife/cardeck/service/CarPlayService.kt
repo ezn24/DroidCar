@@ -65,6 +65,13 @@ class CarPlayService : Service() {
         // 下车：车机蓝牙 ACL 断开（由 startService 投递——服务在跑时进程已是前台服务态，
         // 不受后台启动限制）。disconnect 内部会 stopService → onDestroy。
         if (intent?.action == ACTION_AUTO_STOP_SESSION) {
+            // 推流中忽略：会话交接到 WiFi 后接收端放掉蓝牙是正常行为（WinPlay 实测 RECORD 后
+            // 3 秒即断 ACL，2026-11-18 「刚连上就断」根因）。真下车时热点随之消失，
+            // WiFi onLost / 推流 onEnded 会收尾，不需要靠蓝牙判断。
+            if (SessionController.isStreaming()) {
+                fileLog("SVC: 车机蓝牙断开但正在推流（会话已在 WiFi 上）——忽略，交给 WiFi 断开收尾")
+                return START_NOT_STICKY
+            }
             fileLog("SVC: 收到「下车自动结束」——收起会话")
             if (SessionController.isSessionRunning()) {
                 SessionController.disconnect(applicationContext)
@@ -110,7 +117,10 @@ class CarPlayService : Service() {
             Bg.run("auto-session-start") {
                 SessionController.ensure(app)
                 // 自动连接默认带声音：先静默领取投屏令牌；失败退回只推视频
-                SessionController.audioEnabledForSession = acquireProjectionSilently()
+                SessionController.audioEnabledForSession =
+                    io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
+                        .carAudio(applicationContext) &&
+                    acquireProjectionSilently()
                 SessionController.startConnection(app)
             }
         }
