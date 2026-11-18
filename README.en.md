@@ -61,6 +61,12 @@ The layout adapts to the head unit's resolution: wide screens split side by side
 - **Phone UI**: Material Design 3 with three tabs at the bottom — Connect / Car / Diagnostics; follows the phone's dark/light mode and system accent color.
 - **Languages**: Traditional Chinese, Simplified Chinese and English, switchable under **Car settings → Display → Language**.
 - **Car screen capture**: one tap on the Diagnostics tab saves the current head-unit screen as a PNG (in Download/CarDeck).
+- **Car microphone**: when any app starts recording (voice search, voice messages, Gemini…), audio comes from the car's microphone instead, and the phone mic is restored afterwards (verified with WinPlay; not yet tested in a real car).
+- **Assistive dot**: a small draggable dot on top of the car screen with Back / Home / Recents. On the dashboard, Back goes to the map or music app you touched last. Size is adjustable in **Car settings → Display**; follows the phone's dark/light mode.
+- **Car notifications**: CarPlay-style banners with the app icon that slide in from the top; dismiss with × or by swiping up. You can limit notifications to selected apps.
+- **Tablet layouts**: WhatsApp, Telegram, LINE, Instagram, ChatGPT, YouTube and others use their tablet layout on the car screen; Discord renders at the phone's density so text is no longer clipped.
+- **Connection automation**: send your own Intents when the car connects or disconnects (MacroDroid-style: broadcast / activity / service, action, package, extras…), e.g. for Tasker.
+- **Connect-tab switches**: "Car audio" decides whether audio is sent, with no prompt before each connection; "Wait for the car to reconnect" is off by default, so a disconnect from the car releases Bluetooth and the hotspot. The car hotspot the app saved is forgotten on disconnect, and car apps no longer pile up in the phone's recents.
 
 ## Requirements
 
