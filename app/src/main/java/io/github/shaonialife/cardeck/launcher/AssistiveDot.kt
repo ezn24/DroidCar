@@ -370,6 +370,8 @@ object AssistiveDot {
             if (!CarInputClient.keyEvent(display, KeyEvent.KEYCODE_BACK)) {
                 Shell.exec("input -d $display keyevent ${KeyEvent.KEYCODE_BACK}", timeoutMs = 3_000L)
             }
+            // 地图 / 音乐 App 在根页面按返回会离开该屏：把它带回来，仪表盘不留空白
+            VirtualLauncher.restorePaneAfterBack(display)
         }
     }
 }

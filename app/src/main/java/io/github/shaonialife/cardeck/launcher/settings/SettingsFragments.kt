@@ -813,25 +813,101 @@ class DisplayPanelFragment : SettingsPanelFragment() {
                         .sortedBy { it.label.lowercase() }
                 row.post {
                     if (!isAdded) return@post
-                    val selected = DisplayPrefs.notificationApps(ctx).toMutableSet()
-                    val names = apps.map { it.label }.toTypedArray()
-                    val checked = apps.map { it.component.packageName in selected }.toBooleanArray()
-                    androidx.appcompat.app.AlertDialog
-                        .Builder(ctx, R.style.CarDeckAppPicker)
-                        .setTitle(R.string.notif_apps)
-                        .setMultiChoiceItems(names, checked) { _, index, isChecked ->
-                            val pkg = apps[index].component.packageName
-                            if (isChecked) selected += pkg else selected -= pkg
-                        }.setPositiveButton(R.string.notif_apps_done) { _, _ ->
-                            DisplayPrefs.setNotificationApps(ctx, selected)
-                            refresh()
-                        }.setNeutralButton(R.string.notif_apps_all) { _, _ ->
-                            DisplayPrefs.setNotificationApps(ctx, emptySet())
-                            refresh()
-                        }.show()
+                    showNotificationAppsPicker(apps) { refresh() }
                 }
             }
         }
+    }
+
+    /**
+     * 通知 App 多选：与「选择其他已安装应用」（地图选择器）同一套版面——搜索框 + 圆角图标列表，
+     * 行尾是勾选框而非单选圈；「全部 App」= 清空名单（不过滤），「完成」保存。
+     */
+    private fun showNotificationAppsPicker(
+        candidates: List<VirtualLauncher.AppEntry>,
+        onSaved: () -> Unit,
+    ) {
+        val ctx = requireContext()
+        val body = layoutInflater.inflate(R.layout.dialog_map_picker, null)
+        val list = body.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.mapPickerList)
+        val search = body.findViewById<android.widget.EditText>(R.id.mapPickerSearch)
+        val empty = body.findViewById<View>(R.id.mapPickerEmpty)
+        val selected = DisplayPrefs.notificationApps(ctx).toMutableSet()
+        // 已选的排在前面，方便核对
+        val all = candidates.sortedBy { if (it.component.packageName in selected) 0 else 1 }
+        var filtered = all
+
+        class Row(
+            val root: View,
+        ) : androidx.recyclerview.widget.RecyclerView.ViewHolder(root)
+        val adapter =
+            object : androidx.recyclerview.widget.RecyclerView.Adapter<Row>() {
+                override fun getItemCount(): Int = filtered.size
+
+                override fun onCreateViewHolder(
+                    parent: ViewGroup,
+                    viewType: Int,
+                ): Row = Row(layoutInflater.inflate(R.layout.item_map_option, parent, false))
+
+                override fun onBindViewHolder(
+                    holder: Row,
+                    position: Int,
+                ) {
+                    val entry = filtered[position]
+                    val pkg = entry.component.packageName
+                    val mark = holder.root.findViewById<ImageView>(R.id.mapOptionRadio)
+                    holder.root.findViewById<TextView>(R.id.mapOptionName).text = entry.label
+                    holder.root.findViewById<ImageView>(R.id.mapOptionIcon).setImageBitmap(
+                        AppIcons.rounded(entry.icon, (34 * resources.displayMetrics.density).toInt()),
+                    )
+                    mark.setImageResource(if (pkg in selected) R.drawable.bg_checkbox_on else R.drawable.bg_checkbox_off)
+                    holder.root.setOnClickListener {
+                        if (!selected.add(pkg)) selected.remove(pkg)
+                        mark.setImageResource(if (pkg in selected) R.drawable.bg_checkbox_on else R.drawable.bg_checkbox_off)
+                    }
+                }
+            }
+        list.layoutManager = androidx.recyclerview.widget.LinearLayoutManager(ctx)
+        list.adapter = adapter
+        empty.visibility = if (all.isEmpty()) View.VISIBLE else View.GONE
+        search.addTextChangedListener(
+            object : android.text.TextWatcher {
+                override fun beforeTextChanged(
+                    s: CharSequence?,
+                    start: Int,
+                    count: Int,
+                    after: Int,
+                ) = Unit
+
+                override fun onTextChanged(
+                    s: CharSequence?,
+                    start: Int,
+                    before: Int,
+                    count: Int,
+                ) {
+                    filtered = all.filter { matchesAppSearch(s?.toString().orEmpty(), it.label, it.component.packageName) }
+                    empty.visibility = if (filtered.isEmpty()) View.VISIBLE else View.GONE
+                    adapter.notifyDataSetChanged()
+                    list.scrollToPosition(0)
+                }
+
+                override fun afterTextChanged(s: android.text.Editable?) = Unit
+            },
+        )
+        val dialog =
+            androidx.appcompat.app.AlertDialog
+                .Builder(ctx, R.style.CarDeckAppPicker)
+                .setTitle(R.string.notif_apps)
+                .setView(body)
+                .setPositiveButton(R.string.notif_apps_done) { _, _ ->
+                    DisplayPrefs.setNotificationApps(ctx, selected)
+                    onSaved()
+                }.setNeutralButton(R.string.notif_apps_all) { _, _ ->
+                    DisplayPrefs.setNotificationApps(ctx, emptySet())
+                    onSaved()
+                }.create()
+        dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
+        dialog.show()
     }
 
     private fun bindDisplayToggle(
