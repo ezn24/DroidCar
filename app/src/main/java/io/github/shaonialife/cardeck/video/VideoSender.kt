@@ -42,7 +42,8 @@ class VideoSender(
     private val targetFps: Int = 30,
     private val log: (String) -> Unit,
     /** 推流自然结束（对端断开等）时回调——CarPlay 会话真实结束的信号。 */
-    private val onEnded: (() -> Unit)? = null,
+    /** 推流结束回调；参数 = 是否由对端（车机/网络）断开，false 表示是本机主动 [stop]。 */
+    private val onEnded: ((byPeer: Boolean) -> Unit)? = null,
     /**
      * 屏幕流内 keepAlive 帧是否携带统计体（车机 /info 的 `keepAliveSendStatsAsBody`）。
      * 奥迪 MMI 3315 声明 true → opcode=5 + bplist 统计体；否则 opcode=2 空帧。
@@ -183,7 +184,15 @@ class VideoSender(
         }
     }
 
+    @Volatile
+    private var stopRequested = false
+
     fun stop() {
+        stopRequested = true
+        stopInternal()
+    }
+
+    private fun stopInternal() {
         running.set(false)
         runCatching { encoder?.stop() }
         runCatching { encoder?.release() }
@@ -257,9 +266,10 @@ class VideoSender(
             // 后台线程未捕获异常会杀死整个进程（曾导致锁屏后 app 消失）
             log("VIDEO: 推流中止 - ${error.message}（等待接收端恢复后重连）")
         } finally {
-            stop()
+            val byPeer = !stopRequested
+            stopInternal()
             // 会话真实结束信号（静默降噪解除 / 状态收尾）
-            runCatching { onEnded?.invoke() }
+            runCatching { onEnded?.invoke(byPeer) }
         }
     }
 

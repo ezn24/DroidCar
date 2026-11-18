@@ -8,6 +8,11 @@ internal fun parseTaskDisplays(dump: String): Map<Int, Map<String, List<String>>
     val out = linkedMapOf<Int, MutableMap<String, MutableSet<String>>>()
     for (line in dump.lineSequence()) {
         display.find(line)?.let { id = (it.groupValues[1].ifEmpty { it.groupValues[2] }).toInt() }
+        // 只认任务条目行（「* Task{」）。同一段 dump 里还有 mLastFocusedRootTask=Task{…}、
+        // mPreferredTopFocusableRootTask=Task{…}、task=Task{…} 之类的**引用字段**，任务关掉后
+        // 仍保留旧值——当成任务会让「背景应用」误判关不掉（2026-11-17 三星录音机：
+        // removeTask 回「No task with id」而清单里一直还有它）。
+        if (!line.trimStart().startsWith("* Task{")) continue
         val match = task.find(line) ?: continue
         if (id < 0) continue
         out.getOrPut(id) { linkedMapOf() }.getOrPut(match.groupValues[2]) { linkedSetOf() }.add(match.groupValues[1])

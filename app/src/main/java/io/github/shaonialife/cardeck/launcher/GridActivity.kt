@@ -342,7 +342,9 @@ class GridActivity : AppCompatActivity() {
     }
 
     private fun openMediaApp() {
-        val active = MediaSessionsState.nowPlaying?.pkg
+        // 正在播放的不是音乐 App（Telegram 语音、录音机回放）就不开它，退到用户的默认音乐 App
+        val active =
+            MediaSessionsState.nowPlaying?.pkg?.takeIf { VirtualLauncher.isMusicApp(this, it) }
         val preferred =
             getSharedPreferences("settings", Context.MODE_PRIVATE)
                 .getString("defaultMediaPackage", null)

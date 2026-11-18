@@ -92,6 +92,8 @@ object WallpaperStore {
                     val night = isNight(app)
                     if (night == lastNight) return
                     lastNight = night
+                    io.github.shaonialife.cardeck.launcher.AssistiveDot
+                        .refresh()
                     if (source(app, Slot.LIGHT) != SRC_SAME) markChanged()
                 }
 

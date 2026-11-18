@@ -254,6 +254,15 @@ class DualDisplayComposer(
             wake()
         }
 
+    /** 辅助小白点（[io.github.shaonialife.cardeck.launcher.AssistiveDot]）：独立纹理槽，画在最上层。 */
+    @Volatile
+    var assistiveDot: OverlayCard? = null
+        set(value) {
+            field = value
+            overlayDirty = true
+            wake()
+        }
+
     /** 一张叠加位图的 GL 纹理与已上传的卡片引用（仅 GL 线程访问）。 */
     private class OverlaySlot {
         var texture = 0
@@ -262,6 +271,7 @@ class DualDisplayComposer(
 
     private val overlaySlot = OverlaySlot()
     private val pageDotsSlot = OverlaySlot()
+    private val assistiveDotSlot = OverlaySlot()
 
     /** 超采样输入（GL 线程创建；start() 返回后对其他线程安全可读）。 */
     @Volatile
@@ -588,7 +598,10 @@ class DualDisplayComposer(
                     slot.uploaded = null
                     return null
                 }
-            if (card === slot.uploaded && slot.texture != 0) return card
+            if (slot.texture != 0 && card.bitmap === slot.uploaded?.bitmap) {
+                slot.uploaded = card
+                return card
+            }
             if (slot.texture == 0) {
                 val tex = IntArray(1)
                 GLES20.glGenTextures(1, tex, 0)
@@ -885,7 +898,10 @@ class DualDisplayComposer(
             }
             // 叠加卡片最后绘制（最上层，不受分支影响）：卡片坐标为输出画面坐标（顶部原点）
             syncOverlayTexture(overlaySlot, overlayCard)?.let { card ->
-                drawOverlay(overlaySlot, card.left, card.top, card.right, card.bottom)
+                drawOverlay(overlaySlot, card.left, card.top, card.right, card.bottom, card.alpha)
+            }
+            syncOverlayTexture(assistiveDotSlot, assistiveDot)?.let { dot ->
+                drawOverlay(assistiveDotSlot, dot.left, dot.top, dot.right, dot.bottom, dot.alpha)
             }
             // 截图请求：读回刚合成好的这一帧（即推给车机的画面），在交换缓冲之前读
             captureRequest?.let { callback ->
@@ -950,7 +966,7 @@ class DualDisplayComposer(
             }
         } catch (_: InterruptedException) {
         } finally {
-            for (slot in arrayOf(overlaySlot, pageDotsSlot)) {
+            for (slot in arrayOf(overlaySlot, pageDotsSlot, assistiveDotSlot)) {
                 if (slot.texture != 0) {
                     runCatching { GLES20.glDeleteTextures(1, intArrayOf(slot.texture), 0) }
                     slot.texture = 0

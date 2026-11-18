@@ -151,12 +151,6 @@
     <string name="screen_001" formatted="false">Bluetooth handshake → Join car Wi-Fi → Start CarPlay</string>
     <string name="screen_002" formatted="false">Wallpaper updated</string>
     <string name="screen_003" formatted="false">Could not save</string>
-    <string name="screen_004" formatted="false">Video only</string>
-    <string name="screen_005" formatted="false">Enable audio</string>
-    <string name="screen_006" formatted="false">Play audio through your car?</string>
-    <string name="screen_007" formatted="false">Send phone media and navigation audio to the car.\n</string>
-    <string name="screen_008" formatted="false">Audio adds processing load. You can leave it disabled for video only.\n</string>
-    <string name="screen_009" formatted="false">Screen capture permission is required for audio.</string>
     <string name="screen_010" formatted="false">Cancel connection?</string>
     <string name="screen_011" formatted="false">Stop this connection attempt and disconnect Bluetooth and Wi-Fi. Tap Connect to try again.</string>
     <string name="screen_012" formatted="false">Keep connecting</string>
@@ -401,4 +395,56 @@
     <string name="md_car_screenshot">Capture car screen</string>
     <string name="md_car_screenshot_desc">Save the current car screen as a PNG to Download/CarDeck (while connected)</string>
     <string name="md_car_screenshot_failed">Capture failed: connect to a car first</string>
+    <!-- 车机通知（2026-11-17：CarPlay 式横幅 + 独立 App 名单） -->
+    <string name="notif_apps">Notification apps</string>
+    <string name="notif_apps_row">Notification apps: %1$s</string>
+    <string name="notif_apps_all">All apps</string>
+    <string name="notif_apps_count">%1$d selected</string>
+    <string name="notif_apps_done">Done</string>
+    <string name="notif_now">now</string>
+    <string name="chat_mode">Tablet layout</string>
+    <string name="chat_mode_note">WhatsApp, Telegram, LINE, Instagram, ChatGPT, YouTube and similar apps use their tablet layout on the car screen (text is a bit smaller). WeChat has no tablet layout; turn on landscape mode in WeChat settings instead. Applies the next time the app opens.</string>
+    <string name="assistive_dot">Assistive dot</string>
+    <string name="assistive_dot_note">A small draggable dot at the top of the car screen; tap it for Back / Home / Recents.</string>
+    <string name="assistive_dot_size">Assistive dot size</string>
+
+    <string name="md_hooks">Connection automation</string>
+    <string name="md_hooks_desc">Send your own Intent when the car connects / disconnects (Tasker etc.)</string>
+    <string name="md_hooks_connected">On connect</string>
+    <string name="md_hooks_disconnected">On disconnect</string>
+    <string name="md_hooks_test">Test</string>
+
+    <string name="md_hooks_intro">These Intents are sent in order when the car connects / disconnects (like MacroDroid\'s "Send Intent"; works with Tasker etc.). Each one carries extra cardeck_event = connected / disconnected.</string>
+    <string name="md_hooks_empty">No Intents yet</string>
+    <string name="md_hooks_add">Add Intent</string>
+    <string name="md_hooks_edit">Edit Intent</string>
+    <string name="md_hooks_test_all">Test all</string>
+    <string name="md_hooks_none_enabled">No enabled Intents</string>
+    <string name="md_hooks_unnamed">(unnamed)</string>
+    <string name="md_hooks_target">Target</string>
+    <string name="md_hooks_target_broadcast">Broadcast</string>
+    <string name="md_hooks_target_activity">Activity</string>
+    <string name="md_hooks_target_service">Service</string>
+    <string name="md_hooks_action">Action</string>
+    <string name="md_hooks_package">Package</string>
+    <string name="md_hooks_pick_app">Pick app</string>
+    <string name="md_hooks_class">Class (optional; starting with . means inside the package)</string>
+    <string name="md_hooks_data">Data URI (optional)</string>
+    <string name="md_hooks_mime">MIME type (optional)</string>
+    <string name="md_hooks_categories">Categories (optional, comma-separated)</string>
+    <string name="md_hooks_extras">Extras</string>
+    <string name="md_hooks_add_extra">Add extra</string>
+    <string name="md_hooks_extra_key">Key</string>
+    <string name="md_hooks_extra_value">Value</string>
+    <string name="md_hooks_extra_note">Tap the type tag to switch string / int / long / boolean / float.</string>
+    <string name="md_hooks_save">Save</string>
+    <string name="md_hooks_delete">Delete</string>
+    <string name="md_hooks_err_empty">Fill in at least one of action, package, class or data</string>
+    <string name="md_hooks_err_class">A class needs a package</string>
+    <string name="md_hooks_err_extra">Invalid extra value: %1$s</string>
+
+    <string name="md_car_audio">Car audio</string>
+    <string name="md_car_audio_desc">Send phone audio to the car when connected (needs screen-capture permission; off = video only)</string>
+    <string name="md_wait_reconnect">Wait for the car to reconnect</string>
+    <string name="md_wait_reconnect_desc">When off, a disconnect from the car ends the session and releases Bluetooth and the hotspot</string>
 </resources>

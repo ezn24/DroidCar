@@ -151,7 +151,8 @@ object AssistOverlayController {
     }
 
     private fun removeTask(task: Int) {
-        Shell.exec("am stack remove $task", timeoutMs = 3_000L)
+        io.github.shaonialife.cardeck.launcher.VirtualLauncher
+            .removeTask(task.toString())
     }
 
     private fun beginPolling() {

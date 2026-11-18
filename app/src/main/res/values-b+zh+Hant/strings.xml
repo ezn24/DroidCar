@@ -151,12 +151,6 @@
     <string name="screen_001" formatted="false">藍芽 iAP2 握手 → 加入車機熱點 → 建立 CarPlay 會話</string>
     <string name="screen_002" formatted="false">桌布已更新</string>
     <string name="screen_003" formatted="false">儲存失敗</string>
-    <string name="screen_004" formatted="false">僅影片（更流暢）</string>
-    <string name="screen_005" formatted="false">開啟聲音</string>
-    <string name="screen_006" formatted="false">是否在車機側播放聲音？</string>
-    <string name="screen_007" formatted="false">開啟後手機媒體/導航聲音投到車機播放（不開啟則車上無聲）。\n</string>
-    <string name="screen_008" formatted="false">音影片同時傳會增加負載，以看影片為主時可先不開啟。\n</string>
-    <string name="screen_009" formatted="false">開啟聲音需要「投屏」許可權，會一併申請。</string>
     <string name="screen_010" formatted="false">取消連線？</string>
     <string name="screen_011" formatted="false">將停止當前連線嘗試：藍芽與 WiFi 鏈路都會斷開，需重新點「啟動連線」。</string>
     <string name="screen_012" formatted="false">繼續連線</string>
@@ -401,4 +395,56 @@
     <string name="md_car_screenshot">截取車機畫面</string>
     <string name="md_car_screenshot_desc">把目前的車機畫面存成 PNG 到「下載/CarDeck」（需已連線）</string>
     <string name="md_car_screenshot_failed">截圖失敗：請先連線車機</string>
+    <!-- 车机通知（2026-11-17：CarPlay 式横幅 + 独立 App 名单） -->
+    <string name="notif_apps">通知 App</string>
+    <string name="notif_apps_row">通知 App：%1$s</string>
+    <string name="notif_apps_all">全部 App</string>
+    <string name="notif_apps_count">已選 %1$d 個</string>
+    <string name="notif_apps_done">完成</string>
+    <string name="notif_now">現在</string>
+    <string name="chat_mode">平板版面</string>
+    <string name="chat_mode_note">WhatsApp、Telegram、LINE、Instagram、ChatGPT、YouTube 等 App 在車機上改用平板版面（字會小一些）。微信不支援平板版面，請在微信「設定 → 一般」開啟橫屏模式。下次打開 App 時生效。</string>
+    <string name="assistive_dot">輔助小白點</string>
+    <string name="assistive_dot_note">車機畫面頂部的小圓點，可拖動；點開有 返回 / 主頁 / 後台 三鍵。</string>
+    <string name="assistive_dot_size">小白點大小</string>
+
+    <string name="md_hooks">連線自動化</string>
+    <string name="md_hooks_desc">連上 / 斷開車機時發出你指定的 Intent（Tasker 等）</string>
+    <string name="md_hooks_connected">連線成功時</string>
+    <string name="md_hooks_disconnected">斷開連線時</string>
+    <string name="md_hooks_test">測試</string>
+
+    <string name="md_hooks_intro">連上 / 斷開車機時依次發出下面的 Intent（類似 MacroDroid「傳送 Intent」，可搭配 Tasker 等）。每個都會附帶 extra cardeck_event = connected / disconnected。</string>
+    <string name="md_hooks_empty">還沒有 Intent</string>
+    <string name="md_hooks_add">新增 Intent</string>
+    <string name="md_hooks_edit">編輯 Intent</string>
+    <string name="md_hooks_test_all">全部測試</string>
+    <string name="md_hooks_none_enabled">沒有啟用的 Intent</string>
+    <string name="md_hooks_unnamed">（未命名）</string>
+    <string name="md_hooks_target">目標</string>
+    <string name="md_hooks_target_broadcast">廣播</string>
+    <string name="md_hooks_target_activity">Activity</string>
+    <string name="md_hooks_target_service">服務</string>
+    <string name="md_hooks_action">Action</string>
+    <string name="md_hooks_package">套件名稱</string>
+    <string name="md_hooks_pick_app">選擇 App</string>
+    <string name="md_hooks_class">類別名稱（可選，以 . 開頭表示套件內）</string>
+    <string name="md_hooks_data">Data URI（可選）</string>
+    <string name="md_hooks_mime">MIME 類型（可選）</string>
+    <string name="md_hooks_categories">Categories（可選，逗號分隔）</string>
+    <string name="md_hooks_extras">Extras</string>
+    <string name="md_hooks_add_extra">新增 Extra</string>
+    <string name="md_hooks_extra_key">鍵</string>
+    <string name="md_hooks_extra_value">值</string>
+    <string name="md_hooks_extra_note">點類型標籤可切換 string / int / long / boolean / float。</string>
+    <string name="md_hooks_save">儲存</string>
+    <string name="md_hooks_delete">刪除</string>
+    <string name="md_hooks_err_empty">Action、套件、類別、Data 至少填一項</string>
+    <string name="md_hooks_err_class">填了類別名稱就必須填套件名稱</string>
+    <string name="md_hooks_err_extra">Extra 值格式不對：%1$s</string>
+
+    <string name="md_car_audio">車機聲音</string>
+    <string name="md_car_audio_desc">連線時把手機聲音推到車機（需投影授權；關閉則只推畫面）</string>
+    <string name="md_wait_reconnect">車機斷開後等待回連</string>
+    <string name="md_wait_reconnect_desc">關閉時，車機主動斷開就結束連線、收起藍牙與熱點</string>
 </resources>

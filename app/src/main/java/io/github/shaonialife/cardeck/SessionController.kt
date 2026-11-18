@@ -530,6 +530,9 @@ object SessionController {
         "wifi=${wifiConnector?.currentNetwork != null} " +
             "bt=${bluetoothServer?.isRunning == true} ctrl=${(ctrlAdvertiser?.port ?: -1) > 0}"
 
+    /** 是否正在向车机推流（AirPlay 会话已建立，走 WiFi，不再依赖蓝牙）。 */
+    fun isStreaming(): Boolean = videoSender?.isRunning == true
+
     /** 会话是否活跃（推出流进程或 BT 任一在跑）。 */
     fun isSessionRunning(): Boolean =
         videoSender?.isRunning == true ||
@@ -590,6 +593,8 @@ object SessionController {
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
     fun disconnect(context: Context) {
         val hadProjection = CarPlayService.mediaProjection != null
+        io.github.shaonialife.cardeck.util.SessionHooks
+            .onDisconnected(context)
         pendingEndpointUpdate = null
         retireSession()
         // BT 控制会话只在这里（用户终态）退役，socket close 让保活读循环立刻退出：
@@ -733,6 +738,8 @@ object SessionController {
 
     /** 会话结束/新周期开始前彻底退役上一代会话（旧管线泄漏会累积编码器/虚拟显示器，最终 dequeueBuffer -19）。 */
     fun retireSession() {
+        io.github.shaonialife.cardeck.audio.CarMicController
+            .detach("会话退役")
         videoSender?.stop()
         videoSender = null
         // 暗幕/常亮随会话收掉（本方法在每轮配对起步也会执行，新一轮推流起来后会重新置位）
@@ -922,7 +929,10 @@ object SessionController {
         val current = shellWifiStatus().second
         if (current == wifi.ssid) {
             appendLog("WIFI: 手机已连在车机热点 \"${wifi.ssid}\"——直接建立网络通道并绑定")
+            if (wifi.ssid in appSavedSsids()) registerShellSavedNetwork(wifi.ssid, preExisting = true)
         } else {
+            // 已知是本应用存的就不必查（省一次 shell 往返；入网在车机 ~10s 窗口内）
+            val preExisting = wifi.ssid !in appSavedSsids() && savedNetworkIds(wifi.ssid).isNotEmpty()
             phaseHint = UiStrings.format(R.string.phase_06, wifi.ssid)
             appendLog(
                 ">>> 静默加入车机热点 \"${wifi.ssid}\"（cmd wifi connect-network，0 弹窗；" +
@@ -941,6 +951,8 @@ object SessionController {
                 )
                 return WifiCarPlayConnector.JoinResult.Unavailable
             }
+            // 命令返回 ok 时热点已进系统配置——立即登记（取消/超时路径也不能遗留）
+            registerShellSavedNetwork(wifi.ssid, preExisting)
             if (!waitForCarSsid(wifi.ssid, CAR_WIFI_JOIN_WAIT_MS)) {
                 return WifiCarPlayConnector.JoinResult.Unavailable
             }
@@ -1072,6 +1084,49 @@ object SessionController {
     private var shellFallbackCleanupSsid: String? = null
 
     /**
+     * 由 CarDeck 自己（connect-network）存进系统的车机热点，持久记录。
+     *
+     * 2026-11-18 用户实测「断开 / 取消连接后手机仍挂在车机热点」：静默入网路径每轮都
+     * connect-network，却从不登记会话末清除——热点留在系统里，下一轮又走「已连着」分支，
+     * 更不会登记。有了这份记录，「此前已保存」可以区分是用户自己保留的（不删）还是
+     * 我们存的（会话末删）。
+     */
+    private fun appSavedSsids(): MutableSet<String> =
+        appContext
+            ?.getSharedPreferences("wifi", Context.MODE_PRIVATE)
+            ?.getStringSet("appSavedSsids", emptySet())
+            .orEmpty()
+            .toMutableSet()
+
+    private fun setAppSaved(
+        ssid: String,
+        saved: Boolean,
+    ) {
+        val set = appSavedSsids()
+        if (if (saved) set.add(ssid) else set.remove(ssid)) {
+            appContext
+                ?.getSharedPreferences("wifi", Context.MODE_PRIVATE)
+                ?.edit()
+                ?.putStringSet("appSavedSsids", set)
+                ?.apply()
+        }
+    }
+
+    /** connect-network 成功后登记会话末清除；用户自己保留的同名网络除外。 */
+    private fun registerShellSavedNetwork(
+        ssid: String,
+        preExisting: Boolean,
+    ) {
+        if (preExisting && ssid !in appSavedSsids()) {
+            appendLog("WIFI: \"$ssid\" 此前已保存在系统（用户选过保留）——不作会话末清除")
+            return
+        }
+        shellFallbackCleanupSsid = ssid
+        setAppSaved(ssid, true)
+        appendLog("WIFI: \"$ssid\" 由本应用存为系统网络——已登记会话末自动清除")
+    }
+
+    /**
      * specifier 挂起时的快速兜底（首窗 5s 零回调后调用，运行于连接流程线程）。
      *
      * 探测：`forget` 旧网络后系统可能已自动重连同 SSID——是则直接绑定现有连接。
@@ -1123,12 +1178,7 @@ object SessionController {
             appendLog("WIFI: connect-network 失败（${r.output.take(80)}）")
             return null
         }
-        if (preExisting) {
-            appendLog("WIFI: \"${wifi.ssid}\" 此前已保存在系统（用户选过保留）——不作会话末清除")
-        } else {
-            shellFallbackCleanupSsid = wifi.ssid
-            appendLog("WIFI: connect-network 已执行（新存系统网络，已登记会话末自动清除）")
-        }
+        registerShellSavedNetwork(wifi.ssid, preExisting)
         // 轮询切网完成（断旧网/关联/DHCP，实测 2-10s）
         repeat(30) {
             if (connectCancelled) return null
@@ -1171,10 +1221,13 @@ object SessionController {
         val ssid = shellFallbackCleanupSsid ?: return
         shellFallbackCleanupSsid = null
         Bg.run("wifi-fallback-cleanup") {
-            val r = Shell.exec("cmd wifi forget-network ${shellQuote(ssid)}", 5_000L)
+            // forget-network 只认 netId（旧实现传 SSID，命令失败、热点一直留在系统里）
+            val ids = savedNetworkIds(ssid)
+            val ok = ids.isNotEmpty() && ids.all { Shell.exec("cmd wifi forget-network $it", 5_000L).ok }
+            if (ok || ids.isEmpty()) setAppSaved(ssid, false)
             appendLog(
-                "WIFI: 会话末清除 shell 兜底保存的 \"$ssid\" ok=" + r.ok +
-                    (if (!r.ok) "（请到 系统设置>WLAN 手动删除）" else ""),
+                "WIFI: 会话末清除本应用保存的 \"$ssid\"（netId=$ids）ok=$ok" +
+                    (if (!ok && ids.isNotEmpty()) "（请到 系统设置>WLAN 手动删除）" else ""),
             )
         }
     }
@@ -2486,6 +2539,13 @@ object SessionController {
                             currentSharedSecret = sessionKey
                             currentAudioHost =
                                 client.activeHost ?: EndpointHosts.candidates(client.currentEndpoint.ipAddresses).firstOrNull()
+                            // 车机麦克风自动切换（有 App 录音时）：/info 已在握手阶段缓存，这里即可判可用性
+                            io.github.shaonialife.cardeck.audio.CarMicController.attach(
+                                client = client,
+                                sharedSecret = sessionKey,
+                                ownPackage = context.packageName,
+                                mediaStreamType = { activeAudioProfile?.streamType },
+                            )
                             client.connectEventChannel(sessionKey, setup) { command ->
                                 when (command["type"]) {
                                     "hidSendReport" -> {
@@ -2587,6 +2647,20 @@ object SessionController {
                                                 "EVENT: 其他 HID 报告 uuid=$uuid bytes=${report.size}" +
                                                     " hex=${report.joinToString(" ") { "%02x".format(it) }}",
                                             )
+                                        }
+                                    }
+
+                                    "requestSiri" -> {
+                                        // 车机语音键（方向盘 / 屏上麦克风键）：siriAction 2=按下、3=放开
+                                        // （DiPlay 车机端连发 2+3）。只认按下，开车机麦克风 → 唤起助理。
+                                        val action =
+                                            ((command["params"] as? Map<*, *>)?.get("siriAction") as? Number)?.toInt()
+                                        appendLog("EVENT: 车机语音键 requestSiri siriAction=$action")
+                                        if (action == null || action == 2) {
+                                            Bg.run("car-voice-button") {
+                                                io.github.shaonialife.cardeck.audio.CarMicController
+                                                    .onVoiceButton()
+                                            }
                                         }
                                     }
 
@@ -2741,10 +2815,17 @@ object SessionController {
                                             targetFps = fps,
                                             log = { line -> appendLog(line) },
                                             keepAliveWithStats = setup.keepAliveSendStatsAsBody,
-                                            onEnded = {
+                                            onEnded = { byPeer ->
                                                 // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
                                                 appendLog(">>> CarPlay 会话结束（推流终止）——恢复蓝牙探测")
                                                 BtSessionGate.sessionActive = false
+                                                appContext?.let {
+                                                    io.github.shaonialife.cardeck.util.SessionHooks
+                                                        .onDisconnected(it)
+                                                }
+                                                // 车机麦克风注入必须随会话撤掉，否则手机麦克风一直被占
+                                                io.github.shaonialife.cardeck.audio.CarMicController
+                                                    .detach("会话结束")
                                                 // 车机掉线类结束（无用户断开操作）：暗幕/常亮必须一起收掉。
                                                 // 这条路径不经过 retireSession（VirtualLauncher 仍挂着），
                                                 // 漏掉它就会出现「会话早就断了、45s 后手机屏突然变黑」
@@ -2766,6 +2847,16 @@ object SessionController {
                                                 // 音频拆链归因：起过音频却很快被拆 → 记下该档位
                                                 // 不兼容，下次连接自动换档（见 attributeAudioTeardown）。
                                                 attributeAudioTeardown()
+                                                // 车机主动断开：默认不再等它回连，整个收起（同点「断开」）——
+                                                // 否则手机一直开着蓝牙监听/热点等待（2026-11-18 用户要求，开关在连线页）。
+                                                // 本机主动收掉推流（换新一轮等）不算。
+                                                val ctx = appContext
+                                                if (byPeer && ctx != null && !DisplayPrefs.waitForReconnect(ctx)) {
+                                                    appendLog("SESSION: 车机断开连接——「等待回连」已关闭，收起蓝牙/热点")
+                                                    android.os
+                                                        .Handler(android.os.Looper.getMainLooper())
+                                                        .post { if (isSessionRunning()) disconnect(ctx) }
+                                                }
                                             },
                                         )
                                     // 先连端口（车机看门狗），编码器等 RECORD 后再启动
@@ -2804,6 +2895,8 @@ object SessionController {
                                         // 暗幕/常亮只在真正开始投屏后生效（见 ScreenDimmer.sessionActive）：
                                         // 应用启动时只挂触摸探针，避免「会话早断了、手机过一会儿还是变暗」。
                                         if (ok) {
+                                            io.github.shaonialife.cardeck.util.SessionHooks
+                                                .onConnected(context)
                                             ScreenDimmer.setSessionActive(true)
                                             // 虚拟屏已建好 → 按「连接时真息屏」开关决定是否硬件断电
                                             if (DisplayPrefs.screenOffOnConnect(context)) {

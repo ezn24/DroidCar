@@ -790,6 +790,50 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         savedInstanceState: Bundle?,
     ): View = inflater.inflate(R.layout.fragment_panel_display, container, false)
 
+    /** 「通知 App」：多选名单（空 = 全部）。应用列表冷扫描在后台。 */
+    private fun bindNotificationApps(row: TextView) {
+        val ctx = requireContext()
+
+        fun refresh() {
+            val chosen = DisplayPrefs.notificationApps(ctx)
+            row.text =
+                if (chosen.isEmpty()) {
+                    getString(R.string.notif_apps_row, getString(R.string.notif_apps_all))
+                } else {
+                    getString(R.string.notif_apps_row, getString(R.string.notif_apps_count, chosen.size))
+                }
+        }
+        refresh()
+        row.setOnClickListener {
+            io.github.shaonialife.cardeck.util.Bg.run("notif-apps-scan") {
+                val apps =
+                    VirtualLauncher
+                        .cachedApps(ctx.applicationContext)
+                        .distinctBy { it.component.packageName }
+                        .sortedBy { it.label.lowercase() }
+                row.post {
+                    if (!isAdded) return@post
+                    val selected = DisplayPrefs.notificationApps(ctx).toMutableSet()
+                    val names = apps.map { it.label }.toTypedArray()
+                    val checked = apps.map { it.component.packageName in selected }.toBooleanArray()
+                    androidx.appcompat.app.AlertDialog
+                        .Builder(ctx, R.style.CarDeckAppPicker)
+                        .setTitle(R.string.notif_apps)
+                        .setMultiChoiceItems(names, checked) { _, index, isChecked ->
+                            val pkg = apps[index].component.packageName
+                            if (isChecked) selected += pkg else selected -= pkg
+                        }.setPositiveButton(R.string.notif_apps_done) { _, _ ->
+                            DisplayPrefs.setNotificationApps(ctx, selected)
+                            refresh()
+                        }.setNeutralButton(R.string.notif_apps_all) { _, _ ->
+                            DisplayPrefs.setNotificationApps(ctx, emptySet())
+                            refresh()
+                        }.show()
+                }
+            }
+        }
+    }
+
     private fun bindDisplayToggle(
         row: View,
         title: Int,
@@ -891,11 +935,57 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             ctx.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE).getBoolean("dashboardPanesSwapped", false),
         ) { VirtualLauncher.setDashboardPanesSwapped(ctx, it) }
         bindDisplayToggle(
+            view.findViewById(R.id.displayAssistiveDot),
+            R.string.assistive_dot,
+            R.string.assistive_dot_note,
+            io.github.shaonialife.cardeck.launcher.AssistiveDot
+                .enabled(ctx),
+        ) {
+            io.github.shaonialife.cardeck.launcher.AssistiveDot
+                .setEnabled(ctx, it)
+        }
+        run {
+            val dot = io.github.shaonialife.cardeck.launcher.AssistiveDot
+            val seek = view.findViewById<SeekBar>(R.id.assistiveDotSizeSeek)
+            val value = view.findViewById<TextView>(R.id.assistiveDotSizeValue)
+            seek.max = dot.SIZE_MAX - dot.SIZE_MIN
+            seek.progress = dot.sizePercent(ctx) - dot.SIZE_MIN
+            value.text = "${dot.sizePercent(ctx)}%"
+            seek.setOnSeekBarChangeListener(
+                object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(
+                        bar: SeekBar,
+                        progress: Int,
+                        fromUser: Boolean,
+                    ) {
+                        val percent = progress + dot.SIZE_MIN
+                        value.text = "$percent%"
+                        if (fromUser) dot.setSizePercent(ctx, percent)
+                    }
+
+                    override fun onStartTrackingTouch(bar: SeekBar) = Unit
+
+                    override fun onStopTrackingTouch(bar: SeekBar) = Unit
+                },
+            )
+        }
+        bindDisplayToggle(
+            view.findViewById(R.id.displayChatMode),
+            R.string.chat_mode,
+            R.string.chat_mode_note,
+            io.github.shaonialife.cardeck.launcher.ChatMode
+                .enabled(ctx),
+        ) {
+            io.github.shaonialife.cardeck.launcher.ChatMode
+                .setEnabled(ctx, it)
+        }
+        bindDisplayToggle(
             view.findViewById(R.id.displayCarNotifications),
             R.string.show_car_notifications,
             R.string.car_notifications_note,
             DisplayPrefs.showCarNotifications(ctx),
         ) { DisplayPrefs.setShowCarNotifications(ctx, it) }
+        bindNotificationApps(view.findViewById(R.id.displayNotificationApps))
         bindDisplayToggle(
             view.findViewById(R.id.displayAssistOverlay),
             R.string.show_assist_overlay,

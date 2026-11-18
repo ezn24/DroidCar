@@ -78,6 +78,15 @@ class CarScreenshotReceiver : android.content.BroadcastReceiver() {
         intent: android.content.Intent,
     ) {
         val pending = goAsync()
+        // 同一把 DUMP 权限锁：adb 导出日志（release 包不可 run-as，排障只能靠这条）
+        if (intent.action == ACTION_EXPORT_LOG) {
+            Bg.run("adb-export-log") {
+                val scope = if (intent.getBooleanExtra("all", false)) LogExporter.Scope.ALL else LogExporter.Scope.CURRENT_SESSION
+                pending.resultData = LogExporter.export(context, "", scope)?.displayPath ?: "failed"
+                pending.finish()
+            }
+            return
+        }
         CarScreenshot.capture(context) { result ->
             io.github.shaonialife.cardeck.SessionController.appendLog(
                 if (result != null) {
@@ -91,3 +100,5 @@ class CarScreenshotReceiver : android.content.BroadcastReceiver() {
         }
     }
 }
+
+private const val ACTION_EXPORT_LOG = "io.github.shaonialife.cardeck.EXPORT_LOG"

@@ -137,6 +137,260 @@ class CarInputServiceImpl(
         }
     }
 
+    // ---- 车机麦克风注入（AudioPolicy 录音注入，docs/MIC-RESEARCH.md 实验 1/2 验证） ----
+
+    @Volatile
+    private var micPolicy: Any? = null
+
+    @Volatile
+    private var micTrack: android.media.AudioTrack? = null
+    private var micPipe: android.os.ParcelFileDescriptor? = null
+
+    /**
+     * 注入用的播放轨道。照 AOSP `AudioPolicy.createAudioTrackSource` 的属性自己建，只多一步
+     * `setContext(shell)`：系统那个方法建轨时 attribution 取的是进程的 opPackageName（=CarDeck
+     * 的包名）而 uid 是 shell 2000，AudioFlinger 判身份不符直接拒绝——实测
+     * 「UnsupportedOperationException: Cannot create AudioTrack」。与 startAudioCapture 的
+     * AudioRecord 必须 setContext 同一个坑。
+     */
+    @androidx.annotation.RequiresApi(34)
+    private fun injectionTrack(
+        mix: Any,
+        format: android.media.AudioFormat,
+    ): android.media.AudioTrack {
+        val registration = mix.javaClass.getMethod("getRegistration").invoke(mix) as String
+        val attrs = android.media.AudioAttributes.Builder()
+        // USAGE_VIRTUAL_SOURCE(15) 是 @SystemApi 常量：反射调用（AOSP 自己建注入轨道就是这个 usage）
+        android.media.AudioAttributes.Builder::class.java
+            .getMethod("setUsage", Int::class.java)
+            .invoke(attrs, 15)
+        val addTag = android.media.AudioAttributes.Builder::class.java.getMethod("addTag", String::class.java)
+        // 只能有 addr= 这一个标签：APM 按 tags **开头**是否为 "addr=" 把轨道路由进 mix 的 submix。
+        // 曾多加 fixedVolume（那是 createAudioRecordSink 用的）→ tags 变成 "fixedVolume;addr=…"，
+        // 轨道没进注入设备，录音拿到的是空的（2026-11-17 dumpsys audio 对照实验定谳）。
+        addTag.invoke(attrs, "addr=$registration")
+        val minimum =
+            android.media.AudioTrack.getMinBufferSize(
+                format.sampleRate,
+                format.channelMask,
+                format.encoding,
+            )
+        return android.media.AudioTrack
+            .Builder()
+            .setAudioAttributes(attrs.build())
+            .setAudioFormat(format)
+            .setBufferSizeInBytes(maxOf(minimum, format.sampleRate / 5 * 2))
+            .setTransferMode(android.media.AudioTrack.MODE_STREAM)
+            .setContext(shellContext())
+            .build()
+            .also { check(it.state == android.media.AudioTrack.STATE_INITIALIZED) { "injection track state=${it.state}" } }
+    }
+
+    private var micLooperThread: android.os.HandlerThread? = null
+
+    private fun micLooper(): android.os.Looper {
+        val existing = micLooperThread
+        if (existing != null && existing.isAlive) return existing.looper
+        return android.os
+            .HandlerThread("shell-mic-policy")
+            .also {
+                it.start()
+                micLooperThread = it
+            }.looper
+    }
+
+    /** AudioPolicy 需要 shell UID 的 attribution（不能沿用主应用包名）。 */
+    private fun shellContext(): Context =
+        object : android.content.ContextWrapper(context) {
+            override fun getPackageName(): String = "com.android.shell"
+
+            override fun getOpPackageName(): String = "com.android.shell"
+
+            override fun getAttributionSource(): android.content.AttributionSource =
+                android.content.AttributionSource
+                    .Builder(android.os.Process.myUid())
+                    .setPackageName("com.android.shell")
+                    .build()
+        }
+
+    @Synchronized
+    override fun startMicInjection(sampleRate: Int): android.os.ParcelFileDescriptor? {
+        stopMicInjection()
+        if (sampleRate !in 8_000..48_000) return null
+        val identity = android.os.Binder.clearCallingIdentity()
+        var policy: Any? = null
+        var track: android.media.AudioTrack? = null
+        val audioManager = context.getSystemService(android.media.AudioManager::class.java)
+        val policyClass = Class.forName("android.media.audiopolicy.AudioPolicy")
+        val mixClass = Class.forName("android.media.audiopolicy.AudioMix")
+        return try {
+            val ruleBuilderClass = Class.forName("android.media.audiopolicy.AudioMixingRule\$Builder")
+            val ruleBuilder = ruleBuilderClass.getConstructor().newInstance()
+            // MIX_ROLE_INJECTOR=1：这条 mix 是「往录音里注入」而不是「截取播放」
+            runCatching { ruleBuilderClass.getMethod("setTargetMixRole", Int::class.java).invoke(ruleBuilder, 1) }
+            val setPreset =
+                android.media.AudioAttributes.Builder::class.java.getMethod("setCapturePreset", Int::class.java)
+            val addRule =
+                ruleBuilderClass.getMethod("addRule", android.media.AudioAttributes::class.java, Int::class.java)
+            // HOTWORD 不在内：热词走 SoundTrigger/DSP，注入不到（实验 2）
+            for (preset in MIC_INJECT_PRESETS) {
+                val attrs = android.media.AudioAttributes.Builder()
+                setPreset.invoke(attrs, preset)
+                addRule.invoke(ruleBuilder, attrs.build(), 2) // RULE_MATCH_ATTRIBUTE_CAPTURE_PRESET
+            }
+            val rule = ruleBuilderClass.getMethod("build").invoke(ruleBuilder)
+            val format =
+                android.media.AudioFormat
+                    .Builder()
+                    .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO)
+                    .build()
+            val mixBuilderClass = Class.forName("android.media.audiopolicy.AudioMix\$Builder")
+            val mixBuilder =
+                mixBuilderClass
+                    .getConstructor(Class.forName("android.media.audiopolicy.AudioMixingRule"))
+                    .newInstance(rule)
+            mixBuilderClass.getMethod("setFormat", android.media.AudioFormat::class.java).invoke(mixBuilder, format)
+            mixBuilderClass.getMethod("setRouteFlags", Int::class.java).invoke(mixBuilder, 2) // ROUTE_FLAG_LOOP_BACK
+            val mix = mixBuilderClass.getMethod("build").invoke(mixBuilder)
+            val policyBuilderClass = Class.forName("android.media.audiopolicy.AudioPolicy\$Builder")
+            val policyBuilder = policyBuilderClass.getConstructor(Context::class.java).newInstance(shellContext())
+            policyBuilderClass.getMethod("addMix", mixClass).invoke(policyBuilder, mix)
+            // UserService 的 binder 线程没有 Looper（独立 app_process 实验里有 prepareMainLooper）：
+            // AudioPolicy 的状态回调要一个 Looper，给它专用线程
+            policyBuilderClass.getMethod("setLooper", android.os.Looper::class.java).invoke(policyBuilder, micLooper())
+            policy = policyBuilderClass.getMethod("build").invoke(policyBuilder)
+            val registered =
+                android.media.AudioManager::class.java
+                    .getMethod("registerAudioPolicy", policyClass)
+                    .invoke(audioManager, policy) as Int
+            check(registered == 0) { "registerAudioPolicy=$registered" }
+            track =
+                if (android.os.Build.VERSION.SDK_INT >= 34) {
+                    injectionTrack(mix, format)
+                } else {
+                    // Android 12/13 没有 AudioTrack.Builder.setContext：只能用系统方法（可能因身份被拒）
+                    policyClass.getMethod("createAudioTrackSource", mixClass).invoke(policy, mix) as android.media.AudioTrack
+                }
+            track.play()
+            val pipe = android.os.ParcelFileDescriptor.createPipe()
+            micPolicy = policy
+            micTrack = track
+            micPipe = pipe[0]
+            val activeTrack: android.media.AudioTrack = track
+            val reader = pipe[0]
+            Thread({
+                try {
+                    android.os.ParcelFileDescriptor.AutoCloseInputStream(reader).use { input ->
+                        val pcm = ByteArray(4096)
+                        while (micTrack === activeTrack) {
+                            val read = input.read(pcm)
+                            if (read <= 0) break
+                            activeTrack.write(pcm, 0, read and 1.inv(), android.media.AudioTrack.WRITE_BLOCKING)
+                        }
+                    }
+                } catch (error: Exception) {
+                    fileLog("mic injection pipe ended: ${error.message}")
+                } finally {
+                    // 应用端关管道 / 应用进程死掉：立刻注销，把真实麦克风还给其它应用
+                    synchronized(this) {
+                        if (micTrack === activeTrack) stopMicInjection()
+                    }
+                }
+            }, "shell-mic-inject").apply {
+                isDaemon = true
+                start()
+            }
+            fileLog("mic injection started: ${sampleRate}Hz mono")
+            pipe[1]
+        } catch (error: Throwable) {
+            var root: Throwable = error
+            while (root.cause != null && root.cause !== root) root = root.cause!!
+            fileLog("mic injection failed: ${root.javaClass.name}: ${root.message}")
+            runCatching { track?.release() }
+            policy?.let { p ->
+                runCatching {
+                    android.media.AudioManager::class.java
+                        .getMethod("unregisterAudioPolicy", policyClass)
+                        .invoke(audioManager, p)
+                }
+            }
+            null
+        } finally {
+            android.os.Binder.restoreCallingIdentity(identity)
+        }
+    }
+
+    @Synchronized
+    override fun stopMicInjection() {
+        val track = micTrack
+        val policy = micPolicy
+        micTrack = null
+        micPolicy = null
+        runCatching { track?.stop() }
+        runCatching { track?.release() }
+        runCatching { micPipe?.close() }
+        micPipe = null
+        if (policy != null) {
+            runCatching {
+                val audioManager = context.getSystemService(android.media.AudioManager::class.java)
+                android.media.AudioManager::class.java
+                    .getMethod("unregisterAudioPolicy", Class.forName("android.media.audiopolicy.AudioPolicy"))
+                    .invoke(audioManager, policy)
+            }
+            fileLog("mic injection stopped")
+        }
+    }
+
+    // ---- 谁在录音：车机麦克风自动切换的触发源 ----
+
+    private val activeRecorders = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    @Volatile
+    private var recorderWatchStarted = false
+
+    override fun removeTasks(taskIds: IntArray): Int {
+        val atm =
+            runCatching {
+                Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
+            }.getOrElse {
+                fileLog("removeTasks: 取 ActivityTaskManager 失败 $it")
+                return 0
+            } ?: return 0
+        val remove = runCatching { atm.javaClass.getMethod("removeTask", Int::class.javaPrimitiveType) }.getOrNull() ?: return 0
+        return taskIds.count { id ->
+            runCatching { remove.invoke(atm, id) as? Boolean == true }
+                .onFailure { fileLog("removeTasks: #$id 失败 ${it.cause ?: it}") }
+                .getOrDefault(false)
+        }
+    }
+
+    override fun activeMicApps(): String {
+        if (!recorderWatchStarted) startRecorderWatch()
+        return activeRecorders.keys.joinToString(",")
+    }
+
+    @Synchronized
+    private fun startRecorderWatch() {
+        if (recorderWatchStarted) return
+        try {
+            val appOps = shellContext().getSystemService(android.app.AppOpsManager::class.java)
+            appOps.startWatchingActive(
+                arrayOf(android.app.AppOpsManager.OPSTR_RECORD_AUDIO),
+                java.util.concurrent.Executors
+                    .newSingleThreadExecutor(),
+            ) { _, uid, packageName, active ->
+                val key = "$uid:$packageName"
+                if (active) activeRecorders[key] = true else activeRecorders.remove(key)
+            }
+            recorderWatchStarted = true
+            fileLog("recorder watch started")
+        } catch (t: Throwable) {
+            fileLog("recorder watch failed: $t")
+        }
+    }
+
     @Synchronized
     override fun stopAudioCapture() {
         val recorder = outputRecorder
@@ -529,6 +783,7 @@ class CarInputServiceImpl(
             val baseFlags =
                 (if (trusted) FLAG_TRUSTED or android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC else 0) or
                     FLAG_SUPPORTS_TOUCH or
+                    FLAG_DESTROY_CONTENT_ON_REMOVAL or
                     android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
             // 受信屏额外要「独立显示组 + 永远已解锁」：
             //  · OWN_DISPLAY_GROUP：手机主屏休眠时虚拟屏不跟着休眠（物理屏断电后仍出帧）；
@@ -898,6 +1153,14 @@ class CarInputServiceImpl(
         private const val FLAG_SUPPORTS_TOUCH = 1 shl 6
 
         /**
+         * VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL（@hide；AOSP 定义 = 1 << 8 = 0x100）。
+         * 不声明时释放虚拟屏，系统把屏上的任务**搬到手机主屏**——每断开一次，手机最近任务里
+         * 就多一张地图/音乐卡（2026-11-18 用户实测）。声明后屏上任务随屏销毁（进程不杀，
+         * 导航/音乐的前台服务照常）。
+         */
+        private const val FLAG_DESTROY_CONTENT_ON_REMOVAL = 1 shl 8
+
+        /**
          * VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP（@hide；AOSP 定义 = 1 << 11 = 0x800）。
          * 虚拟屏进自己的 DisplayGroup：手机主屏休眠/断电时，它不跟着进入 OFF。
          * 需要 ADD_TRUSTED_DISPLAY（受信屏本来就要）——见 DisplayManagerService 的校验。
@@ -918,3 +1181,6 @@ class CarInputServiceImpl(
         /** SurfaceControl 显示电源模式（@hide；AOSP 定义 OFF=0 / NORMAL=2，反射失败时兜底用）。 */
     }
 }
+
+/** 被注入的录音来源：MIC / VOICE_RECOGNITION / VOICE_COMMUNICATION / DEFAULT / UNPROCESSED。 */
+private val MIC_INJECT_PRESETS = intArrayOf(1, 6, 7, 0, 9)

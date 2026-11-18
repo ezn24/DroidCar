@@ -1755,6 +1755,118 @@ class AirPlayClient(
         )
     }
 
+    /** 车机麦克风流（上行）的协商结果。 */
+    data class MicStreamInfo(
+        val streamConnectionId: Long,
+        val inputKey: ByteArray,
+        val format: CarMic.Format,
+        /** 车机给的下行 dataPort（发静音保活用；0 = 车机没给）。 */
+        val carDataPort: Int,
+        val outputKey: ByteArray,
+    )
+
+    /** 当前 /info 里可用的车机麦克风格式（null = 车机没声明语音输入通路）。 */
+    fun carMicFormat(): CarMic.Format? = CarMic.pickFormat(negotiatedInfo)
+
+    /**
+     * SETUP 车机麦克风流：`type=100 audioType=speechRecognition input=true`，并把**手机自己
+     * 监听的 UDP 端口**放进 `dataPort`——车机按这个端口把麦克风包送过来（DiPlay 车机端实现：
+     * `wantsMicrophone` 对 speechRecognition/telephony 一律开麦，目标 = 会话对端地址:dataPort）。
+     * 上下行共用一个 audioFormat；下行（助理回答）仍走现有媒体音频流，这条只收不发。
+     */
+    fun runMicStream(
+        sharedSecret: ByteArray,
+        format: CarMic.Format,
+        localPort: Int,
+    ): MicStreamInfo? {
+        // 限制在 2^53 以内：JS 写的接收端（WinPlay）把 plist 整数读成 Number，超过 2^53 会舍入，
+        // 盐 "DataStream-Salt<id>" 两边对不上 → 麦克风包全部认证失败。iPhone 侧对 ID 没有长度要求。
+        val connectionId = (SecureRandom().nextLong() and ((1L shl 53) - 1)).coerceAtLeast(1L)
+        val body =
+            BinaryPlist.encode(
+                linkedMapOf(
+                    "streams" to
+                        listOf(
+                            linkedMapOf<String, Any?>(
+                                "type" to CarMic.STREAM_TYPE_MAIN_AUDIO,
+                                "streamConnectionID" to connectionId,
+                                "audioFormat" to format.bit,
+                                "audioType" to CarMic.AUDIO_TYPE_SPEECH,
+                                "audioLatencyMs" to format.latencyMs.toLong(),
+                                "input" to true,
+                                "dataPort" to localPort.toLong(),
+                                "supportsRTPPacketRedundancy" to false,
+                                "supportsHighAccuracyTimestamps" to false,
+                            ),
+                        ),
+                ),
+            )
+        val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
+        val startedAt = SystemClock.uptimeMillis()
+        val (statusLine, responseBody) =
+            try {
+                request(
+                    "SETUP",
+                    "rtsp://$host:${endpoint.airPlayPort}/",
+                    body,
+                    timeoutMillis = 8_000,
+                    contentType = "application/x-apple-binary-plist",
+                )
+            } catch (error: IOException) {
+                log("CARMIC: 麦克风流 SETUP 失败 - ${error.message}")
+                return null
+            }
+        log(
+            "CARMIC: 麦克风流 SETUP 往返 ${SystemClock.uptimeMillis() - startedAt}ms [$statusLine] " +
+                "format=0x${format.bit.toString(16)} ${format.sampleRate}Hz 本机端口=$localPort",
+        )
+        if (!statusLine.contains("200")) return null
+        val reply = runCatching { BinaryPlist.parse(responseBody) as? Map<*, *> }.getOrNull()
+        log("CARMIC: SETUP 应答 streams=${reply?.get("streams")}")
+        val stream = (reply?.get("streams") as? List<*>)?.firstOrNull() as? Map<*, *>
+        return MicStreamInfo(
+            streamConnectionId = connectionId,
+            inputKey = CarMic.inputKey(sharedSecret, connectionId),
+            format = format,
+            carDataPort = portOf(stream?.get("dataPort")),
+            outputKey = CarMic.outputKey(sharedSecret, connectionId),
+        )
+    }
+
+    /**
+     * 结束车机麦克风流。带上 streamConnectionID 与 audioType：DiPlay 一类实现 TEARDOWN 只看
+     * type，会连同 type=100 的媒体流一起拆（调用方据此决定是否重建媒体音频）。
+     */
+    fun teardownMicStream(info: MicStreamInfo) {
+        val body =
+            BinaryPlist.encode(
+                linkedMapOf(
+                    "streams" to
+                        listOf(
+                            linkedMapOf<String, Any?>(
+                                "type" to CarMic.STREAM_TYPE_MAIN_AUDIO,
+                                "streamConnectionID" to info.streamConnectionId,
+                                "audioType" to CarMic.AUDIO_TYPE_SPEECH,
+                            ),
+                        ),
+                ),
+            )
+        val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
+        try {
+            val (statusLine, _) =
+                request(
+                    "TEARDOWN",
+                    "rtsp://$host:${endpoint.airPlayPort}/",
+                    body,
+                    timeoutMillis = 4_000,
+                    contentType = "application/x-apple-binary-plist",
+                )
+            log("CARMIC: 麦克风流 TEARDOWN [$statusLine]")
+        } catch (error: IOException) {
+            log("CARMIC: 麦克风流 TEARDOWN 失败 - ${error.message}")
+        }
+    }
+
     /**
      * 查询并纠正接收端音量（AirPlay 的 `GET_PARAMETER`/`SET_PARAMETER` + `volume`）。
      *
