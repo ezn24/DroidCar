@@ -505,11 +505,16 @@ class CarInputServiceImpl(
         return try {
             setDisplayIdMethod?.invoke(event, displayId)
             val m = inj.method
+            // 模式 0 = INJECT_INPUT_EVENT_MODE_ASYNC（scrcpy 同款）。曾用 2（WAIT_FOR_FINISH）：
+            // 每个事件都要等目标 App 处理完才返回——在 Google 地图上按住拖动转圈时地图每帧
+            // 重绘很重，MOVE 一个个排队，触摸读线程被拖住，表现为「拖不动、松手后地图自己
+            // 继续转」（2026-11-20 用户实测）。异步注入仍由 InputDispatcher 按序投递。
             val result: Boolean =
                 when {
-                    m.parameterTypes.size == 2 -> m.invoke(inj.receiver, event, 2) as Boolean
-                    m.parameterTypes[2] == java.lang.Long.TYPE -> m.invoke(inj.receiver, event, 2, 0L) as Boolean
-                    else -> m.invoke(inj.receiver, event, 2, displayId) as Boolean
+                    m.parameterTypes.size == 2 -> m.invoke(inj.receiver, event, INJECT_MODE_ASYNC) as Boolean
+                    m.parameterTypes[2] == java.lang.Long.TYPE ->
+                        m.invoke(inj.receiver, event, INJECT_MODE_ASYNC, 0L) as Boolean
+                    else -> m.invoke(inj.receiver, event, INJECT_MODE_ASYNC, displayId) as Boolean
                 }
             if (!result && !injectFailLogged) {
                 injectFailLogged = true
@@ -1136,6 +1141,9 @@ class CarInputServiceImpl(
 
     companion object {
         private const val TAG = "CarInputSvc"
+
+        /** InputManager.INJECT_INPUT_EVENT_MODE_ASYNC（@hide，AOSP 恒为 0）。 */
+        private const val INJECT_MODE_ASYNC = 0
 
         /** 自清巡检周期：重装 APK 后旧进程最迟约 15s 内自行退出（成本仅一次 PM 查询）。 */
         private const val STALE_CHECK_INTERVAL_MS = 15_000L

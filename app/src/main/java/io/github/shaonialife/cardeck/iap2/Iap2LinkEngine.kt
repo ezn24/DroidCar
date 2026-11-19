@@ -26,6 +26,12 @@ class Iap2LinkEngine(
     private val maxOutgoing: Int = 4,
     private val retransmissionTimeoutMillis: Long = 4_000L,
     private val maxRetransmissions: Int = 4,
+    /**
+     * 本方首个链路序号。默认 99 只为测试/重放可比对；真车蓝牙链路传 [randomInitialSequence]：
+     * 真 iPhone 每次随机，福特 SYNC+ 2.0 对固定 99 的 SYN 完全不应答，换值即通
+     * （上游 shaonialife/cardeck#25 车主实测）。
+     */
+    initialSequence: Int = DEFAULT_INITIAL_SEQUENCE,
 ) {
     enum class State { IDLE, NEGOTIATING, NORMAL, DEAD }
 
@@ -111,7 +117,7 @@ class Iap2LinkEngine(
     var peerSynchronization: SynchronizationPayload? = null
         private set
 
-    private var sentSequence = INITIAL_SEQUENCE
+    private var sentSequence = initialSequence and 0xFF
     private var lastSentAcknowledged: Int? = null
     private var lastReceivedInOrder = 0
 
@@ -197,12 +203,27 @@ class Iap2LinkEngine(
      */
     var adapterResponder: Boolean = false
 
+    /**
+     * 链路已 NORMAL 时，对端连续发 marker = 求重协商：回「marker + 本方新序号 SYN」，再回显
+     * 对端随后的 SYN（SYN|ACK），对端最终 ACK 闭环。凯迪拉克 CT5（GM/Cinemo）实测：收到
+     * 0x4300 后约 260ms 起在蓝牙链路上 1Hz 发 marker，静默则永不停；照此回应 66ms 内闭环、
+     * marker 风暴停止（上游 shaonialife/cardeck#27）。只对蓝牙车机链路开启；隧道与转接盒
+     * 各有自己的 marker 处理。单个 marker 不触发（防误判）。
+     */
+    var renegotiateOnPeerMarker: Boolean = false
+
+    /** 诊断：重协商触发时回调。 */
+    var onPeerRenegotiation: ((String) -> Unit)? = null
+
+    private var lastPeerMarkerMillis: Long? = null
+    private var renegotiateUntilMillis = 0L
+
     /** Adapter-mode phase log lines (marker/SYN/SYN|ACK echo/link ready). */
     var onAdapterEvent: ((String) -> Unit)? = null
 
     private var adapterSynPayload: ByteArray? = null
     private var adapterSynSequence: Int? = null
-    private var adapterEchoSequence = INITIAL_SEQUENCE
+    private var adapterEchoSequence = DEFAULT_INITIAL_SEQUENCE
 
     /** 进入协商：发 marker + 同步包（发送端=发起方，不等待对端 marker）。 */
     fun start(nowMillis: Long) {
@@ -366,6 +387,11 @@ class Iap2LinkEngine(
         while (receive.size >= 2 &&
             !(receive[0] == 0xFF.toByte() && receive[1] == 0x5A.toByte())
         ) {
+            if (receive.size >= MARKER.size && MARKER.indices.all { receive[it] == MARKER[it] }) {
+                receive.discard(MARKER.size)
+                onPeerMarker(nowMillis)
+                continue
+            }
             receive.discard(1)
         }
         if (receive.size < HEADER_BYTES) return false
@@ -429,7 +455,14 @@ class Iap2LinkEngine(
             val isPureSyn = (control and CONTROL_ACKNOWLEDGEMENT) == 0
             if (adapterResponder) {
                 if (sync != null && isPureSyn) handleAdapterSyn(sync, payload!!, sequence, nowMillis)
-            } else if (sync != null && isPureSyn && (state == State.NEGOTIATING || echoFirst)) {
+            } else if (sync != null &&
+                isPureSyn &&
+                (state == State.NEGOTIATING || echoFirst || nowMillis <= renegotiateUntilMillis)
+            ) {
+                if (state == State.NORMAL && nowMillis <= renegotiateUntilMillis) {
+                    renegotiateUntilMillis = 0L
+                    onPeerRenegotiation?.invoke("rx 对端重协商 SYN seq=$sequence → 回显 SYN|ACK")
+                }
                 val firstAdoption = adoptedSynchronization == null
                 peerSynchronization = sync
                 if (firstAdoption) adoptedSynchronization = sync
@@ -500,6 +533,21 @@ class Iap2LinkEngine(
                 reportUnknownSessionData(sessionId, payload!!.size)
             }
         }
+    }
+
+    private fun onPeerMarker(nowMillis: Long) {
+        if (!renegotiateOnPeerMarker || adapterResponder || echoFirst || state != State.NORMAL) return
+        if (nowMillis <= renegotiateUntilMillis) return // 已回应过，等对端 SYN
+        val previous = lastPeerMarkerMillis
+        lastPeerMarkerMillis = nowMillis
+        if (previous == null || nowMillis - previous > PEER_MARKER_PAIR_MILLIS) return
+        lastPeerMarkerMillis = null
+        // 新 SYN 必须用新序号：沿用最后一个数据帧的序号会被当作重复帧丢弃（BMW 同类教训）
+        sentSequence = nextSequence(sentSequence)
+        appendOutput(MARKER)
+        sendSynchronization()
+        renegotiateUntilMillis = nowMillis + RENEGOTIATION_WINDOW_MILLIS
+        onPeerRenegotiation?.invoke("链路已 NORMAL 仍连续收到对端 marker——回 marker + SYN(seq=$sentSequence) 重协商")
     }
 
     private fun completeNegotiationIfPending(nowMillis: Long) {
@@ -826,7 +874,16 @@ class Iap2LinkEngine(
         private const val CONTROL_ACKNOWLEDGEMENT = 0x40
         private const val CONTROL_EXTENDED_ACKNOWLEDGEMENT = 0x20
         private const val CONTROL_RESET = 0x10
-        private const val INITIAL_SEQUENCE = 99
+        const val DEFAULT_INITIAL_SEQUENCE = 99
+
+        /** 链路已 NORMAL 时，两个对端 marker 相隔不超过此值才视为「求重协商」。 */
+        private const val PEER_MARKER_PAIR_MILLIS = 3_000L
+
+        /** 发出重协商 SYN 后，在此窗口内接受对端的新 SYN 并回显。 */
+        private const val RENEGOTIATION_WINDOW_MILLIS = 5_000L
+
+        fun randomInitialSequence(): Int = java.security.SecureRandom().nextInt(0x100)
+
         private const val MARKER_RESEND_MILLIS = 1_000L
         private const val SYNC_RESEND_MILLIS = 500L
         private const val ACK_SLACK = 10

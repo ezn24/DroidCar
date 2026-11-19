@@ -36,6 +36,13 @@ object WifiConnectCommand {
                 else -> "wpa2"
             }
         val credentials = if (open) "" else " " + quote(passphrase)
-        return "cmd wifi connect-network " + quote(ssid) + " " + security + credentials
+        return "cmd wifi connect-network " + quote(ssid) + " " + security + credentials + AUTOJOIN_DISABLED
     }
+
+    /**
+     * `-d`：写入的配置标记「不自动连线」。connect-network 会覆盖同名已保存网络的配置——不带它时，
+     * 用户在系统设置里关掉的「自动连线」每次连接都被改回开（2026-11-20 WinPlay 实测，车机主动断开
+     * 或 CarDeck 断开都一样）。车机热点无互联网，系统自动连它只会抢走手机的正常网络。
+     */
+    const val AUTOJOIN_DISABLED = " -d"
 }

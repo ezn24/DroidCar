@@ -198,7 +198,7 @@ class Iap2BluetoothServer(
             StreamDuplexStream(socket.inputStream, socket.outputStream) {
                 runCatching { socket.close() }
             }
-        val channel = Iap2LinkChannel(stream, name = "iap2-bt") { line -> log(line) }
+        val channel = Iap2LinkChannel(stream, name = "iap2-bt", carLink = true) { line -> log(line) }
         activeChannel = channel
         BtSessionGate.inboundActive = true
         val credentialsHook: (Iap2SenderSession.WifiConfiguration) -> Unit =

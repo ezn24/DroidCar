@@ -161,4 +161,26 @@ object EndpointHosts {
         if (groups.any { it.length > 4 || it.any { c -> c.digitToIntOrNull(16) == null } }) return null
         return groups.map { it.lowercase().padStart(4, '0') }
     }
+
+    /**
+     * mDNS 发现的 `_airplay._tcp` 是否与蓝牙给的端点明显不是同一台：端口或公钥都已知且不同。
+     * WinPlay 测试台 2026-11-20 实测：0x4301 = 192.168.1.117:17000，同网段另一服务广播
+     * 192.168.1.177:7000，旧逻辑把 .177 合并进地址列表并沿用 17000 端口——必然连不上，
+     * 还把配对重试轮次耗在错误地址上。端口/公钥未知时照旧合并（不能把缺席当否证）。
+     * 返回不一致的原因；null = 可以合并。
+     */
+    fun mdnsMismatch(
+        endpointPort: Int,
+        endpointPublicKey: String?,
+        mdnsPort: Int,
+        mdnsPublicKey: String?,
+    ): String? =
+        when {
+            endpointPort > 0 && mdnsPort > 0 && mdnsPort != endpointPort ->
+                "端口 $mdnsPort ≠ 车机给的 $endpointPort"
+            endpointPublicKey != null &&
+                mdnsPublicKey != null &&
+                !endpointPublicKey.equals(mdnsPublicKey, ignoreCase = true) -> "公钥不同"
+            else -> null
+        }
 }

@@ -5,6 +5,17 @@
 - 与车机相反的几处：盒子是 RFCOMM 客户端、先发 SYN（我们原样回显参数）；WiFi 隧道等盒子先发（`AdapterIapLink`）；RECORD 后发 `disableBluetooth`；mDNS SRV 为 `(none).local.` 时改用 DHCP 服务器/邀请方/网关；H.264 Baseline；requestUI/forceKeyFrame 时重发 VideoConfig+IDR（`RePrimeGate`）；已认得手机的盒子只发 WiFi 邀请，由邀请直接开会话。
 - 连接中 ACL 断开有 60s 宽限（`CarPlayService.AUTO_STOP_GRACE_MILLIS`），推流中照旧忽略。
 
+## 2026-11-20 上游 issue 兼容修正（待真车验证）
+
+- **蓝牙车机链路初始序号随机**（`Iap2LinkChannel(carLink = true)` → `Iap2LinkEngine.randomInitialSequence()`）：福特 SYNC+ 2.0 对固定 99 的 SYN 零应答、换值即通（上游 #25）。单测/重放默认仍 99；转接盒与 WiFi 隧道不随机。
+- **NORMAL 后连续 marker = 车机求重协商**（`renegotiateOnPeerMarker`，同样只在蓝牙车机链路开）：3s 内两个 marker → 回 marker + 新序号 SYN，5s 窗内回显车机新 SYN。凯迪拉克 CT5 实测闭环（上游 #27），但该车 SETUP 仍 500，这是必要不充分条件。
+- **画质（上游 #26，大众 MIB3 比原生糊）**：码率改 `encoderBitrate()`（像素×8、4~12Mbps、60fps×1.5、总上限 12；HEVC 取 65%）+ 编码器支持时 **CBR**（高通 VBR 10s 平均实测超目标 75~80%，用户取舍稳定优先）；设置→显示「清晰优先」（`DisplayPrefs.clarityFirst`，默认关）请求 High profile，编码器按 High+L4 → L4 → 自动逐级降级；转接盒恒 Baseline。日志 `VIDEO: 画质 …` 一行摘要，keepAlive 行带实际码率；实际 profile 看 VideoConfig 行（66/77/100）。部分编码器会静默忽略 KEY_PROFILE（同 KEY_LEVEL），以 SPS 为准。
+- **静止降频（对照真 iPhone）**：WinPlay `diagnostics.json`（`%APPDATA%/winplay/data/`，每 10s 一条「视频运行统计」累计字节/帧）显示 iPhone 静止时 0~0.4fps、≈0Mbps、无短周期 I 帧，变动时峰值 ~13Mbps。合成器改 `composeIntervalMs`：静止 1s 内仍 33ms，之后每秒 1 帧；周期 I 帧 3s → 30s。**取代上文「静止心跳 33ms」约定**；保底 1fps 是 2026-10-09「无帧→冻结」的兜底，真车未验证。
+- **静止码率 / 卡顿 / 延迟（WinPlay 对照真 iPhone）**：① QP 下限 I20/P22（`KEY_VIDEO_QP_*_MIN`）——没有它高通编码器会把预算用满，地图定位点动画每帧 16~30KB，加上后 1~3KB；② 码率总上限 12Mbps（16.6 时移动地图峰值 19~20Mbps、WinPlay 反复背压）；③ 视频口 `sendBufferSize=256KB` + 编码器低延迟提示（`KEY_PRIORITY/LATENCY/OPERATING_RATE`）；④ **触摸注入必须 ASYNC（mode 0）**：旧 mode 2 = WAIT_FOR_FINISH，每个 MOVE 都等 App 处理完，Google 地图按住转圈时事件排队，「拖不动、松手后地图自己继续转」。
+- **HEVC（实验，设置→显示「HEVC 编码」默认关）**：协议事实来自 CarPlayStation（Windows 接收端，GPL-3.0 只读对照）——接收端 `/info` 放**空字典 `hevcInfo`**，且会话 SETUP 应答 `enabledFeatures` 含 `"hevc"`（我们的提议清单本就带 hevc），两者都有才算支持（`SetupInfo.hevc`）。VideoConfig 体为 `[u32 BE 盒长]["hvcC"][HEVCDecoderConfigurationRecord]`、头偏移 6 加 0x08；帧仍 4 字节长度前缀，**不得**套 H.264 的 SPS level 补丁（`annexBToLengthPrefixed(patchH264Level=false)`）。组装见 `video/HevcConfig`。WinPlay 无 hevcInfo。CarPlayStation 本机 MFi 签名可用自签 P-256（我们跳过 0xAA03 校验）。真车形态未验证。
+- **`cmd wifi connect-network` 一律带 `-d`**（`WifiConnectCommand.AUTOJOIN_DISABLED`）：该命令会覆盖同名已保存网络的配置，不带 `-d` 时用户在系统里关掉的「自动连线」每次连接都被改回开（WinPlay 实测）。车机热点无互联网，不该被系统自动连。
+- 上游 #25 另两条（0x4E0E 改「u8 类型 + MAC」、稀疏清单判 NEW）**不采纳**：前者与转接盒/真 iPhone 的「MAC + UDID」格式冲突，后者与奥迪 3315 稀疏清单仍需 0x5702 的定谳冲突。
+
 ## 2026-11-18 断线收尾三坑
 
 - **推流中忽略车机蓝牙 ACL 断开**：接收端交接到 WiFi 后放掉蓝牙是正常行为（WinPlay RECORD 后 ~3s 断 ACL），「上车自动连接」的 ACL_DISCONNECTED 曾把健康会话当下车拆掉（「刚连上就断」）。真下车靠 WiFi onLost / onEnded 收尾。

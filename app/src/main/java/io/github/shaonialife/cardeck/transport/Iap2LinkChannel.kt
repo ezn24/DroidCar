@@ -20,9 +20,25 @@ class Iap2LinkChannel(
      * echoes its SYN (see [Iap2LinkEngine.adapterResponder]). Decided once at construction.
      */
     val adapterMode: Boolean = AdapterMode.active,
+    /**
+     * 真车蓝牙链路：随机初始序号 + 响应对端 marker 重协商（见 [Iap2LinkEngine]）。
+     * 默认 false 让单测/重放保持固定序号 99；转接盒沿用实测过的 99，不随机。
+     */
+    carLink: Boolean = false,
     private val log: (String) -> Unit = {},
 ) : Closeable {
-    private val engine = Iap2LinkEngine().apply { adapterResponder = adapterMode }
+    private val engine =
+        Iap2LinkEngine(
+            initialSequence =
+                if (carLink && !adapterMode) {
+                    Iap2LinkEngine.randomInitialSequence()
+                } else {
+                    Iap2LinkEngine.DEFAULT_INITIAL_SEQUENCE
+                },
+        ).apply {
+            adapterResponder = adapterMode
+            renegotiateOnPeerMarker = carLink && !adapterMode
+        }
     private val lock = Object()
     private val controls = LinkedBlockingQueue<ByteArray?>()
     private val readyLatch = CountDownLatch(1)
@@ -52,6 +68,7 @@ class Iap2LinkChannel(
             log("LINK: 丢弃未知会话 $sessionId 的数据帧（$size 字节）")
         }
         engine.onAdapterEvent = { line -> log("ADAPTER: link $line") }
+        engine.onPeerRenegotiation = { line -> log("LINK: $line") }
         engine.onFrameReceived = { control, sequence, ack, sessionId, size ->
             // 真车调试关键观测：车机在识别阶段是否回帧、回什么（静默分歧全靠它定位）
             if (rxFrameLogs < FRAME_LOG_LIMIT) {
