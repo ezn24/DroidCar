@@ -17,7 +17,7 @@ plugins {
  * 本地出包也必须传同一个值，同一个提交两边版本号才一致
  * 的**正式签名**包（见下方 [buildNumber]），不需要往仓库写提交。
  */
-val appVersionName = "0.1.42"
+val appVersionName = "0.1.43"
 val appVersionCode =
     appVersionName
         .split(".")
