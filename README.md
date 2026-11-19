@@ -1,89 +1,89 @@
 <p align="center">
-  <img src="docs/images/icon.svg" width="120" alt="CarDeck Neo 圖示">
+  <img src="docs/images/icon.svg" width="120" alt="CarDeck Neo icon">
 </p>
 
 <h1 align="center">CarDeck Neo</h1>
 
 <p align="center">
-  讓 Android 手機以無線 CarPlay 連上車機，顯示地圖、音樂與 App 的車機桌面<br>
-  <b>繁體中文</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.en.md">English</a>
+  Connect an Android phone to your car over wireless CarPlay and get a car launcher with maps, music and apps<br>
+  <b>English</b> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 ---
 
-CarDeck Neo 是 [CarDeck](https://github.com/shaonialife/cardeck) 的介面改版。手機（不需 root）扮演 CarPlay 發送端，把自繪的車機桌面與手機上的 App 投到支援無線 CarPlay 的車機上，車機觸控再回傳到手機操作。
+CarDeck Neo is a UI fork of [CarDeck](https://github.com/shaonialife/cardeck). The phone (no root needed) acts as a CarPlay sender: it streams its own car launcher and the apps on your phone to a head unit that supports wireless CarPlay, and touches on the head unit are sent back to the phone.
 
-> **非官方專案**：與 Apple Inc. 及任何汽車製造商無關，未獲授權或認證，**不是 MFi 產品**。CarPlay / AirPlay 是 Apple Inc. 的商標，僅用於說明相容目標。
+> **Unofficial project**: not affiliated with Apple Inc. or any car manufacturer, not authorized or certified, and **not an MFi product**. CarPlay and AirPlay are trademarks of Apple Inc., mentioned only to describe compatibility.
 >
-> **駕駛安全**：只在停車時連線與設定；行駛中可能斷線，請以原廠導航作為安全備援。完整條款見 [DISCLAIMER.md](DISCLAIMER.md)。
+> **Driving safety**: connect and change settings only while parked. The connection can drop while driving, so keep the factory navigation as a safety backup. Full terms in [DISCLAIMER.md](DISCLAIMER.md).
 
-## 畫面預覽
+## Screenshots
 
-### 車機
+### Head unit
 
 <p align="center">
-  <img src="docs/screenshots/car-1920x720.png" alt="車機儀表板 1920×720">
-  <br><sub>儀表板：左邊地圖可直接操作，右邊音樂控制（1920×720）</sub>
+  <img src="docs/screenshots/car-1920x720.png" alt="Dashboard at 1920×720">
+  <br><sub>Dashboard: the map on the left is directly usable, music controls on the right (1920×720)</sub>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/car-gemini-1920x720.png" alt="車機上的 Gemini">
-  <br><sub>說「Hey Google」，Gemini 直接顯示在車機上，可觸控操作（實驗性）</sub>
+  <img src="docs/screenshots/car-gemini-1920x720.png" alt="Gemini on the head unit">
+  <br><sub>Say "Hey Google" and Gemini appears right on the head unit, touch included (experimental)</sub>
 </p>
 
-### 不同解析度與比例
+### Different resolutions and aspect ratios
 
-版面會依車機解析度自動調整：寬螢幕左右分屏，窄螢幕把 Dock 移到底部，讓地圖有更多空間。
+The layout adapts to the head unit's resolution: wide screens split side by side, narrow screens move the Dock to the bottom to give the map more room.
 
-| 1280×720（16:9） | 960×540（16:9） |
+| 1280×720 (16:9) | 960×540 (16:9) |
 | :---: | :---: |
 | <img src="docs/screenshots/car-1280x720.png" alt="1280×720"> | <img src="docs/screenshots/car-960x540.png" alt="960×540"> |
-| **800×480（5:3）** | **1280×488（8:3）** |
+| **800×480 (5:3)** | **1280×488 (8:3)** |
 | <img src="docs/screenshots/car-800x480.png" alt="800×480"> | <img src="docs/screenshots/car-1280x488.png" alt="1280×488"> |
 
-### 手機
+### Phone
 
 <p align="center">
-  <img src="docs/screenshots/phone-home.png" width="300" alt="手機主頁">
-  <br><sub>手機主頁（Material Design 3，深淺色跟隨手機、主色跟隨系統桌布）</sub>
+  <img src="docs/screenshots/phone-home.png" width="300" alt="Phone home screen">
+  <br><sub>Phone home screen (Material Design 3; follows the phone's dark/light mode and the system accent color)</sub>
 </p>
 
-## 功能
+## Features
 
-- **儀表板**：連線後直接進入地圖與音樂分屏。地圖卡可以直接拖動、縮放；從儀表板往左拖可翻到應用頁，頁面跟著手指移動。翻頁時不會誤觸音樂卡。
-- **依解析度自動排版**：寬螢幕（如 1920×720）左右分屏；窄螢幕（如 800×480、16:9）預設 Dock 在底部，也可以在設定改回左右分屏。
-- **地圖**：記住最後使用的地圖 App，下次連線沿用；也可以在 **車機設定 → 預設地圖** 手動選擇任何已安裝的 App。
-- **音樂**：點音樂卡開啟音樂 App；方向盤媒體鍵可切歌。
-- **聲音走車機**：Shizuku 就緒時直接擷取系統播放的聲音，不需要螢幕錄製授權彈窗；只擷取播放的聲音，不使用麥克風。
-- **Gemini 上車（實驗性）**：說「Hey Google」時，Gemini 的浮層與動畫直接顯示在車機上，可觸控操作。
-- **Dock**：顯示時間、訊號、Wi-Fi 與電量（充電時顯示綠色），背景應用可從主畫面的「背景應用」切換或關閉。
-- **車機桌布**：內建多款桌布，深色與淺色模式可分別設定，跟隨手機自動切換；也能從相簿選圖。
-- **手機介面**：Material Design 3，底部分為「連線 / 車機 / 診斷」三頁；深淺色跟隨手機，主色跟隨系統。
-- **多語言**：繁體中文、簡體中文、英文，可在 **車機設定 → 顯示 → 語言** 切換。
-- **車機畫面截圖**：在「診斷」頁一鍵把目前車機畫面存成 PNG（存到「下載/CarDeck」）。
-- **車機麥克風**：任何 App 開始錄音（語音搜尋、語音訊息、Gemini 等）時，自動改用車機麥克風收音，結束後還原手機麥克風（已在 WinPlay 驗證，真車待測）。
-- **輔助小白點**：車機畫面最上層的小圓點，可拖動，點開有返回 / 主頁 / 後台三鍵；在儀表板時「返回」會發給最後操作的地圖或音樂 App。大小可在 **車機設定 → 顯示** 調整，深淺色跟隨手機。
-- **車機通知**：CarPlay 風格橫幅，顯示 App 圖示，從上方滑入，可點 × 或往上滑關閉；可另外指定只顯示哪些 App 的通知。
-- **平板版面**：WhatsApp、Telegram、LINE、Instagram、ChatGPT、YouTube 等在車機上改用平板雙欄版面；Discord 以手機密度渲染，修正文字被截斷。
-- **連線自動化**：連線成功 / 斷開時發出自訂 Intent（類似 MacroDroid「傳送 Intent」：廣播 / Activity / 服務、Action、套件、Extras 等），可搭配 Tasker 使用。
-- **連線頁開關**：「車機聲音」決定是否推送聲音，不再每次連線前詢問；「車機斷開後等待回連」預設關閉，車機斷開即收起藍牙與熱點。斷線後會自動清除 App 存入系統的車機熱點，手機最近任務也不會留下車機上的 App。
+- **Dashboard**: after connecting you land on a map + music split view. The map card can be dragged and zoomed directly; drag left from the dashboard to reach the app pages, and the page follows your finger. Swiping no longer opens the music app by accident.
+- **Layout adapts to resolution**: wide screens (e.g. 1920×720) split side by side; narrow screens (e.g. 800×480, 16:9) default to a bottom Dock, which you can switch back to side by side in settings.
+- **Maps**: remembers the last map app you used and keeps it for the next connection; you can also pick any installed app under **Car settings → Default map**.
+- **Music**: tap the music card to open your music app; steering-wheel media keys skip tracks.
+- **Audio through the car**: with Shizuku ready, system playback audio is captured directly, with no screen-recording consent dialog. Only playback audio is captured; the microphone is never used.
+- **Gemini in the car (experimental)**: when you say "Hey Google", the Gemini overlay and animation show up on the head unit and respond to touch.
+- **Dock**: shows time, signal, Wi-Fi and battery (green while charging); running apps can be switched or closed from "Recent apps" on the home grid.
+- **Car wallpapers**: built-in wallpapers, set separately for dark and light mode and switched automatically with the phone; you can also pick your own photo.
+- **Phone UI**: Material Design 3 with three tabs at the bottom — Connect / Car / Diagnostics; follows the phone's dark/light mode and system accent color.
+- **Languages**: Traditional Chinese, Simplified Chinese and English, switchable under **Car settings → Display → Language**.
+- **Car screen capture**: one tap on the Diagnostics tab saves the current head-unit screen as a PNG (in Download/CarDeck).
+- **Car microphone**: when any app starts recording (voice search, voice messages, Gemini…), audio comes from the car's microphone instead, and the phone mic is restored afterwards (verified with WinPlay; not yet tested in a real car).
+- **Assistive dot**: a small draggable dot on top of the car screen with Back / Home / Recents. On the dashboard, Back goes to the map or music app you touched last. Size is adjustable in **Car settings → Display**; follows the phone's dark/light mode.
+- **Car notifications**: CarPlay-style banners with the app icon that slide in from the top; dismiss with × or by swiping up. You can limit notifications to selected apps.
+- **Tablet layouts**: WhatsApp, Telegram, LINE, Instagram, ChatGPT, YouTube and others use their tablet layout on the car screen; Discord renders at the phone's density so text is no longer clipped.
+- **Connection automation**: send your own Intents when the car connects or disconnects (MacroDroid-style: broadcast / activity / service, action, package, extras…), e.g. for Tasker.
+- **Connect-tab switches**: "Car audio" decides whether audio is sent, with no prompt before each connection; "Wait for the car to reconnect" is off by default, so a disconnect from the car releases Bluetooth and the hotspot. The car hotspot the app saved is forgotten on disconnect, and car apps no longer pile up in the phone's recents.
 
-## 需求
+## Requirements
 
-- Android 12 以上的手機（「應用橫屏」功能需要 Android 14 以上）
-- 已安裝並啟動 [Shizuku](https://shizuku.rikka.app/)（以無線偵錯啟用，不需 root）。虛擬螢幕、觸控注入與聲音擷取都經由它完成，未就緒時無法連線
-- 支援無線 CarPlay 的車機，且手機已與車機完成藍牙配對
+- An Android 12+ phone ("Force landscape" needs Android 14+)
+- [Shizuku](https://shizuku.rikka.app/) installed and running (started via wireless debugging, no root). Virtual displays, touch injection and audio capture all go through it; the app can't connect without it
+- A head unit with wireless CarPlay, already paired with the phone over Bluetooth
 
-## 使用方式
+## How to use
 
-1. 安裝 CarDeck Neo，首次開啟時閱讀並接受免責聲明。
-2. 啟動 Shizuku，並在 CarDeck Neo 主頁授權。
-3. 在車機上打開無線 CarPlay（配對模式），回到手機點 **啟動連線**。
-4. 連線後車機會顯示儀表板。車機相關設定可在手機「車機」頁或車機上的設定 App 調整。
+1. Install CarDeck Neo, then read and accept the disclaimer on first launch.
+2. Start Shizuku and grant access from the CarDeck Neo home screen.
+3. Turn on wireless CarPlay (pairing mode) on the head unit, then tap **Start connection** on the phone.
+4. Once connected the head unit shows the dashboard. Car-side settings are on the phone's Car tab or in the settings app on the head unit.
 
-## 從原始碼建置
+## Building from source
 
-需要 JDK 17 與 Android SDK。在專案根目錄執行：
+Requires JDK 17 and the Android SDK. From the project root:
 
 ```powershell
 .\gradlew.bat :app:assembleStandardDebug
@@ -93,7 +93,7 @@ CarDeck Neo 是 [CarDeck](https://github.com/shaonialife/cardeck) 的介面改�
 .\gradlew.bat :app:testStandardDebugUnitTest :app:lintStandardDebug
 ```
 
-偵錯版 APK 位於 `app/build/outputs/apk/standard/debug/`。安裝前請先停止正在執行的 App（連線中直接安裝，系統確認視窗可能會跑到車機畫面上）：
+The debug APK is in `app/build/outputs/apk/standard/debug/`. Stop the running app before installing (if you install mid-session, the system confirmation dialog can end up on the car screen):
 
 ```bash
 adb shell am force-stop io.github.ezn24.cardeck.neo
@@ -103,13 +103,34 @@ adb shell am force-stop io.github.ezn24.cardeck.neo
 adb install -r app/build/outputs/apk/standard/debug/app-standard-debug.apk
 ```
 
-詳細操作與驗證方式見 [儀表板使用說明](docs/DASHBOARD-UX.md)；給開發者與 AI 助手的專案約定見 [AGENTS.md](AGENTS.md)。
+See the [dashboard guide](docs/DASHBOARD-UX.md) for detailed usage and testing; project conventions for developers and AI assistants are in [AGENTS.md](AGENTS.md). Most project docs are written in Chinese.
 
-## 致謝與上游
+## Credits and upstream
 
-- 本專案基於 [shaonialife/cardeck](https://github.com/shaonialife/cardeck)。上游的協定研究、開發紀錄與測試台搭建說明保存在 [docs/UPSTREAM-README.md](docs/UPSTREAM-README.md)，協定細節見 [docs/PROTOCOL-NOTES.md](docs/PROTOCOL-NOTES.md)。
-- 上游 CarDeck 原版下載見 [上游 Releases](https://github.com/shaonialife/cardeck/releases/latest)。
+- Based on [shaonialife/cardeck](https://github.com/shaonialife/cardeck). The upstream protocol research, development log and test-bench setup are archived in [docs/UPSTREAM-README.md](docs/UPSTREAM-README.md); protocol details are in [docs/PROTOCOL-NOTES.md](docs/PROTOCOL-NOTES.md).
+- The original CarDeck builds are on the [upstream Releases page](https://github.com/shaonialife/cardeck/releases/latest).
+- Wireless CarPlay adapter (smartBox / Carlinkit) support is ported from [zz85/cardeck](https://github.com/zz85/cardeck) (MIT).
 
-## 授權
+### Protocol references
 
-[MIT License](LICENSE)。使用前請閱讀 [DISCLAIMER.md](DISCLAIMER.md)。
+CarDeck is an independent implementation. The projects below were studied for protocol facts and timing only; no code from the GPL-licensed or unlicensed ones is copied.
+
+| Project | Role | Used for |
+| --- | --- | --- |
+| [shilapi/xcertplay](https://github.com/shilapi/xcertplay) (GPL-3.0) | CarPlay receiver on Android | iAP2 link layer, Bonjour, AirPlay pairing |
+| [shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay) (GPL-3.0) | Receiver, derived from xcertplay | The test bench CarDeck is developed against |
+| [catplay-labs/catplay](https://github.com/catplay-labs/catplay) | Rust CarPlay implementation | Sender-side session order, screen/audio stream formats |
+| [HaToan/carplay-wifi-extractor](https://github.com/HaToan/carplay-wifi-extractor) | Wireless CarPlay tooling | Wireless control timing |
+| [Nitsuya/AADisplay](https://github.com/Nitsuya/AADisplay) (GPL-3.0) | Virtual-display launcher | Audi MIB3 Wi-Fi iAP2 tunnel timing |
+| [amineross/showcase](https://github.com/amineross/showcase) (GPL-3.0), [wiomoc/iap2](https://github.com/wiomoc/iap2) | Receiver implementations | Cross-checking iAP2 message lists |
+| [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) (Apache-2.0) | Screen mirroring | Turning off the phone panel while displays stay on |
+
+### Libraries
+
+- [Shizuku](https://github.com/RikkaApps/Shizuku) — shell-level access for virtual displays and input injection
+- [Bouncy Castle](https://www.bouncycastle.org/) — SRP pairing and stream encryption
+- [AndroidX](https://developer.android.com/jetpack/androidx)
+
+## License
+
+[MIT License](LICENSE). Please read [DISCLAIMER.md](DISCLAIMER.md) before use.

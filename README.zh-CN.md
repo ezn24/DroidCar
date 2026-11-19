@@ -6,7 +6,7 @@
 
 <p align="center">
   让 Android 手机以无线 CarPlay 连上车机，显示地图、音乐与 App 的车机桌面<br>
-  <a href="README.md">繁體中文</a> · <b>简体中文</b> · <a href="README.en.md">English</a>
+  <a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · <b>简体中文</b>
 </p>
 
 ---
@@ -108,7 +108,28 @@ adb install -r app/build/outputs/apk/standard/debug/app-standard-debug.apk
 ## 致谢与上游
 
 - 本项目基于 [shaonialife/cardeck](https://github.com/shaonialife/cardeck)。上游的协议研究、开发记录与测试台搭建说明保存在 [docs/UPSTREAM-README.md](docs/UPSTREAM-README.md)，协议细节见 [docs/PROTOCOL-NOTES.md](docs/PROTOCOL-NOTES.md)。
-- 上游 CarDeck 原版下载见 [上游 Releases](https://github.com/shaonialife/cardeck/releases/latest)。
+- 原版 CarDeck 可在[上游 Releases 页面](https://github.com/shaonialife/cardeck/releases/latest)下载。
+- 无线 CarPlay 转接盒（smartBox / Carlinkit）支持移植自 [zz85/cardeck](https://github.com/zz85/cardeck)（MIT）。
+
+### 协议参考
+
+CarDeck 为独立实现。以下项目仅用于对照协议事实与时序；GPL 授权或未声明授权的项目，均未复制其代码。
+
+| 项目 | 角色 | 参考内容 |
+| --- | --- | --- |
+| [shilapi/xcertplay](https://github.com/shilapi/xcertplay)（GPL-3.0） | Android 上的 CarPlay 接收端 | iAP2 链路层、Bonjour、AirPlay 配对 |
+| [shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay)（GPL-3.0） | 接收端，xcertplay 衍生版 | 开发用的测试台 |
+| [catplay-labs/catplay](https://github.com/catplay-labs/catplay) | Rust 实现的 CarPlay | 发送端会话顺序、画面与音频流格式 |
+| [HaToan/carplay-wifi-extractor](https://github.com/HaToan/carplay-wifi-extractor) | 无线 CarPlay 工具 | 无线控制时序 |
+| [Nitsuya/AADisplay](https://github.com/Nitsuya/AADisplay)（GPL-3.0） | 虚拟屏启动器 | 奥迪 MIB3 的 WiFi iAP2 隧道时序 |
+| [amineross/showcase](https://github.com/amineross/showcase)（GPL-3.0）、[wiomoc/iap2](https://github.com/wiomoc/iap2) | 接收端实现 | 交叉核对 iAP2 消息清单 |
+| [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy)（Apache-2.0） | 屏幕镜像 | 虚拟屏保持运行时关闭手机面板 |
+
+### 依赖库
+
+- [Shizuku](https://github.com/RikkaApps/Shizuku)：提供 shell 权限，用于虚拟屏与触控注入
+- [Bouncy Castle](https://www.bouncycastle.org/)：SRP 配对与流加密
+- [AndroidX](https://developer.android.com/jetpack/androidx)
 
 ## 许可证
 
