@@ -109,6 +109,48 @@ object DisplayPrefs {
             .apply()
     }
 
+    /**
+     * 清晰优先（默认关）：编码改用 H.264 High profile（8×8 变换，同码率下文字边缘更锐）。
+     * 部分车机解码器可能不认 High（奥迪 DELPHI 对 level 不符就黑屏），故默认关、下次连接生效；
+     * 转接盒模式恒为 Baseline，不受此开关影响。
+     */
+    fun clarityFirst(context: Context): Boolean =
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getBoolean("clarityFirst", false)
+
+    fun setClarityFirst(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("clarityFirst", enabled)
+            .apply()
+    }
+
+    /**
+     * HEVC（H.265，实验，默认关）：接收端在 /info 声明 hevcInfo 且 SETUP 接受 "hevc" 时改用 H.265，
+     * 同画质码率约省三到五成。只在 CarPlayStation 测试台验证过，真车（下一代 CarPlay）形态未验证；
+     * 不支持的接收端不受影响。下次连接生效。
+     */
+    fun hevc(context: Context): Boolean =
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getBoolean("hevc", false)
+
+    fun setHevc(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("hevc", enabled)
+            .apply()
+    }
+
     /** 语音助理上车（实验）：默认关——要额外镜像手机主屏，且只在真机验证过的 ROM 上可靠。 */
     fun showAssistOverlay(context: Context): Boolean =
         context

@@ -25,6 +25,62 @@ class Iap2LinkEngineTest {
         assertTrue(phone.peerSynchronization?.sessions?.any { it.id == Iap2LinkEngine.SESSION_CONTROL } == true)
     }
 
+    /** 初始序号可注入：首个 SYN 用它（真车传随机值，福特 SYNC+ 不认固定 99）。 */
+    @Test
+    fun initialSequenceIsUsedForFirstSyn() {
+        val phone = Iap2LinkEngine(initialSequence = 200)
+        phone.start(0)
+        assertEquals(200, parseFrames(phone.takeOutput()).first().sequence)
+        repeat(50) { assertTrue(Iap2LinkEngine.randomInitialSequence() in 0..255) }
+    }
+
+    /**
+     * 凯迪拉克 CT5 形态（上游 #27）：链路 NORMAL 后车机连续发 marker 求重协商。
+     * 手机回「marker + 新序号 SYN」，再回显车机的新 SYN（SYN|ACK），链路保持 NORMAL。
+     */
+    @Test
+    fun repeatedPeerMarkersInNormalTriggerRenegotiation() {
+        val phone = Iap2LinkEngine().apply { renegotiateOnPeerMarker = true }
+        val accessory = Iap2LinkEngine()
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+        val before = parseFrames(phone.takeOutput()).lastOrNull()?.sequence
+
+        val t = tick()
+        phone.feed(Iap2LinkEngine.MARKER, t)
+        assertTrue("单个 marker 不得触发重协商", phone.takeOutput().isEmpty())
+        phone.feed(Iap2LinkEngine.MARKER, t + 1_000)
+        val out = phone.takeOutput()
+        assertArrayEquals("回应必须以 marker 开头", Iap2LinkEngine.MARKER, out.copyOfRange(0, 6))
+        val syn = parseFrames(out).single()
+        assertTrue("必须是纯 SYN", syn.control and 0x80 != 0 && syn.control and 0x40 == 0)
+        if (before != null) assertTrue("重协商 SYN 必须用新序号", syn.sequence != before)
+
+        // 车机回自己的新 SYN → 手机回显 SYN|ACK，仍为 NORMAL
+        val carRestart = Iap2LinkEngine(initialSequence = 52)
+        carRestart.start(0)
+        phone.feed(carRestart.takeOutput(), t + 1_100)
+        val echo = parseFrames(phone.takeOutput())
+        assertTrue("必须回显 SYN|ACK", echo.any { it.control and 0xC0 == 0xC0 && it.ack == 52 })
+        assertEquals(Iap2LinkEngine.State.NORMAL, phone.state)
+    }
+
+    /** 未开启（隧道/测试台默认）时，NORMAL 下的 marker 一律丢弃，行为与旧版一致。 */
+    @Test
+    fun peerMarkersIgnoredWhenRenegotiationDisabled() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine()
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+        phone.takeOutput()
+        val t = tick()
+        phone.feed(Iap2LinkEngine.MARKER, t)
+        phone.feed(Iap2LinkEngine.MARKER, t + 500)
+        assertTrue(phone.takeOutput().isEmpty())
+    }
+
     /**
      * 事件通道形态：车机只反复发 marker、一条同步包都不发（Honda HFT 2026-10-20 实测
      * 60 秒 60 个 marker），说明它卡在探测态、在等**我们**的会话表。

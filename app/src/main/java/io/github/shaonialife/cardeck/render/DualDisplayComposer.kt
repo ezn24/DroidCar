@@ -60,6 +60,30 @@ val DASH_GAP_PX: Float get() = 24f * DashMetrics.scale
  */
 val DASH_HANDLE_TOUCH_PX: Float get() = 60f * DashMetrics.scale
 
+/** 画面静止后保持 33ms 心跳的时长：让编码器码控把刚变化的画面补清，再降频。 */
+internal const val SETTLE_HEARTBEAT_MS = 1_000L
+
+/** 长时间静止时的保底心跳（每秒 1 帧）。 */
+internal const val IDLE_HEARTBEAT_MS = 1_000L
+
+/**
+ * 合成间隔：有新帧按目标帧率；静止 [SETTLE_HEARTBEAT_MS] 内 33ms；之后 [IDLE_HEARTBEAT_MS]。
+ *
+ * 依据（2026-11-20 WinPlay 诊断对照真 iPhone）：iPhone 画面静止时**完全不送帧**
+ * （10 秒窗口内 0~0.4fps、≈0Mbps），我们旧版恒 30fps 心跳 + 3s 周期 I 帧，静止仍有 1~2Mbps。
+ * 不降到 0 是保留 2026-10-09「无帧→接收端冻结」的兜底。
+ */
+internal fun composeIntervalMs(
+    hasNew: Boolean,
+    sinceChangeMs: Long,
+    targetFps: Int,
+): Long =
+    when {
+        hasNew -> 1000L / targetFps.coerceIn(1, 120)
+        sinceChangeMs < SETTLE_HEARTBEAT_MS -> 33L
+        else -> IDLE_HEARTBEAT_MS
+    }
+
 /**
  * 双虚拟屏 GL 合成器：dock 屏 + 应用屏（原生 / 超采样两块，按活动切换）→ 拼接输出到编码器输入 Surface。
  *
@@ -929,12 +953,13 @@ class DualDisplayComposer(
         startLatch?.countDown()
 
         // ---- 合成循环 ----
-        // 有输入新帧：按目标帧率（1000/targetFps）节流合成。
-        // 无新帧（界面静止，如启动器/阅读页/地图停靠）：以 33ms 心跳重复合成最后一帧内容——
-        // 否则编码器无输入、视频流停摆，接收端画面冻结（表现为"桌面卡死/不可交互"，
-        // 2026-10-09 实测踩坑：触摸其实送到了，只是没有帧能反映出来）。
+        // 节奏见 [composeIntervalMs]：有新帧按目标帧率；静止后先保持 33ms 心跳 1 秒（编码器
+        // 码控把刚变化的画面补清），再降到每秒 1 帧。旧版静止时一直 33ms 心跳——2026-10-09
+        // 曾因完全没有帧导致接收端「画面冻结」（触摸送到了但没有帧反映）；1 秒保底心跳仍保留
+        // 这层兜底，漏判的画面变化最多晚 1 秒出现。
         try {
             var lastComposeAt = System.currentTimeMillis()
+            var lastChangeAt = lastComposeAt
             while (running.get()) {
                 // 快车道（60fps 节流）只由「会被画进输出画面」的输入驱动：
                 // dock + 当前活动应用屏（app/hi 二选一）+ tile 可见时的地图屏。
@@ -953,7 +978,8 @@ class DualDisplayComposer(
                         (tileLayout != TileLayout.HIDDEN && mapInput?.hasNewFrame == true) ||
                         (showMediaPane && tileLayout == TileLayout.SPLIT && mediaInput?.hasNewFrame == true)
                 val now = System.currentTimeMillis()
-                val intervalMs = if (hasNew) 1000L / targetFps.coerceIn(1, 120) else 33L
+                if (hasNew) lastChangeAt = now
+                val intervalMs = composeIntervalMs(hasNew, now - lastChangeAt, targetFps)
                 val waitMs = intervalMs - (now - lastComposeAt)
                 if (waitMs <= 0) {
                     composeFrame(fullRedraw = false)

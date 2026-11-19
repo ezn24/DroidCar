@@ -830,12 +830,18 @@ class AirPlayClient(
                 hidDescriptors = parsedHidDescriptors,
                 // 奥迪 MMI 3315 声明 true：屏幕流 keepAlive 用 opcode=5 带 bplist 统计体
                 keepAliveSendStatsAsBody = (infoRoot?.get("keepAliveSendStatsAsBody") as? Boolean) == true,
+                // HEVC 两半都要有：/info 的空字典 hevcInfo + 会话 SETUP 应答 enabledFeatures 含 "hevc"
+                // （我们的提议清单 CONTROLLER_FEATURES 本就带 hevc）。协议事实来自 CarPlayStation
+                // （GPL，只读对照）：HEVC 在 features 位图与 extendedFeatures 里都没有标记。
+                hevc =
+                    infoRoot?.containsKey("hevcInfo") == true &&
+                        (root["enabledFeatures"] as? List<*>)?.any { it.toString() == "hevc" } == true,
             )
         sessionEnabledFeatures = info.enabledFeatures
         log(
             "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
                 "keepAlive=${info.keepAlivePort ?: "无"} features=${info.enabledFeatures} " +
-                "display=${info.displayWidth}x${info.displayHeight}@${info.maxFps} " +
+                "display=${info.displayWidth}x${info.displayHeight}@${info.maxFps} hevc=${info.hevc} " +
                 "displayUuid=${info.displayUuid}",
         )
         return info
@@ -1028,6 +1034,8 @@ class AirPlayClient(
          * （true → opcode=5 + bplist；false → opcode=2 空帧）。奥迪 3315 为 true。
          */
         val keepAliveSendStatsAsBody: Boolean = false,
+        /** 接收端声明并接受 HEVC（见 [hevc] 的赋值处）。 */
+        val hevc: Boolean = false,
     )
 
     /** 屏幕流协商结果。 */

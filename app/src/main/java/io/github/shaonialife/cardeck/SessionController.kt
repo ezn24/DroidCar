@@ -1237,7 +1237,7 @@ object SessionController {
         val preExisting = savedNetworkIds(wifi.ssid).isNotEmpty()
         val security =
             if (wifi.passphrase.isEmpty()) "open" else "wpa2 ${shellQuote(wifi.passphrase)}"
-        val r = Shell.exec("cmd wifi connect-network ${shellQuote(wifi.ssid)} $security", 10_000L)
+        val r = Shell.exec("cmd wifi connect-network ${shellQuote(wifi.ssid)} $security${WifiConnectCommand.AUTOJOIN_DISABLED}", 10_000L)
         if (!r.ok) {
             appendLog("WIFI: connect-network 失败（${r.output.take(80)}）")
             return null
@@ -2194,6 +2194,10 @@ object SessionController {
         source: String,
     ): Iap2SenderSession.CarPlayEndpoint? {
         val info = endpointBrowser?.awaitEndpoint(0) ?: return null
+        EndpointHosts.mdnsMismatch(endpoint.airPlayPort, endpoint.publicKey, info.port, txtValue(info, "pk"))?.let { reason ->
+            appendLog(">>> [$source] 忽略 mDNS 端点 ${info.host?.hostAddress}:${info.port}（$reason）——不是同一台接收端")
+            return null
+        }
         var result = endpoint
         val address = info.host?.hostAddress
         if (address != null &&
@@ -2895,6 +2899,9 @@ object SessionController {
                                             targetFps = fps,
                                             log = { line -> appendLog(line) },
                                             keepAliveWithStats = setup.keepAliveSendStatsAsBody,
+                                            clarityFirst = appContext?.let { DisplayPrefs.clarityFirst(it) } ?: false,
+                                            scalePercent = scalePct,
+                                            hevc = setup.hevc && appContext?.let { DisplayPrefs.hevc(it) } == true,
                                             onEnded = { byPeer ->
                                                 // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
                                                 appendLog(">>> CarPlay 会话结束（推流终止）——恢复蓝牙探测")

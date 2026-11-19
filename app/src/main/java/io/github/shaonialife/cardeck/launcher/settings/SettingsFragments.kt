@@ -1069,6 +1069,18 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             DisplayPrefs.showAssistOverlay(ctx),
         ) { DisplayPrefs.setShowAssistOverlay(ctx, it) }
         bindDisplayToggle(
+            view.findViewById(R.id.displayClarityFirst),
+            R.string.clarity_first,
+            R.string.clarity_first_note,
+            DisplayPrefs.clarityFirst(ctx),
+        ) { DisplayPrefs.setClarityFirst(ctx, it) }
+        bindDisplayToggle(
+            view.findViewById(R.id.displayHevc),
+            R.string.hevc_video,
+            R.string.hevc_video_note,
+            DisplayPrefs.hevc(ctx),
+        ) { DisplayPrefs.setHevc(ctx, it) }
+        bindDisplayToggle(
             view.findViewById(R.id.displayMutePhoneAudio),
             R.string.mute_phone_audio,
             R.string.mute_phone_audio_note,

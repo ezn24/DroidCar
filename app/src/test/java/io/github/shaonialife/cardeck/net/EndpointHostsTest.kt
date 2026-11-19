@@ -107,4 +107,19 @@ class AirPlayFeaturesTest {
         // 未知必须返回 null，绝不能被当成「不支持配对」
         assertNull(AirPlayFeatures.supportsPairing(null))
     }
+
+    /** WinPlay 2026-11-20：0x4301 给 17000，同网段另一服务广播 7000——不得合并。 */
+    @Test
+    fun mdnsWithDifferentPortOrKeyIsAnotherReceiver() {
+        assertTrue(EndpointHosts.mdnsMismatch(17000, null, 7000, null) != null)
+        assertTrue(EndpointHosts.mdnsMismatch(7000, "aa11", 7000, "bb22") != null)
+    }
+
+    /** 端口/公钥一致或未知时照旧合并（缺席不是否证）。 */
+    @Test
+    fun mdnsMatchingOrUnknownIsMerged() {
+        assertNull(EndpointHosts.mdnsMismatch(17000, "AA11", 17000, "aa11"))
+        assertNull(EndpointHosts.mdnsMismatch(0, null, 7000, "aa11"))
+        assertNull(EndpointHosts.mdnsMismatch(7000, "aa11", 7000, null))
+    }
 }

@@ -447,4 +447,8 @@
     <string name="md_car_audio_desc">Send phone audio to the car when connected (needs screen-capture permission; off = video only)</string>
     <string name="md_wait_reconnect">Wait for the car to reconnect</string>
     <string name="md_wait_reconnect_desc">When off, a disconnect from the car ends the session and releases Bluetooth and the hotspot</string>
+    <string name="clarity_first">Sharper picture</string>
+    <string name="clarity_first_note">Encode with H.264 High profile for crisper text. A few head units may show a black screen; turn this off if that happens. Applies on the next connection.</string>
+    <string name="hevc_video">HEVC video (experimental)</string>
+    <string name="hevc_video_note">Use H.265 when the head unit supports it, for roughly 30–50% less data at the same quality. Only tested on a test bench so far; turn off if the screen goes black. Applies on the next connection.</string>
 </resources>

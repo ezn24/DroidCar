@@ -447,4 +447,8 @@
     <string name="md_car_audio_desc">連線時把手機聲音推到車機（需投影授權；關閉則只推畫面）</string>
     <string name="md_wait_reconnect">車機斷開後等待回連</string>
     <string name="md_wait_reconnect_desc">關閉時，車機主動斷開就結束連線、收起藍牙與熱點</string>
+    <string name="clarity_first">清晰優先</string>
+    <string name="clarity_first_note">畫面編碼改用 High profile，文字更清晰。少數車機可能因此黑屏，遇到請關閉。下次連線生效。</string>
+    <string name="hevc_video">HEVC 編碼（實驗）</string>
+    <string name="hevc_video_note">車機支援時改用 H.265，同畫質下流量約省三到五成。目前只在測試台驗證過，車機黑屏請關閉。下次連線生效。</string>
 </resources>

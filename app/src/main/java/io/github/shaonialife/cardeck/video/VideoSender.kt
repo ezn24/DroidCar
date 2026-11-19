@@ -53,7 +53,17 @@ class VideoSender(
      * RECORD 后 10.2s 整轮被 reset，视频/feedback/事件通道全都健康）。
      */
     private val keepAliveWithStats: Boolean = false,
+    /** 「清晰优先」：请求 H.264 High profile（编码器拒绝时自动退回，见 [start]）。转接盒恒 Baseline。 */
+    private val clarityFirst: Boolean = false,
+    /** 日志用：本次会话的分辨率缩放百分比。 */
+    private val scalePercent: Int = 100,
+    /** 接收端声明并接受 HEVC（SetupInfo.hevc）且用户开了 HEVC：改用 H.265 编码。转接盒恒 H.264。 */
+    hevc: Boolean = false,
 ) {
+    /** 实际使用 HEVC（编码器不可用时退回 H.264 会改为 false）。 */
+    @Volatile
+    private var useHevc = hevc && !AdapterMode.active
+
     private val width: Int = (width / 2) * 2
     private val height: Int = (height / 2) * 2
     private var socket: Socket? = null
@@ -86,6 +96,11 @@ class VideoSender(
     private var bytesSinceKeepAlive = 0L
     private var keepAliveCount = 0L
 
+    /** 日志统计窗口（两条 keepAlive 日志之间的累计）。 */
+    private var statWindowFrames = 0L
+    private var statWindowBytes = 0L
+    private var statWindowStartAt = 0L
+
     @Volatile
     private var framesSent = 0L
     private var keyFramesSent = 0L
@@ -109,13 +124,18 @@ class VideoSender(
         if (existing != null && !existing.isClosed) return true
         return try {
             val client = Socket()
+            // 发送缓冲限到 256KB（connect 前设置才影响窗口协商）：内核默认会自动调到数 MB，
+            // WiFi 吞吐一掉帧就在缓冲里排队，12Mbps 下 1MB ≈ 0.7s 延迟、恢复时又一口气涌出
+            // （「延迟 + 时不时卡」）。缓冲小时写入早阻塞，合成器那端会跳过来不及编的帧，
+            // 画面保持新鲜——交互场景宁可丢帧不可积压。
+            runCatching { client.sendBufferSize = SEND_BUFFER_BYTES }
             client.connect(InetSocketAddress(host, dataPort), 5_000)
             client.tcpNoDelay = true
             // 推流是长连接：车机熄火/走出热点时链路常不发 RST，写入会阻塞在满窗口上，
             // 编码器线程随之卡死（表现为「画面停在最后一帧」）。
             TcpLiveness.configure(client, "视频数据口", log)
             socket = client
-            log("VIDEO: 数据端口已连通 $host:$dataPort（等 RECORD 后启动编码器）")
+            log("VIDEO: 数据端口已连通 $host:$dataPort sndbuf=${runCatching { client.sendBufferSize }.getOrNull()}（等 RECORD 后启动编码器）")
             true
         } catch (error: Exception) {
             log("VIDEO: 数据端口连接失败 - ${error.message}")
@@ -134,60 +154,79 @@ class VideoSender(
                 stop()
                 return false
             }
-            val bitrate =
-                (
-                    ((width * height * 6L).toInt()).coerceIn(2_000_000, 10_000_000) *
-                        if (targetFps >= 60) 1.5f else 1f
-                ).toInt().coerceAtMost(15_000_000)
+            val bitrate = encoderBitrate(width, height, targetFps)
             log("VIDEO: 启动编码器 ${width}x$height@$targetFps ${bitrate / 1_000_000}Mbps（端口已连通）")
 
-            val format =
-                MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                    setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-                    setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
-                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_S)
-                    if (adapterMode) {
-                        // The smartBox's hardware decoder showed black for a non-Baseline stream and
-                        // displayed Baseline (profile 66) in the reference field run; ask for it explicitly.
-                        runCatching {
-                            setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-                        }
+            // 依次尝试：[High（清晰优先）+ level 4.0] → [level 4.0] → [全自动]。
+            // 固定 level 4.0（SPS level_idc=40，真 iPhone 同款流形态）：不固定时编码器按
+            // 「分辨率+帧率」自动选，30fps 下 1412x654 落入 level 3.2——奥迪 DELPHI 解码器对该
+            // level 静默不渲染（2026-10-22 奥迪 0628 真机日志）。个别编码器不接受 profile/level
+            // 指定（configure 抛异常=视频全灭），故逐级降级。
+            val attempts =
+                buildList {
+                    if (useHevc) {
+                        add(EncoderAttempt(high = false, level4 = true, hevc = true))
+                        add(EncoderAttempt(high = false, level4 = false, hevc = true))
                     }
-                    // 固定 H.264 level 4.0（SPS level_idc=40，真 iPhone 同款流形态）。
-                    // 不固定时编码器按「分辨率+帧率」自动选：默认 30fps 下 1412x654
-                    // 合法落入 level 3.2——奥迪 DELPHI 解码器对该 level 静默不渲染
-                    // （TCP 照收、会话活着、车机黑屏，2026-10-22 奥迪 0628 真机日志
-                    // 定谳：同机 level=40 全部成功、level=32 首例黑屏）。60fps 时编码
-                    // 器本来就选 4.0，此设置对它无变化。
-                    runCatching {
-                        setInteger(
-                            MediaFormat.KEY_LEVEL,
-                            MediaCodecInfo.CodecProfileLevel.AVCLevel4,
-                        )
-                    }
+                    if (clarityFirst && !adapterMode) add(EncoderAttempt(high = true, level4 = true))
+                    add(EncoderAttempt(high = false, level4 = true))
+                    add(EncoderAttempt(high = false, level4 = false))
                 }
-            val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            // 个别编码器不接受 level 指定（configure 抛异常=视频全灭），降级为不指定重试
-            try {
-                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            } catch (levelRejected: Exception) {
-                log("VIDEO: 指定 level 4.0 被编码器拒绝（${levelRejected.message}）——回退自动选择（部分车机可能黑屏）")
-                val fallback =
-                    MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                        setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                        setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-                        setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
-                        setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_S)
-                    }
-                codec.configure(fallback, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            var codec: MediaCodec? = null
+            var chosen: EncoderAttempt? = null
+            var chosenCbr = false
+            for (attempt in attempts) {
+                val candidate = runCatching { MediaCodec.createEncoderByType(attempt.mime) }.getOrNull()
+                if (candidate == null) {
+                    log("VIDEO: 无 ${attempt.mime} 编码器——降级")
+                    continue
+                }
+                // CBR：高通 VBR 实测 10 秒平均超目标 75~80%（H.264 目标 12 → 21Mbps、HEVC 7.8 → 14），
+                // 峰值让接收端背压卡顿。用户取舍「稳定、不卡顿」优先于拖动时的清晰度（2026-11-20）。
+                // 静止画面靠 QP 下限兜住，CBR 不会为凑码率而重编。编码器不支持时照旧 VBR。
+                val cbr =
+                    attempt.level4 &&
+                        runCatching {
+                            candidate.codecInfo
+                                .getCapabilitiesForType(attempt.mime)
+                                .encoderCapabilities
+                                .isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                        }.getOrDefault(false)
+                try {
+                    candidate.configure(
+                        buildEncoderFormat(attempt.bitrateFrom(bitrate), attempt, cbr),
+                        null,
+                        null,
+                        MediaCodec.CONFIGURE_FLAG_ENCODE,
+                    )
+                    codec = candidate
+                    chosen = attempt
+                    chosenCbr = cbr
+                    break
+                } catch (rejected: Exception) {
+                    runCatching { candidate.release() }
+                    log("VIDEO: 编码器拒绝 ${attempt.label}（${rejected.message}）——降级重试")
+                }
             }
+            if (codec == null || chosen == null) error("编码器全部配置方案均被拒绝")
+            if (useHevc && !chosen.hevc) {
+                log("VIDEO: HEVC 编码器不可用——本次会话退回 H.264")
+                useHevc = false
+            }
+            log(
+                "VIDEO: 画质 缩放=$scalePercent% 画布=${width}x$height@$targetFps 码率=${"%.1f".format(chosen.bitrateFrom(bitrate) / 1e6)}Mbps " +
+                    "请求=${chosen.label}${if (chosen.level4) " QPmin=$QP_I_MIN/$QP_P_MIN" else ""} " +
+                    "码控=${if (chosenCbr) "CBR" else "默认(VBR)"} " +
+                    "编码器=${codec.name} 清晰优先=$clarityFirst" +
+                    "（实际 profile/level 见 VideoConfig 行：66=Baseline 77=Main 100=High）",
+            )
             val surface = codec.createInputSurface()
             codec.start()
             encoder = codec
             inputSurface = surface
             running.set(true)
             lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
+            statWindowStartAt = lastKeepAliveAt
 
             onSurfaceReady(surface)
 
@@ -314,6 +353,62 @@ class VideoSender(
         }
     }
 
+    private class EncoderAttempt(
+        val high: Boolean,
+        val level4: Boolean,
+        val hevc: Boolean = false,
+    ) {
+        val mime: String get() = if (hevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+
+        /** 该方案的目标码率：HEVC 按 [hevcBitrate] 折算。 */
+        fun bitrateFrom(h264Bitrate: Int): Int = if (hevc) hevcBitrate(h264Bitrate) else h264Bitrate
+
+        val label: String
+            get() =
+                when {
+                    hevc -> if (level4) "HEVC Main" else "HEVC 自动"
+                    high -> "High+L4.0"
+                    level4 -> "L4.0"
+                    else -> "自动"
+                }
+    }
+
+    private fun buildEncoderFormat(
+        bitrate: Int,
+        attempt: EncoderAttempt,
+        cbr: Boolean = false,
+    ): MediaFormat =
+        MediaFormat.createVideoFormat(attempt.mime, width, height).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+            if (cbr) setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_S)
+            when {
+                // HEVC：Main profile，level 交给编码器（H.264 的 level 4.0 约定不适用）
+                attempt.hevc -> setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
+                // The smartBox's hardware decoder showed black for a non-Baseline stream and
+                // displayed Baseline (profile 66) in the reference field run; ask for it explicitly.
+                adapterMode -> setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                attempt.high -> setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+            }
+            if (attempt.level4) {
+                if (!attempt.hevc) setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
+                // QP 下限：画质够好就不许再加位元。2026-11-20 WinPlay 实测：仪表盘只有 Google 地图
+                // 定位点在动时，高通编码器仍把 16.6Mbps 预算用满（每帧 16~30KB、整屏反复精修），
+                // 真 iPhone 同类动画每帧 ~3KB。下限 20/22 对文字仍清晰；不支持的编码器会忽略。
+                // 「全自动」那一档不带，留作万一某编码器因此拒绝 configure 的退路。
+                setInteger(MediaFormat.KEY_VIDEO_QP_I_MIN, QP_I_MIN)
+                setInteger(MediaFormat.KEY_VIDEO_QP_P_MIN, QP_P_MIN)
+                setInteger(MediaFormat.KEY_VIDEO_QP_B_MIN, QP_P_MIN)
+                // 低延迟提示：实时优先级、编码器最多压 1 帧（不做多帧前瞻）、按目标帧率供算力。
+                // 均为提示，不支持的编码器忽略。
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setInteger(MediaFormat.KEY_LATENCY, 1)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, targetFps)
+            }
+        }
+
     /**
      * 屏幕流 keepAlive 帧（catplay `ScreenTransmitSession::create_keep_alive`，1s 间隔）。
      *
@@ -339,12 +434,22 @@ class VideoSender(
         val frame = buildKeepAliveFrame(keepAliveWithStats, frames, bytesPerSecond, framesPerSecond)
         output.write(frame)
         output.flush()
-        if (keepAliveCount <= 3 || keepAliveCount % 30 == 0L) {
+        // 日志用「自上一条日志以来」的窗口平均（前 3 条约 1s、之后约 10s），而不是最后 1 秒的
+        // 瞬时值——瞬时值取样时机一错开，同样操作的两轮（如 HEVC/H.264 对照）就比不出差别。
+        statWindowFrames += frames
+        statWindowBytes += bytes
+        if (keepAliveCount <= 3 || keepAliveCount % 10 == 0L) {
+            val windowMs = (now - statWindowStartAt).coerceAtLeast(1L)
             log(
                 "VIDEO: keepAlive #$keepAliveCount " +
                     "opcode=${if (keepAliveWithStats) OP_KEEP_ALIVE_WITH_BODY else OP_KEEP_ALIVE} " +
-                    "body=${frame.size - HEADER_LEN}B fps=$framesPerSecond",
+                    "body=${frame.size - HEADER_LEN}B " +
+                    "近${"%.0f".format(windowMs / 1000.0)}s平均 fps=${statWindowFrames * 1000 / windowMs} " +
+                    "码率=${"%.2f".format(statWindowBytes * 8.0 / windowMs / 1000.0)}Mbps",
             )
+            statWindowFrames = 0
+            statWindowBytes = 0
+            statWindowStartAt = now
         }
     }
 
@@ -356,6 +461,10 @@ class VideoSender(
         val annexB = ByteArray(size)
         buffer.get(annexB)
         val nalUnits = splitAnnexB(annexB)
+        if (useHevc) {
+            sendHevcConfig(nalUnits, output)
+            return
+        }
         val rawSps = nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 }
         val pps = nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 }
         if (rawSps == null || pps == null) {
@@ -400,6 +509,32 @@ class VideoSender(
         )
     }
 
+    private fun sendHevcConfig(
+        nalUnits: List<ByteArray>,
+        output: java.io.OutputStream,
+    ) {
+        fun ofType(type: Int) = nalUnits.firstOrNull { it.size > 2 && HevcConfig.nalType(it[0]) == type }
+        val vps = ofType(HevcConfig.NAL_VPS)
+        val sps = ofType(HevcConfig.NAL_SPS)
+        val pps = ofType(HevcConfig.NAL_PPS)
+        val record = if (vps != null && sps != null && pps != null) HevcConfig.record(vps, sps, pps) else null
+        if (vps == null || sps == null || pps == null || record == null) {
+            log("VIDEO: HEVC csd 缺少 VPS/SPS/PPS（${nalUnits.size} 个 NAL），跳过 config")
+            return
+        }
+        val body = HevcConfig.configBody(record)
+        val header = buildVideoConfigHeader(body.size, width, height, hevc = true)
+        output.write(header)
+        output.write(body)
+        output.flush()
+        configSent = true
+        log(
+            "VIDEO: ✓ VideoConfig(HEVC) 已发送 hvcC=${record.size}B（VPS ${vps.size}B/SPS ${sps.size}B/PPS ${pps.size}B，" +
+                "profile=${record[1].toInt() and 0x1F} level=${record[12].toInt() and 0xFF} " +
+                "flags=0x%02x ${width}x$height）".format(header[6].toInt() and 0xFF),
+        )
+    }
+
     private fun sendVideoFrame(
         buffer: java.nio.ByteBuffer,
         size: Int,
@@ -439,7 +574,7 @@ class VideoSender(
         // level 补丁（车机会用帧内 SPS 更新解码器参数，只改 csd 不改帧内 SPS 的话，
         // 收到第一个关键帧就又变回低 level 了）。此前拆 NAL 逐个复制再经
         // ByteArrayOutputStream 拼接，一个 ~550KB 的 I 帧要复制 4 次。
-        val plain = annexBToLengthPrefixed(annexB) ?: return
+        val plain = annexBToLengthPrefixed(annexB, patchH264Level = !useHevc) ?: return
 
         // 加密方式按会话的 et 选择（catplay ScreenFrameCodec）：
         //  - ChaCha：header 作 AAD，body 长度含 16B tag；
@@ -545,10 +680,19 @@ class VideoSender(
     companion object {
         /**
          * 周期 I 帧间隔（秒）。原为 1s：I 帧 ~550KB、P 帧 5–20KB（S24 实测），每秒一个 I 帧
-         * 约占 4Mbps 并造成周期性发送尖峰。车机解码出错时会发 `forceKeyFrame`，由
-         * [requestKeyFrame] 即时补 I 帧，所以周期 I 帧只是兜底——3s 兼顾流量与恢复速度。
+         * 约占 4Mbps 并造成周期性发送尖峰；后改 3s。车机解码出错时会发 `forceKeyFrame`，由
+         * [requestKeyFrame] 即时补 I 帧，所以周期 I 帧只是兜底。
+         * 2026-11-20 WinPlay 诊断：真 iPhone 静止时 10 秒窗口内流量≈0，即**没有短周期 I 帧**
+         * ——改 30s，只留极低成本的兜底（未请求关键帧的车机最坏 30s 自愈）。
          */
-        private const val KEYFRAME_INTERVAL_S = 3
+        private const val KEYFRAME_INTERVAL_S = 30
+
+        /** 视频数据口发送缓冲上限（见 [openDataPort]）。 */
+        private const val SEND_BUFFER_BYTES = 256 * 1024
+
+        /** QP 下限（H.264 0~51，越小越细）：I 帧 20、P/B 帧 22。 */
+        private const val QP_I_MIN = 20
+        private const val QP_P_MIN = 22
 
         private const val HEADER_LEN = 128
         private const val OP_FRAME = 0
@@ -563,6 +707,9 @@ class VideoSender(
          * 否则车机按明文 NAL 解析 → 解码失败黑屏（会话与触摸仍正常）。
          */
         private const val SCREEN_FLAG_ENCRYPTED = 0x04
+
+        /** VideoConfig 头偏移 6 的 HEVC 标志（CarPlayStation 接收端按此位识别 H.265）。 */
+        private const val SCREEN_FLAG_HEVC = 0x08
 
         /** VideoConfig 头部 `params[1]` 的偏移：8 + 1×8，两个 f32 LE = 宽、高。 */
         private const val CONFIG_WIDTH_HEIGHT_OFFSET = 16
@@ -625,6 +772,7 @@ class VideoSender(
             bodySize: Int,
             width: Int,
             height: Int,
+            hevc: Boolean = false,
         ): ByteArray {
             val header = ByteArray(HEADER_LEN)
             header[0] = (bodySize and 0xFF).toByte()
@@ -632,7 +780,7 @@ class VideoSender(
             header[2] = ((bodySize ushr 16) and 0xFF).toByte()
             header[3] = ((bodySize ushr 24) and 0xFF).toByte()
             header[4] = OP_CONFIG.toByte()
-            header[6] = SCREEN_FLAG_ENCRYPTED.toByte()
+            header[6] = (SCREEN_FLAG_ENCRYPTED or if (hevc) SCREEN_FLAG_HEVC else 0).toByte()
             for (index in 0 until 4) {
                 val widthBits = width.toFloat().toRawBits()
                 header[CONFIG_WIDTH_HEIGHT_OFFSET + index] = ((widthBits ushr (8 * index)) and 0xFF).toByte()
@@ -654,6 +802,32 @@ class VideoSender(
         }
     }
 }
+
+/**
+ * 编码目标码率：像素 ×8（下限 4、上限 12Mbps），60fps 再 ×1.5，总上限 12Mbps。
+ *
+ * 旧公式「像素 ×6、2~10Mbps、上限 15」在 1264×640@60 只给 ~7Mbps，大众 MIB3 车主反馈
+ * 文字比原生 CarPlay 发虚（上游 shaonialife/cardeck#26），故小画布提到 ~9.7Mbps。
+ * 总上限 12Mbps：2026-11-20 WinPlay 实测，1920×720@60 目标 16.6Mbps 时移动地图峰值到
+ * 19~20Mbps，接收端反复背压暂停（卡顿），同场景真 iPhone 峰值 ~13Mbps 且更顺。
+ * 静止画面由 QP 下限压低，不靠这里。
+ */
+internal fun encoderBitrate(
+    width: Int,
+    height: Int,
+    fps: Int,
+): Int {
+    val base = (width.toLong() * height * 8).coerceIn(4_000_000L, 12_000_000L)
+    val scaled = if (fps >= 60) base * 3 / 2 else base
+    return scaled.coerceAtMost(12_000_000L).toInt()
+}
+
+/**
+ * HEVC 目标码率 = H.264 的 65%（下限 3Mbps）。同目标码率下 HEVC 的收益只体现为画质，流量不变
+ * （2026-11-20 CarPlayStation 实测两者实际码率相近）；按「同画质约省三到五成」取中间偏保守，
+ * 1920×720@60 由 12 → 7.8Mbps，减轻 WiFi 与接收端解码负担。
+ */
+internal fun hevcBitrate(h264Bitrate: Int): Int = (h264Bitrate.toLong() * 65 / 100).coerceAtLeast(3_000_000L).toInt()
 
 /** H.264 level_idc 目标值：4.0（0x28）。真 iPhone 同款流形态。 */
 private const val TARGET_LEVEL_IDC = 40
@@ -679,7 +853,10 @@ private const val TARGET_LEVEL_IDC = 40
  * 尾部 3 字节内不认），空 NAL 跳过；找不到起始码时整块当一个 NAL。没有任何 NAL 返回 null。
  * 结果与「splitAnnexB → patchSpsLevel → 逐个写长度+数据」逐字节相同（单测对照）。
  */
-internal fun annexBToLengthPrefixed(bytes: ByteArray): ByteArray? {
+internal fun annexBToLengthPrefixed(
+    bytes: ByteArray,
+    patchH264Level: Boolean = true,
+): ByteArray? {
     if (bytes.isEmpty()) return null
     // 记录每个 NAL 的 [体起点, 体终点)
     val bodies = ArrayList<Long>()
@@ -720,7 +897,7 @@ internal fun annexBToLengthPrefixed(bytes: ByteArray): ByteArray? {
         out[pos + 2] = (len ushr 8).toByte()
         out[pos + 3] = len.toByte()
         System.arraycopy(bytes, start, out, pos + 4, len)
-        if (len >= 4 && (bytes[start].toInt() and 0x1F) == 7 && (bytes[start + 3].toInt() and 0xFF) < TARGET_LEVEL_IDC) {
+        if (patchH264Level && len >= 4 && (bytes[start].toInt() and 0x1F) == 7 && (bytes[start + 3].toInt() and 0xFF) < TARGET_LEVEL_IDC) {
             out[pos + 4 + 3] = TARGET_LEVEL_IDC.toByte()
         }
         pos += 4 + len
