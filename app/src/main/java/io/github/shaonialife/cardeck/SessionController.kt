@@ -10,6 +10,7 @@ import io.github.shaonialife.cardeck.audio.AudioProfile
 import io.github.shaonialife.cardeck.audio.AudioProfileMemory
 import io.github.shaonialife.cardeck.audio.AudioSender
 import io.github.shaonialife.cardeck.audio.AudioTuning
+import io.github.shaonialife.cardeck.bt.AdapterMode
 import io.github.shaonialife.cardeck.bt.BtProfiles
 import io.github.shaonialife.cardeck.bt.BtSessionGate
 import io.github.shaonialife.cardeck.bt.Iap2BluetoothClient
@@ -385,6 +386,39 @@ object SessionController {
     @Volatile
     private var senderLinkGenerationCache: ReceiverProfile.LinkGeneration? = null
 
+    /**
+     * A wireless CarPlay adapter that already knows this phone skips the Bluetooth bootstrap and
+     * just invites us over its Wi-Fi (`GET /ctrl-int/1/connect`, repeated every ~17 s). Start the
+     * AirPlay session from the invite, as the reference sender does, when the phone is on the
+     * adapter's Wi-Fi and nothing else is running.
+     */
+    private fun onAdapterInvite(peer: String?) {
+        if (!AdapterMode.active || connectCancelled) return
+        if (videoSender?.isRunning == true || sessionStarting.get()) return
+        if (bluetoothServer?.isRunning != true) return
+        val host = peer?.takeIf { EndpointHosts.isUsableAdapterAddress(it) } ?: return
+        val ssid = shellWifiStatus().second ?: knownCarHotspotSsid()
+        if (ssid.isNullOrBlank()) {
+            appendLog("ADAPTER: invite from $host but the phone's Wi-Fi SSID is unknown - waiting for Bluetooth")
+            return
+        }
+        appendLog("ADAPTER: invite from $host on \"$ssid\" without a Bluetooth bootstrap - starting AirPlay from the invite")
+        onCarPlayEndpoint(
+            Iap2SenderSession.CarPlayEndpoint(
+                ssid = ssid,
+                passphrase = lastWifiPsk.orEmpty(),
+                channel = 0,
+                securityType = 0,
+                airPlayPort = 7000,
+                deviceIdentifier = null,
+                publicKey = null,
+                sourceVersion = null,
+                ipAddresses = listOf(host),
+            ),
+            "adapter invite",
+        )
+    }
+
     private fun knownCarHotspotSsid(): String? = boundCarSsid ?: lastCarWifiSsid
 
     /**
@@ -486,7 +520,10 @@ object SessionController {
                     },
                     targetProvider = targetProvider,
                 )
-            ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
+            ctrlAdvertiser =
+                CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }.also { advertiser ->
+                    advertiser.onInvite = { peer -> onAdapterInvite(peer) }
+                }
             endpointBrowser =
                 CarPlayServiceBrowser(
                     context,
@@ -540,6 +577,20 @@ object SessionController {
             bluetoothClient?.isRunning == true
 
     /**
+     * Wireless CarPlay adapters read the phone's SDP records when they pair, and only later dial
+     * the phone's iAP2 service if it was published then. Start the listener before pairing one.
+     */
+    fun listenForAdapterPairing(context: Context) {
+        ensure(context)
+        AdapterMode.active = true
+        bluetoothServer?.resetAdapterHandoff()
+        // start() is idempotent and re-publishes an existing "iAP2" record as "Wireless iAP".
+        if (bluetoothServer?.start() == true) {
+            appendLog("ADAPTER: phone iAP2 service published before pairing (the adapter dials it after pairing)")
+        }
+    }
+
+    /**
      * 「启动连接」主体（权限检查由 Activity 完成后调用）：前台保活服务 + 双向蓝牙。
      * 幂等：已有会话时 BT 组件的 start() 自行短路，不会双开。
      */
@@ -576,7 +627,20 @@ object SessionController {
         Bg.run("ctrl-publish") { ctrlAdvertiser?.start() }
         // 真车路径：手机主动连车机（SDP …caff 配件服务）
         // 测试台路径：监听手机侧 iPhone UUID，等 DiPlay/xcertplay 回连
-        bluetoothClient?.start()
+        val target = TargetDevicePrefs.get(context)
+        AdapterMode.active = AdapterMode.looksLikeAdapter(target?.name)
+        if (AdapterMode.active) {
+            // Wireless CarPlay adapter: the box dials our ...cafe service; it has no ...caff
+            // service to dial, and the outbound client would also drop its other profiles.
+            appendLog(
+                "ADAPTER: \"${target?.name}\" looks like a wireless CarPlay adapter - " +
+                    "waiting for it to connect to the phone (outbound Bluetooth connect disabled)",
+            )
+            bluetoothClient?.stop()
+            bluetoothServer?.resetAdapterHandoff()
+        } else {
+            bluetoothClient?.start()
+        }
         bluetoothServer?.start()
         // 诊断（奥迪实测：手机与车机「蓝牙已连接」时车机不开放 CarPlay）：
         // 连之前把目标设备的蓝牙配置文件状态打出来，失败时一眼看出是不是这个原因。
@@ -1949,7 +2013,12 @@ object SessionController {
                 // 兜底：热点场景车机 IP = 网关（Audi 实测 .1，但取网关更通用）。
                 // mDNS 在部分网络/机型上不稳定（2026-10-11 实测车机 mDNS 时有时无）；
                 // 网关地址 + 默认端口 7000 直接连，AirPlay 端口是固定约定。
-                val gateway = wifiConnector?.gatewayAddress()
+                val gateway =
+                    if (AdapterMode.active) {
+                        wifiConnector?.adapterFallbackHost(ctrlAdvertiser?.lastInvitePeer)?.host
+                    } else {
+                        wifiConnector?.gatewayAddress()
+                    }
                 if (gateway != null && EndpointHosts.candidates(listOf(gateway)).isNotEmpty()) {
                     appendLog(">>> [$source] mDNS 未发现，兜底使用网关地址 $gateway:7000（车机热点网关=车机）")
                     return effective.copy(
@@ -2405,6 +2474,17 @@ object SessionController {
                             // 车机全程健康却永不切 CarPlay 画面）。
                             created.onTunnelControlSessionComplete = {
                                 scheduleModesReclaim(created)
+                            }
+                            // Wireless CarPlay adapter: re-prime the decoder when the box brings
+                            // CarPlay back (it tears its decoder down while native owns the screen).
+                            created.onRequestUI = { videoSender?.reprime("requestUI") }
+                            // After disableBluetooth the box moves iAP2 to Wi-Fi; release RFCOMM once
+                            // the tunnel is up, or 10 s after disableBluetooth in case it waits for us.
+                            created.onBluetoothReleasable = { reason ->
+                                if (AdapterMode.active) {
+                                    appendLog("ADAPTER: releasing Bluetooth RFCOMM ($reason)")
+                                    bluetoothServer?.detachCurrentSession()
+                                }
                             }
                         }
                     // 「强制应用横屏」覆盖写入在配对起步就入队：`am compat enable` 会立即
