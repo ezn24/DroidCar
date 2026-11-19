@@ -1,3 +1,10 @@
+## 2026-11-18 无线 CarPlay 转接盒模式（移植自 zz85/cardeck，MIT，未实机验证）
+
+- 来源：fork zz85/cardeck 的 be86bb9 / a03afde（smartBox-136F 实测），以 cherry-pick 合入，新文件注释为英文。a03afde 里的 Bigme ROM 修正（不带 `OWN_DISPLAY_GROUP`）按用户决定未合入。
+- 闸门 `bt/AdapterMode.active`：目标设备名像转接盒（smartBox/CarLink/Carlinkit/AutoKit/CPC200）时 `startConnection` 置位；目标为「自动」时由 `Iap2BluetoothServer` 在盒子撥入 `…cafe` 时置位（必须早于 `Iap2LinkChannel` 构造）。为 false 时其它车机行为不变。
+- 与车机相反的几处：盒子是 RFCOMM 客户端、先发 SYN（我们原样回显参数）；WiFi 隧道等盒子先发（`AdapterIapLink`）；RECORD 后发 `disableBluetooth`；mDNS SRV 为 `(none).local.` 时改用 DHCP 服务器/邀请方/网关；H.264 Baseline；requestUI/forceKeyFrame 时重发 VideoConfig+IDR（`RePrimeGate`）；已认得手机的盒子只发 WiFi 邀请，由邀请直接开会话。
+- 连接中 ACL 断开有 60s 宽限（`CarPlayService.AUTO_STOP_GRACE_MILLIS`），推流中照旧忽略。
+
 ## 2026-11-18 断线收尾三坑
 
 - **推流中忽略车机蓝牙 ACL 断开**：接收端交接到 WiFi 后放掉蓝牙是正常行为（WinPlay RECORD 后 ~3s 断 ACL），「上车自动连接」的 ACL_DISCONNECTED 曾把健康会话当下车拆掉（「刚连上就断」）。真下车靠 WiFi onLost / onEnded 收尾。
@@ -182,7 +189,7 @@ git tag -a v0.1.0 -m "CarDeck 0.1.0"; git push origin v0.1.0
 gh release create v0.1.0 CarDeck-0.1.0.apk --title "..." --notes-file notes.md --latest
 ```
 **CI（`.github/workflows/android-ci.yml`，2026-10-22 起）**：每次 push 自动出**正式签名**包，
-版本号自动累计——传 `-Pcardeck.buildNumber=<github.run_number>`，得到
+版本号自动累计——传 `-Pcardeck.buildNumber=<提交数>`（`git rev-list --count HEAD`，2026-11-18 起取代 run_number；**本地出包也必须传同一个值**，否则本机装的包与 CI 包版本号对不上、CI 包可能比本机的小而装不上），得到
 `versionName=<appVersionName>.<N>`、`versionCode=base*10000+N`（能覆盖安装上一版；
 base 升 patch 时自动反超）。产物名 `CarDeck-<版本>-release.apk`，**只在 Actions Artifacts，
 不发 GitHub Release**（`permissions: contents: read`）。签名来自仓库 Secrets

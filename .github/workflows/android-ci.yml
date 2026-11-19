@@ -36,6 +36,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+          # 构建号 = 提交数（git rev-list --count HEAD），需要完整历史
+          fetch-depth: 0
 
       # AGP 8.7 要求 JDK 17，且与 app/build.gradle.kts 的 jvmTarget 一致
       - name: 安装 JDK 17
@@ -56,14 +58,18 @@ jobs:
           set -euo pipefail
           BASE=$(sed -n 's/^val appVersionName = "\(.*\)"/\1/p' app/build.gradle.kts)
           test -n "$BASE" || { echo "::error::无法从 app/build.gradle.kts 读取 appVersionName"; exit 1; }
-          VERSION="${BASE}.${GITHUB_RUN_NUMBER}"
+          # 构建号用「提交数」而非 run_number：同一个提交在本地与 CI 得到同一版本号，
+          # 且随提交单调递增（run_number 与本地手工构建号对不上，CI 包反而比本机装的小、装不上）
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          echo "build=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          VERSION="${BASE}.${BUILD_NUMBER}"
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "name=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "本次版本：$VERSION（versionCode = base*10000 + ${GITHUB_RUN_NUMBER}）"
+          echo "本次版本：$VERSION（versionCode = base*10000 + ${BUILD_NUMBER}）"
 
       - name: 建置簽名 APK
         env:
-          BUILD_NUMBER: ${{ github.run_number }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build }}
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}

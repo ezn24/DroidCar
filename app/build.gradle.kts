@@ -13,7 +13,8 @@ plugins {
  * 0.x 表示实验性阶段；发布前只需改这一行。
  *
  * CI（`.github/workflows/android-ci.yml`）每次推送会传
- * `-Pcardeck.buildNumber=<github.run_number>`，得到 `0.1.13.<N>` / `versionCode = base*10000+N`
+ * `-Pcardeck.buildNumber=<提交数>`（`git rev-list --count HEAD`），得到 `0.1.13.<N>` / `versionCode = base*10000+N`。
+ * 本地出包也必须传同一个值，同一个提交两边版本号才一致
  * 的**正式签名**包（见下方 [buildNumber]），不需要往仓库写提交。
  */
 val appVersionName = "0.1.42"
@@ -23,7 +24,7 @@ val appVersionCode =
         .let { (major, minor, patch) -> major.toInt() * 10_000 + minor.toInt() * 100 + patch.toInt() }
 
 /**
- * 预发布构建号（CI 每次推送传 `-Pcardeck.buildNumber=<run_number>`）。
+ * 预发布构建号（CI 与本地都传 `-Pcardeck.buildNumber=$(git rev-list --count HEAD)`）。
  *
  *  - `versionName` 追加 `.N`：`0.1.13` → `0.1.13.42`；
  *  - `versionCode` 把低 4 位留给构建号：`113` → `1_130_042`。
