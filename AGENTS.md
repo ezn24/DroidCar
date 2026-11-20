@@ -14,6 +14,7 @@
 - **静止码率 / 卡顿 / 延迟（WinPlay 对照真 iPhone）**：① QP 下限 I20/P22（`KEY_VIDEO_QP_*_MIN`）——没有它高通编码器会把预算用满，地图定位点动画每帧 16~30KB，加上后 1~3KB；② 码率总上限 12Mbps（16.6 时移动地图峰值 19~20Mbps、WinPlay 反复背压）；③ 视频口 `sendBufferSize=256KB` + 编码器低延迟提示（`KEY_PRIORITY/LATENCY/OPERATING_RATE`）；④ **触摸注入必须 ASYNC（mode 0）**：旧 mode 2 = WAIT_FOR_FINISH，每个 MOVE 都等 App 处理完，Google 地图按住转圈时事件排队，「拖不动、松手后地图自己继续转」。
 - **HEVC（实验，设置→显示「HEVC 编码」默认关）**：协议事实来自 CarPlayStation（Windows 接收端，GPL-3.0 只读对照）——接收端 `/info` 放**空字典 `hevcInfo`**，且会话 SETUP 应答 `enabledFeatures` 含 `"hevc"`（我们的提议清单本就带 hevc），两者都有才算支持（`SetupInfo.hevc`）。VideoConfig 体为 `[u32 BE 盒长]["hvcC"][HEVCDecoderConfigurationRecord]`、头偏移 6 加 0x08；帧仍 4 字节长度前缀，**不得**套 H.264 的 SPS level 补丁（`annexBToLengthPrefixed(patchH264Level=false)`）。组装见 `video/HevcConfig`。WinPlay 无 hevcInfo。CarPlayStation 本机 MFi 签名可用自签 P-256（我们跳过 0xAA03 校验）。真车形态未验证。
 - **`cmd wifi connect-network` 一律带 `-d`**（`WifiConnectCommand.AUTOJOIN_DISABLED`）：该命令会覆盖同名已保存网络的配置，不带 `-d` 时用户在系统里关掉的「自动连线」每次连接都被改回开（WinPlay 实测）。车机热点无互联网，不该被系统自动连。
+- **通用车机 0x4300 双群组**（`CarPlayAvailability.body(dualGroup=…)`，0x1D01 制造商含 General Motors 才启用）：群组 0 = 可用 + 24 位大写十六进制设备标识（MAC 派生），群组 1 = 可用 + 蓝牙 MAC。来自 fork chengshl/cardeck（MIT）Buick E5（B233）实车：单群组时卡在 0x4301 之前，双群组后出画面。上游别克/凯迪拉克（#1/#12/#20/#24/#27）多卡在同一阶段。0x4e0c 已走带 ACK 的 send、0x4301 无线子参数已解析 SSID/密码，二者无需再移植。
 - 上游 #25 另两条（0x4E0E 改「u8 类型 + MAC」、稀疏清单判 NEW）**不采纳**：前者与转接盒/真 iPhone 的「MAC + UDID」格式冲突，后者与奥迪 3315 稀疏清单仍需 0x5702 的定谳冲突。
 
 ## 2026-11-18 断线收尾三坑

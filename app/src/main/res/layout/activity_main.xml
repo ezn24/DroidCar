@@ -136,7 +136,7 @@
                     android:layout_width="210dp"
                     android:layout_height="176dp">
 
-                    <io.github.shaonialife.cardeck.ui.SignalWavesView
+                    <io.github.ezn24.cardeck.neo.ui.SignalWavesView
                         android:id="@+id/signalWaves"
                         android:layout_width="210dp"
                         android:layout_height="176dp" />
