@@ -70,7 +70,7 @@ check(buildNumber == null || hasReleaseKeystore) {
 }
 
 android {
-    namespace = "io.github.shaonialife.cardeck"
+    namespace = "io.github.ezn24.cardeck.neo"
     compileSdk = 34
 
     defaultConfig {
@@ -118,7 +118,7 @@ android {
         debug {
             // **不要加 applicationIdSuffix**：本项目 debug 包就是日常使用的包——
             // Shizuku 授权是按包名授予的，改包名会要求重新授权；AGENTS.md 里的
-            // `run-as io.github.shaonialife.cardeck` 调试链路也会一起失效。
+            // `run-as io.github.ezn24.cardeck.neo` 调试链路也会一起失效。
             versionNameSuffix = "-debug"
         }
     }

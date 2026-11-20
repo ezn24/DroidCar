@@ -84,13 +84,13 @@
                 android:textColor="#FFFFFF"
                 android:textStyle="bold" />
 
-            <io.github.shaonialife.cardeck.ui.StatusGlyphsView
+            <io.github.ezn24.cardeck.neo.ui.StatusGlyphsView
                 android:id="@+id/dockStatus"
                 android:layout_width="wrap_content"
                 android:layout_height="9dp"
                 android:layout_marginTop="2dp" />
 
-            <io.github.shaonialife.cardeck.ui.BatteryGlyphView
+            <io.github.ezn24.cardeck.neo.ui.BatteryGlyphView
                 android:id="@+id/dockBattery"
                 android:layout_width="wrap_content"
                 android:layout_height="11dp"
