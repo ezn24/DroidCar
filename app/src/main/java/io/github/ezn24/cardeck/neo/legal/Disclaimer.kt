@@ -3,19 +3,19 @@ package io.github.ezn24.cardeck.neo.legal
 import android.content.Context
 
 /**
- * 免责声明的接受状态与放行规则。
+ * Acceptance state and gating rules for the disclaimer.
  *
- * 用**版本号**而非布尔值记录：分享出去后文案必然迭代（新增测试车型、补充条款），
- * 把 [CURRENT_VERSION] +1 即可让老用户重新确认一次；布尔值只能靠卸载重装才会再弹。
+ * Recorded as a **version number** rather than a boolean: once shared, the text inevitably iterates (new tested car models, extra clauses),
+ * and bumping [CURRENT_VERSION] by 1 makes existing users confirm again; a boolean would only re-prompt after uninstall/reinstall.
  */
 object DisclaimerPrefs {
     /**
-     * 当前免责声明版本。**修改 disclaimer_content 文案时必须同步 +1**——
-     * 用户接受的是「当时那一版」内容，条款变了就该重新确认。
+     * Current disclaimer version. **Bump by 1 whenever the disclaimer_content text changes**:
+     * users accepted "that version" of the content, so changed terms must be re-confirmed.
      *
-     * v2（2026-10-18）：应用改名 CarDeck，补「非官方」「非 MFi」与 MIT 开源说明。
+     * v2 (2026-10-18): app renamed CarDeck; added the "unofficial", "not MFi" and MIT open-source notes.
      */
-    const val CURRENT_VERSION = 3
+    const val CURRENT_VERSION = 4
 
     private const val PREFS = "disclaimer"
     private const val KEY_ACCEPTED_VERSION = "accepted_version"
@@ -32,7 +32,7 @@ object DisclaimerPrefs {
             .apply()
     }
 
-    /** 仅测试/诊断用：撤销接受（下次启动会重新弹）。 */
+    /** Test/diagnostic only: revoke acceptance (the prompt reappears at next launch). */
     fun reset(context: Context) {
         context
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -43,16 +43,16 @@ object DisclaimerPrefs {
 }
 
 /**
- * 「接受」按钮的可用条件（纯函数，可单测）。
+ * Availability condition of the "Accept" button (pure function, unit-testable).
  *
- * 三个条件同时成立才放行：
- * 1. 倒计时结束（[countdownDone]）——强制用户有时间意识到这是安全相关声明；
- * 2. 内容未溢出（[contentScrollable]=false），或已滑到底（[scrolledToBottom]）——
- *    长文案必须真的看得到末尾，不能靠「内容是否溢出」蒙混；
- * 3. （由调用方保证）用户未点「放弃使用」。
+ * All three conditions must hold:
+ * 1. Countdown finished ([countdownDone]), so the user has time to realize this is a safety-related notice;
+ * 2. Content does not overflow ([contentScrollable]=false), or has been scrolled to the bottom ([scrolledToBottom]);
+ *    long text must really expose its end, and "does the content overflow" cannot be used to dodge that;
+ * 3. (Guaranteed by the caller) the user did not tap "Decline".
  *
- * 注意：倒计时与滚动是**并列**条件，不是串行——否则长文案用户滑 30 秒后
- * 还要再等 10 秒，体验很差。
+ * Note: countdown and scrolling are **parallel** conditions, not serial; otherwise a user of long text
+ * who scrolls for 30 seconds would wait another 10 seconds, a poor experience.
  */
 internal fun canAcceptDisclaimer(
     countdownDone: Boolean,
@@ -61,18 +61,18 @@ internal fun canAcceptDisclaimer(
 ): Boolean = countdownDone && (!contentScrollable || scrolledToBottom)
 
 /**
- * 是否还需要展示启动时的强制声明：本机没有接受过**当前版本**。
+ * Whether the launch-time mandatory disclaimer must be shown: this device has not accepted the **current version**.
  */
 internal fun needsDisclaimerAtLaunch(
     acceptedVersion: Int,
     currentVersion: Int,
 ): Boolean = acceptedVersion < currentVersion
 
-/** 「接受」暂不可点的原因（UI 按语言取文案）。 */
+/** Reason "Accept" is not yet tappable (the UI picks the text per language). */
 internal enum class DisclaimerBlock { SCROLL_AND_WAIT, WAIT, SCROLL }
 
 /**
- * 底部提示（让用户知道「为什么按钮点不动」）。返回 null 表示可以点。
+ * Bottom hint (tells the user "why the button does not respond"). Returns null when it can be tapped.
  */
 internal fun disclaimerBlockReason(
     countdownDone: Boolean,

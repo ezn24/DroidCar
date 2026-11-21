@@ -1,27 +1,27 @@
 package io.github.ezn24.cardeck.neo.audio
 
 /**
- * 音频负载的封装/时间戳参数（**已定案，唯一一组**）。
+ * Audio payload wrapping/timestamp parameters (**settled, a single set**).
  *
- * 背景：2026-10-20 在 Honda HFT / Alpine 8A250-30A（Telechips tcc805x Android 10）上
- * 走 `type=102` + AAC-LC 44100 时，车机 SETUP 应答完整、`/feedback` 里 `sampleTime`
- * 按 44.1k 实时推进、会话稳定不断，但**喇叭没有声音**。当时把三组可能的封装差异
- * （裸帧 / ADTS、声明 spf / 不声明、到达时间戳 / 高精度时间戳）做成可切换方案，
- * 在车上逐一实测。
+ * Background: on 2026-10-20 with `type=102` + AAC-LC 44100 on a Honda HFT / Alpine 8A250-30A (Telechips tcc805x
+ * Android 10), the car's SETUP reply was complete, `/feedback` `sampleTime` advanced in real time at 44.1k and
+ * the session stayed up, but the **speaker was silent**. Three possible wrapping differences
+ * (raw frame / ADTS, declare spf / not, arrival timestamp / high-accuracy timestamp) were made switchable
+ * and tested one by one in the car.
  *
- * 定案结论：真正的病根不在封装，而是发送前对 AAC 比特流做了 PCM 的 s16 换序
- * （见 [AudioSender] 的 `sealPacket`）。换序修掉后**方案 1 即可出声**，
- * 另外两组的差异对这台车机没有影响，因此收敛为唯一一组参数，不再提供切换。
+ * Conclusion: the real cause was not wrapping; the AAC bitstream was being s16 byte-swapped like PCM before sending
+ * (see `sealPacket` in [AudioSender]). With the swap fixed **scheme 1 plays**; the other two differences
+ * made no difference on this car, so everything is reduced to one set and switching is gone.
  */
 enum class AudioTuning(
-    /** 是否给每帧补 ADTS 头。 */
+    /** Whether to prepend an ADTS header to every frame. */
     val adts: Boolean,
-    /** SETUP 里声明的 spf（每包样本帧数）；null = 不声明。 */
+    /** spf (sample frames per packet) declared in SETUP; null = not declared. */
     val spf: Int?,
-    /** SETUP 里的 supportsHighAccuracyTimestamps。 */
+    /** supportsHighAccuracyTimestamps in SETUP. */
     val highAccuracyTimestamps: Boolean,
 ) {
-    /** 裸 AAC 帧 + `spf=1024` + 到达时间戳——真车实测唯一可用组合。 */
+    /** Raw AAC frame + `spf=1024` + arrival timestamp: the only combination that worked on the real car. */
     RAW_SPF(
         adts = false,
         spf = 1024,
@@ -29,7 +29,7 @@ enum class AudioTuning(
     ),
     ;
 
-    /** 日志用的一行说明。 */
+    /** One-line description for logs. */
     val detail: String
-        get() = "裸 AAC 帧 + spf=$spf + 到达时间戳"
+        get() = "raw AAC frame + spf=$spf + arrival timestamp"
 }

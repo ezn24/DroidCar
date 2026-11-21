@@ -3,13 +3,13 @@ package io.github.ezn24.cardeck.neo.iap2
 import java.io.ByteArrayOutputStream
 
 /**
- * iAP2 控制会话（CSM）分帧与 TLV 参数体编解码。
+ * iAP2 control session (CSM) framing and TLV parameter body codec.
  *
- * 帧：`0x4040 | u16 总长(含头) | u16 消息ID | 体`，大端，无校验和。
- * 参数：`u16 参数总长(含4字节头) | u16 参数ID | 值`，可嵌套（参数值为子参数序列）。
- * 字符串以 NUL 结尾的 UTF-8 传输。
+ * Frame: `0x4040 | u16 total length (incl. header) | u16 message ID | body`, big-endian, no checksum.
+ * Parameter: `u16 total length (incl. 4-byte header) | u16 parameter ID | value`, nestable (a value may be a sequence of sub-parameters).
+ * Strings are sent as NUL-terminated UTF-8.
  *
- * CSM 字节流再由链路层 [Iap2LinkPacket]（会话ID 0）分片承载。
+ * The CSM byte stream is carried in turn by the link layer [Iap2LinkPacket] (session ID 0) in fragments.
  */
 object Iap2Csm {
     const val START = 0x4040
@@ -39,7 +39,7 @@ object Iap2Csm {
         return out
     }
 
-    /** 增量解析器：喂入任意分片的 CSM 字节流，弹出完整帧。 */
+    /** Incremental parser: feed an arbitrarily fragmented CSM byte stream, pops complete frames. */
     class Parser {
         private var buffer = ByteArray(0)
 
@@ -49,7 +49,7 @@ object Iap2Csm {
             while (true) {
                 val start = indexOfStart(buffer)
                 if (start < 0) {
-                    // 没有帧头：保留最后 1 字节以防跨 chunk 的 0x40
+                    // No frame header: keep the last byte in case a 0x40 straddles chunks
                     buffer = buffer.takeLast(1).toByteArray()
                     break
                 }
@@ -77,7 +77,7 @@ object Iap2Csm {
         }
     }
 
-    // ---- TLV 参数体 ----
+    // ---- TLV parameter body ----
 
     data class Param(
         val id: Int,

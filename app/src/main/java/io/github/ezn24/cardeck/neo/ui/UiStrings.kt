@@ -2,7 +2,7 @@ package io.github.ezn24.cardeck.neo.ui
 
 import android.content.Context
 
-/** 设置菜单等非 Activity 对象也从同一份 Android 语言资源取文案。 */
+/** Non-Activity objects such as the settings menu also take text from the same Android locale resources. */
 object UiStrings {
     private lateinit var app: Context
 

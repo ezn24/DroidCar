@@ -12,10 +12,10 @@ import android.util.AttributeSet
 import android.view.View
 
 /**
- * CarPlay / iOS 16 风格电池图标：圆角电池身 + 右侧电极头，按电量填充，
- * 百分比数字**镂空**在电池身里；充电时填充变绿并在右侧显示闪电，≤20% 变红。
+ * CarPlay / iOS 16 style battery icon: rounded battery body + terminal nub on the right, filled by charge level,
+ * the percentage digits **knocked out** of the body; while charging the fill turns green with a bolt on the right, <=20% turns red.
  *
- * 尺寸只由高度决定（宽高比固定），放进 dock 的竖条/横条都能直接用 wrap_content。
+ * Size is determined by height only (fixed aspect ratio), so it can use wrap_content in both the dock's vertical and horizontal bars.
  */
 class BatteryGlyphView
     @JvmOverloads
@@ -34,7 +34,7 @@ class BatteryGlyphView
             Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 typeface = Typeface.create(Typeface.DEFAULT, DIGIT_WEIGHT, false)
                 textAlign = Paint.Align.CENTER
-                // 镂空：数字处擦掉电池身，透出背后的 dock 背景（iOS 16 的做法）
+                // Knock-out: erase the body where the digits are, revealing the dock background behind (the iOS 16 approach)
                 xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
             }
         private val whiteTextPaint =
@@ -79,7 +79,7 @@ class BatteryGlyphView
             val radius = h * 0.32f
             body.set(0f, 0f, bodyW, h)
 
-            // 电池身 + 镂空数字画在独立图层里，DST_OUT 才只擦电池身、不擦背景
+            // Body + knocked-out digits are drawn in a separate layer so DST_OUT erases only the body, not the background
             val layer = canvas.saveLayer(0f, 0f, width.toFloat(), h, null)
             canvas.drawRoundRect(body, radius, radius, trackPaint)
             clip.reset()
@@ -91,7 +91,8 @@ class BatteryGlyphView
             canvas.restore()
             textPaint.textSize = h * 0.78f
             val baseline = h / 2f - (textPaint.descent() + textPaint.ascent()) / 2f
-            // 常态镂空（透出背景）；充电（绿）/ 低电量（红）时改白字——镂空在彩色填充上发黑难认
+            // Normally knocked out (background shows through); while charging (green) / low battery (red) use white text, since
+            // knocked-out digits on a colored fill are dark and hard to read
             val solidText = charging || percent <= 20
             if (!solidText) canvas.drawText(percent.toString(), bodyW / 2f, baseline, textPaint)
             canvas.restoreToCount(layer)
@@ -100,7 +101,7 @@ class BatteryGlyphView
                 canvas.drawText(percent.toString(), bodyW / 2f, baseline, whiteTextPaint)
             }
 
-            // 电极头
+            // Terminal nub
             val capH = h * 0.36f
             body.set(bodyW + capGap, (h - capH) / 2f, bodyW + capGap + capW, (h + capH) / 2f)
             canvas.drawRoundRect(body, capW, capW, capPaint)
@@ -118,7 +119,7 @@ class BatteryGlyphView
                 else -> 0xFFFFFFFF.toInt()
             }
 
-        /** SF Symbols `bolt.fill` 的近似轮廓。 */
+        /** Approximate outline of the SF Symbols `bolt.fill`. */
         private fun drawBolt(
             canvas: Canvas,
             x: Float,
@@ -137,7 +138,7 @@ class BatteryGlyphView
         }
 
         private companion object {
-            /** 电量数字字重（800 ≈ Heavy；Bold=700 在小尺寸下显细）。 */
+            /** Weight of the charge digits (800 ~ Heavy; Bold=700 looks thin at small sizes). */
             const val DIGIT_WEIGHT = 800
 
             const val BODY_ASPECT = 2.1f

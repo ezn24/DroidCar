@@ -1,18 +1,18 @@
 package io.github.ezn24.cardeck.neo.net
 
 /**
- * 接收端地址候选的排序与判定（纯函数，单测覆盖）。
+ * Ordering and validation of receiver address candidates (pure function, unit-tested).
  *
- * 背景：安卓端很容易把「有地址」误判成「有 IPv4 地址」——奥迪 MIB3 的
- * `_airplay._tcp` 只发布链路本地 IPv6（`fe80::…%wlan0`）时，旧代码会把它整条
- * 丢掉，然后退到 `网关:7000` 兜底；而 4xxx 固件车机的网关/端口未必是
- * `10.174.189.1:7000`，于是永远连不上（2026-10-19 用户反馈的 4851 即此类）。
+ * Background: on Android it is easy to misjudge "has an address" as "has an IPv4 address". When the Audi MIB3
+ * `_airplay._tcp` publishes only a link-local IPv6 (`fe80::...%wlan0`), the old code dropped it entirely
+ * and fell back to `gateway:7000`; but the gateway/port of 4xxx firmware head units is not necessarily
+ * `10.174.189.1:7000`, so it could never connect (the 4851 reported by a user on 2026-10-19 was exactly this).
  *
- * 排序策略（真 iPhone / catplay 也是直接使用 Bonjour 给的地址）：
- *  1. IPv4 —— 安卓上最稳；
- *  2. 全局 IPv6；
- *  3. 链路本地 IPv6（必须带 scope 才能用，保留原样由调用方补 `%iface`）。
- * 同一个地址的带/不带 scope 形式视为重复，只保留先出现的。
+ * Ordering policy (a real iPhone / catplay also uses the addresses Bonjour provides directly):
+ *  1. IPv4: the most reliable on Android;
+ *  2. global IPv6;
+ *  3. link-local IPv6 (needs a scope to be usable; kept as-is, the caller adds `%iface`).
+ * The same address with and without scope counts as a duplicate; only the first one is kept.
  */
 object EndpointHosts {
     fun isIpv4(host: String): Boolean = host.contains('.') && !host.contains(':')
@@ -29,16 +29,16 @@ object EndpointHosts {
             normalized.startsWith("feb")
     }
 
-    /** 去掉 `%wlan0` / `%3` 这类 scope 后缀。 */
+    /** Strip a scope suffix such as `%wlan0` / `%3`. */
     fun stripScope(host: String): String = host.substringBefore('%')
 
     /**
-     * 接收端是否给出了可尝试的地址（IPv4 或 IPv6 都算）。
-     * 供「端点是否自足」「是否需要 mDNS 补全」判断，勿再写 `contains('.')`。
+     * Whether the receiver gave a usable address to try (IPv4 or IPv6 both count).
+     * For "is the endpoint self-sufficient" / "is mDNS completion needed" checks; do not write `contains('.')` again.
      */
     fun hasUsable(addresses: List<String>): Boolean = candidates(addresses).isNotEmpty()
 
-    /** 排序 + 去重。空串/纯 scope 一律剔除。 */
+    /** Sort + dedupe. Empty strings / bare scopes are always dropped. */
     fun candidates(addresses: List<String>): List<String> {
         val seen = HashSet<String>()
         val out = ArrayList<String>(addresses.size)
@@ -59,12 +59,12 @@ object EndpointHosts {
     }
 
     /**
-     * 地址是否属于「本机所在的车机网段」。
+     * Whether an address belongs to "the head unit subnet this phone is on".
      *
-     * - IPv4：与本地 IPv4 的 /24 前缀一致（沿用旧过滤，防误连同一 WiFi 上的 Mac）；
-     * - IPv6 链路本地：天然只在本链路，直接接受；
-     * - IPv6 全局：与本地某个 IPv6 地址的前 64 位一致才接受（拿不到本地 IPv6 时拒绝，
-     *   宁可退回网关兜底，也不把公网/家庭网络的 AirPlay 设备当车机）。
+     * - IPv4: same /24 prefix as a local IPv4 (keeps the old filter, avoids connecting to a Mac on the same WiFi);
+     * - IPv6 link-local: only valid on this link by nature, accepted directly;
+     * - IPv6 global: accepted only if the first 64 bits match a local IPv6 address (rejected when no local IPv6 is available;
+     *   better to fall back to the gateway than to treat an AirPlay device on a public/home network as the head unit).
      */
     fun isSameNetwork(
         host: String,
@@ -132,13 +132,13 @@ object EndpointHosts {
             parts.all { part -> part.length in 1..3 && part.all(Char::isDigit) && part.toInt() <= 255 }
     }
 
-    /** IPv6 的前 64 位（前 4 组 hextet，展开后比较；解析失败返回 null）。 */
+    /** First 64 bits of an IPv6 address (first 4 hextets, compared after expansion; null on parse failure). */
     fun ipv6Prefix64(host: String): String? {
         val groups = expandIpv6(stripScope(host)) ?: return null
         return groups.take(4).joinToString(":")
     }
 
-    /** 把 IPv6 文本展开为 8 组（处理 `::` 压缩），返回小写 hextet 列表。 */
+    /** Expand IPv6 text into 8 groups (handling `::` compression), returning lowercase hextets. */
     private fun expandIpv6(host: String): List<String>? {
         if (!host.contains(':')) return null
         val doubleColon = host.indexOf("::")
@@ -163,11 +163,12 @@ object EndpointHosts {
     }
 
     /**
-     * mDNS 发现的 `_airplay._tcp` 是否与蓝牙给的端点明显不是同一台：端口或公钥都已知且不同。
-     * WinPlay 测试台 2026-11-20 实测：0x4301 = 192.168.1.117:17000，同网段另一服务广播
-     * 192.168.1.177:7000，旧逻辑把 .177 合并进地址列表并沿用 17000 端口——必然连不上，
-     * 还把配对重试轮次耗在错误地址上。端口/公钥未知时照旧合并（不能把缺席当否证）。
-     * 返回不一致的原因；null = 可以合并。
+     * Whether the mDNS-discovered `_airplay._tcp` is clearly not the same device as the Bluetooth-provided endpoint: port or
+     * public key both known and different.
+     * WinPlay bench measured 2026-11-20: 0x4301 = 192.168.1.117:17000, while another service on the same subnet advertised
+     * 192.168.1.177:7000; the old logic merged .177 into the address list and kept port 17000, which could never connect
+     * and burned the pairing retry rounds on the wrong address. When port/key are unknown we still merge (absence is not refutation).
+     * Returns the reason for the mismatch; null = safe to merge.
      */
     fun mdnsMismatch(
         endpointPort: Int,
@@ -177,10 +178,10 @@ object EndpointHosts {
     ): String? =
         when {
             endpointPort > 0 && mdnsPort > 0 && mdnsPort != endpointPort ->
-                "端口 $mdnsPort ≠ 车机给的 $endpointPort"
+                "port $mdnsPort != the $endpointPort given by the head unit"
             endpointPublicKey != null &&
                 mdnsPublicKey != null &&
-                !endpointPublicKey.equals(mdnsPublicKey, ignoreCase = true) -> "公钥不同"
+                !endpointPublicKey.equals(mdnsPublicKey, ignoreCase = true) -> "public keys differ"
             else -> null
         }
 }

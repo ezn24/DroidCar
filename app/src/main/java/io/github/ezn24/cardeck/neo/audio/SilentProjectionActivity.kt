@@ -16,25 +16,25 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 静默领取 MediaProjection 令牌的**透明跳板**（自动连接专用）。
+ * **Transparent trampoline** that silently obtains a MediaProjection token (auto-connect only).
  *
- * 为什么需要它：AudioPlaybackCapture 必须有 MediaProjection 实例，而 Android 14+ 的令牌
- * 是**单次**的（停止捕获即作废），自动连接时没人能点「允许投屏」。
+ * Why: AudioPlaybackCapture needs a MediaProjection instance, and on Android 14+ the token is
+ * **single use** (void once capture stops), and during auto-connect nobody can tap "Allow screen capture".
  *
- * 两条系统闸门与对策：
- *  1. **授权弹窗**：`appops set <pkg> PROJECT_MEDIA allow` 会让 SystemUI 的
- *     `MediaProjectionPermissionActivity` 直接返回 RESULT_OK（Tasker 官方文档同款做法）；
- *  2. **后台启动 Activity（BAL）**：由 Shizuku 执行
- *     `am start -n <pkg>/<activity> --activity-no-animation` 拉起本页——shell 持有
- *     `START_ACTIVITIES_FROM_BACKGROUND`，不受应用侧 BAL 限制；失败再退回
- *     `context.startActivity`（需要 `SYSTEM_ALERT_WINDOW`，缺失时先 `appops` 补授）。
+ * Two system gates and how we handle them:
+ *  1. **Consent dialog**: `appops set <pkg> PROJECT_MEDIA allow` makes SystemUI's
+ *     `MediaProjectionPermissionActivity` return RESULT_OK directly (same approach as Tasker's docs);
+ *  2. **Background activity launch (BAL)**: Shizuku runs
+ *     `am start -n <pkg>/<activity> --activity-no-animation` to start this page; the shell holds
+ *     `START_ACTIVITIES_FROM_BACKGROUND` and is not subject to the app-side BAL limit. On failure fall back to
+ *     `context.startActivity` (needs `SYSTEM_ALERT_WINDOW`, granted via `appops` first if missing).
  *
- * 页面本身：1×1、不可触摸、不可聚焦、无动画、不进最近任务；拿到结果立即 finish。
+ * The page itself: 1x1, untouchable, unfocusable, no animation, kept out of recents; finishes as soon as it has a result.
  *
- * **用完即弃**：令牌由 `CarPlayService` 立刻换成 MediaProjection 实例；本页不持有任何状态。
+ * **Use and discard**: `CarPlayService` immediately turns the token into a MediaProjection instance; this page holds no state.
  */
 class SilentProjectionActivity : Activity() {
-    /** 授权结果（resultCode + 换 MediaProjection 所需的 Intent）。 */
+    /** Grant result (resultCode + the Intent needed to obtain a MediaProjection). */
     data class Grant(
         val resultCode: Int,
         val data: Intent,
@@ -48,19 +48,20 @@ class SilentProjectionActivity : Activity() {
         if (grant != null) {
             future.complete(grant)
         } else {
-            future.completeExceptionally(IllegalStateException(error ?: "未知原因"))
+            future.completeExceptionally(IllegalStateException(error ?: "unknown reason"))
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 手机在口袋里（锁屏 + 息屏）时，后台 Activity 不会被 resume，onActivityResult 会一直
-        // 挂着；这两个标志让本页在锁屏上也能立刻走完（配合暗幕/真息屏，用户无感）。
+        // With the phone in a pocket (locked + screen off) background activities are not resumed and onActivityResult
+        // hangs forever; these two flags let this page finish even on the lock screen (with dim cover/true screen-
+        // off, the user notices nothing).
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
         }
-        // 1×1、不可触摸、不可聚焦：用户完全看不到
+        // 1x1, untouchable, unfocusable: invisible to the user
         window.setLayout(1, 1)
         window.addFlags(
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
@@ -72,7 +73,7 @@ class SilentProjectionActivity : Activity() {
             @Suppress("DEPRECATION")
             startActivityForResult(manager.createScreenCaptureIntent(), REQUEST_CODE)
         } catch (t: Throwable) {
-            complete(null, "createScreenCaptureIntent 失败：$t")
+            complete(null, "createScreenCaptureIntent failed: $t")
             finishSilently()
         }
     }
@@ -88,14 +89,14 @@ class SilentProjectionActivity : Activity() {
         if (resultCode == RESULT_OK && data != null) {
             complete(Grant(resultCode, data), null)
         } else {
-            complete(null, "授权被拒 resultCode=$resultCode")
+            complete(null, "consent denied resultCode=$resultCode")
         }
         finishSilently()
     }
 
     override fun onDestroy() {
-        // 没拿到结果就被销毁（用户取消/被系统回收）：让等待方立刻失败，而不是等满超时
-        complete(null, "Activity 在返回结果前被销毁")
+        // Destroyed without a result (user cancelled / reclaimed by the system): fail the waiter at once instead of waiting out the timeout
+        complete(null, "Activity destroyed before returning a result")
         super.onDestroy()
     }
 
@@ -108,13 +109,13 @@ class SilentProjectionActivity : Activity() {
     companion object {
         private const val REQUEST_CODE = 10086
 
-        /** 同一时刻只允许一个请求（自动连接是串行的）。 */
+        /** Only one request at a time (auto-connect is serial). */
         private val pending = AtomicReference<CompletableFuture<Grant>?>(null)
 
         /**
-         * 阻塞领取令牌（**必须在后台线程调用**，内部会走 2~3 条 Shizuku 命令）。
+         * Blocking token acquisition (**must be called on a background thread**, it runs 2~3 Shizuku commands).
          *
-         * @return null = 失败/超时：调用方应退回「只推视频」
+         * @return null = failed/timed out: the caller should fall back to video only
          */
         fun request(
             context: Context,
@@ -122,27 +123,27 @@ class SilentProjectionActivity : Activity() {
         ): Grant? {
             val app = context.applicationContext
             val future = CompletableFuture<Grant>()
-            pending.getAndSet(future)?.completeExceptionally(IllegalStateException("被新的请求覆盖"))
+            pending.getAndSet(future)?.completeExceptionally(IllegalStateException("superseded by a new request"))
             val pkg = app.packageName
-            // 1) 放行投屏：SystemUI 见到 PROJECT_MEDIA=allow 会直接返回 RESULT_OK，不弹窗
+            // 1) Allow projection: SystemUI sees PROJECT_MEDIA=allow and returns RESULT_OK without a dialog
             Shell.exec("appops set $pkg PROJECT_MEDIA allow", 5_000L)
-            // 2) 没有悬浮窗权限时，后台拉起 Activity / 前台服务都会被拦；暗幕本来也需要它
+            // 2) Without the overlay permission, background Activity/foreground-service launches are blocked; the dim cover needs it anyway
             if (!Settings.canDrawOverlays(app)) {
                 val r = Shell.exec("appops set $pkg SYSTEM_ALERT_WINDOW allow", 5_000L)
-                DebugFileLog.append(app, "PROJ: 补授「显示在其他应用上层」ok=${r.ok}（${r.output.take(60)}）")
+                DebugFileLog.append(app, "PROJ: granted 'display over other apps' ok=${r.ok} (${r.output.take(60)})")
             }
-            // 3) 录音权限（AudioPlaybackCapture 需要）：没授过就顺手补上
+            // 3) Recording permission (needed by AudioPlaybackCapture): grant it along the way if missing
             if (app.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                 val r = Shell.exec("appops set $pkg RECORD_AUDIO allow", 5_000L)
-                DebugFileLog.append(app, "PROJ: 补授录音权限 ok=${r.ok}（${r.output.take(60)}）")
+                DebugFileLog.append(app, "PROJ: granted recording permission ok=${r.ok} (${r.output.take(60)})")
             }
-            // 4) 用 shell am start 绕过后台启动 Activity 限制；失败再退回应用内启动
+            // 4) Use shell am start to bypass the background-activity-launch limit; fall back to in-app start on failure
             val component = "$pkg/${SilentProjectionActivity::class.java.name}"
             val viaShell = Shell.exec("am start -n $component --activity-no-animation", 8_000L)
             if (!viaShell.ok) {
                 DebugFileLog.append(
                     app,
-                    "PROJ: am start 失败（exit=${viaShell.exitCode} ${viaShell.output.take(80)}）——改用应用内 startActivity",
+                    "PROJ: am start failed (exit=${viaShell.exitCode} ${viaShell.output.take(80)}) - falling back to in-app startActivity",
                 )
                 runCatching {
                     app.startActivity(
@@ -150,13 +151,13 @@ class SilentProjectionActivity : Activity() {
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION),
                     )
                 }.onFailure {
-                    DebugFileLog.append(app, "PROJ: 应用内 startActivity 也失败（${it.javaClass.simpleName}: ${it.message}）")
+                    DebugFileLog.append(app, "PROJ: in-app startActivity also failed (${it.javaClass.simpleName}: ${it.message})")
                 }
             }
             return try {
                 future.get(timeoutMs, TimeUnit.MILLISECONDS)
             } catch (t: Throwable) {
-                DebugFileLog.append(app, "PROJ: 静默领取投屏令牌失败（${t.javaClass.simpleName}: ${t.message}）")
+                DebugFileLog.append(app, "PROJ: silent projection token acquisition failed (${t.javaClass.simpleName}: ${t.message})")
                 null
             } finally {
                 pending.compareAndSet(future, null)

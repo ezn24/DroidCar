@@ -3,16 +3,16 @@ package io.github.ezn24.cardeck.neo.bt
 import android.content.Context
 
 /**
- * 「上车自动连接」开关（默认开）：车机蓝牙 ACL 连上时是否自动拉起会话。
+ * "Auto-connect when getting in the car" switch (default on): whether to start a session automatically when the car Bluetooth ACL connects.
  *
- * 与 `DisplayPrefs.screenOffOnConnect` 一起显示在「设置 → 显示」面板；
- * 由 [CarBluetoothReceiver] 在每次 ACL 广播时读取（进程可能刚被冷启动，没有缓存）。
+ * Shown with `DisplayPrefs.screenOffOnConnect` in the Settings -> Display panel;
+ * read by [CarBluetoothReceiver] on every ACL broadcast (the process may have just been cold-started, so nothing is cached).
  */
 object AutoConnectPrefs {
     private const val PREFS = "settings"
     private const val KEY = "auto_connect_on_bt"
 
-    /** 默认开：这是「拉开车门就自动连」的开关，用户主动关掉才停用。 */
+    /** Default on: this is the "open the door and connect" switch; only disabled when the user turns it off. */
     const val DEFAULT = true
 
     fun enabled(context: Context): Boolean =

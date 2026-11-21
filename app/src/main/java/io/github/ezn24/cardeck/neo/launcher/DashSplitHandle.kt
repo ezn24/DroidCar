@@ -8,24 +8,25 @@ import android.view.MotionEvent
 import android.view.View
 
 /**
- * 仪表盘分屏拖拽把手：中缝内的三点指示条（横屏竖排三点、竖屏横排三点）。
+ * Dashboard split-drag handle: a three-dot indicator bar in the gap (three dots stacked vertically in landscape, in a row in portrait).
  *
- * 按住拖动调整地图卡/音乐卡分屏——拖动中 [VirtualLauncher.previewDashSplit] 只做
- * 地图纹理拉伸渲染（不动虚拟屏），松手 [commitDashSplit] 才真实 resize。
+ * Press and drag to adjust the map card / music card split. During the drag [VirtualLauncher.previewDashSplit] only
+ * stretches the map texture in rendering (virtual display untouched); on release [commitDashSplit] does the real resize.
  *
- * 两个触摸硬约定（2026-10-21 方案评审）：
- *  - DOWN 必须 `requestDisallowInterceptTouchEvent(true)`：宿主是 ViewPager2 的
- *    首页，否则横向拖动会被 pager 当翻页抢走；
- *  - 位移数学用 rawX/rawY：把手自身位置每帧随拖动变化，getX 相对自身是自引用。
- *    手指移出把手范围不影响事件归属（Android 按指针流绑定到 DOWN 接收者）。
+ * Two hard touch rules (design review 2026-10-21):
+ *  - DOWN must call `requestDisallowInterceptTouchEvent(true)`: the host is the ViewPager2
+ *    home page, otherwise a horizontal drag is taken by the pager as a page flip;
+ * - Use rawX/rawY for the displacement math: the handle's own position changes every frame during the drag, so getX (relative to itself)
+ * is self-referential.
+ *    A finger leaving the handle bounds does not affect event ownership (Android binds the pointer stream to the DOWN receiver).
  */
 class DashSplitHandle(
     context: Context,
 ) : View(context) {
-    /** true=竖屏（上下拖，拖 y）；false=横屏（左右拖，拖 x）。 */
+    /** true = portrait (drag up/down, drag y); false = landscape (drag left/right, drag x). */
     private var verticalSplit = false
 
-    /** (把手中心·应用屏像素, 是否落定)；落定=true 时回调方应 commit。 */
+    /** (handle center in app-display pixels, settled); when settled = true the receiver should commit. */
     private var onDrag: ((Float, Boolean) -> Unit)? = null
 
     private var downCenter = 0f
@@ -70,7 +71,7 @@ class DashSplitHandle(
                 dragging = false
                 isPressed = false
                 invalidate()
-                // CANCEL 同样按当前落点收尾：commit 幂等且钳制，与 UP 行为一致可预期
+                // CANCEL finishes at the current position too: commit is idempotent and clamped, consistent with UP and predictable
                 onDrag?.invoke(downCenter + (raw - downRaw), true)
                 true
             }
@@ -93,8 +94,8 @@ class DashSplitHandle(
         val gap = 10f * density
         val cx = width / 2f
         val cy = height / 2f
-        // 三点方向随手条：竖屏=横条→横排点；横屏=竖条→竖排点
-        // （2026-10-22 两轮修正：首版不分支恒竖排，次版分支又接反）
+        // Dot direction follows the bar: portrait = horizontal bar -> dots in a row; landscape = vertical bar -> dots stacked
+        // (2026-10-22 two corrections: the first version always stacked, the second had the branch reversed)
         if (verticalSplit) {
             canvas.drawCircle(cx, cy, r, dotPaint)
             canvas.drawCircle(cx - gap, cy, r, dotPaint)

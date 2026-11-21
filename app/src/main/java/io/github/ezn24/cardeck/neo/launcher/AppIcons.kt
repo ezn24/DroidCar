@@ -6,15 +6,16 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
 
-/** 应用图标位图化工具（iOS 风格圆角；桌面网格 / dock / 设置页共用）。 */
+/** App icon bitmap helper (iOS-style rounded corners; shared by desktop grid / dock / settings). */
 object AppIcons {
     /**
-     * Drawable → 圆角位图；[radiusFraction] 为圆角占边长比例（约 22%）。
+     * Drawable -> rounded bitmap; [radiusFraction] is the corner radius as a fraction of the edge (about 22%).
      *
-     * 在 Drawable 的副本上渲染（constantState.newDrawable；bounds 保存/恢复兜底）：
-     * iconCache 中的实例被多个界面共同持有，直接 setBounds 会污染其他使用者——
-     * 实机故障根因：桌面网格按自己的 iconSize 改写共享 Drawable 的 bounds 后，
-     * dock 里同一实例的缩放矩阵失配（图标变小且偏左，点 home 触发网格重绑后复现）。
+     * Renders on a copy of the Drawable (constantState.newDrawable; bounds saved/restored as a fallback):
+     * instances in iconCache are shared by several screens, so calling setBounds directly would pollute other users.
+     * Real-device root cause: the desktop grid rewrote the shared Drawable's bounds with its own iconSize,
+     * so the dock's scaling matrix for the same instance went out of sync (icon shrank and shifted left; reproduced after tapping home
+     * rebound the grid).
      */
     fun rounded(
         drawable: Drawable,

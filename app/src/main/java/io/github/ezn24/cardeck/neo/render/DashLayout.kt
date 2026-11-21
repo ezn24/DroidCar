@@ -1,14 +1,14 @@
 package io.github.ezn24.cardeck.neo.render
 
 /**
- * 仪表盘版面（2026-11-17）。「dock 在哪」与「地图/媒体怎么分」原本由同一个
- * `dockAtBottom` 表达（竖屏车机 = dock 底部 + 上下分屏）；窄屏需要两者独立组合：
+ * Dashboard layout (2026-11-17). "Where the dock is" and "how map/media are split" used to be expressed by the single
+ * `dockAtBottom` (portrait head unit = dock at bottom + top/bottom split); narrow screens need the two combined independently:
  *
- * | 版面          | dock   | 分屏           | 适用                         |
+ * | Layout        | dock   | split              | Use                                   |
  * |---------------|--------|----------------|------------------------------|
- * | SIDE_BY_SIDE  | 左侧   | 左地图右媒体   | 宽屏（1920×720、1280×488）   |
- * | DOCK_BOTTOM   | 底部   | 左地图右媒体   | 窄横屏，Android Auto 式       |
- * | PORTRAIT      | 底部   | 上地图下媒体   | 竖屏车机（不受偏好影响）     |
+ * | SIDE_BY_SIDE  | left   | map left, media right | wide (1920x720, 1280x488)          |
+ * | DOCK_BOTTOM   | bottom | map left, media right | narrow landscape, Android Auto style |
+ * | PORTRAIT      | bottom | map top, media bottom | portrait head unit (preference ignored) |
  */
 enum class DashLayout(
     val dockAtBottom: Boolean,
@@ -20,17 +20,20 @@ enum class DashLayout(
     ;
 
     companion object {
-        /** 旧版「自动」值：已并入默认（窄屏 Dock 在底部），读到按 [PREF_DOCK_BOTTOM] 处理。 */
+        /** Legacy "auto" value: merged into the default (dock at bottom on narrow screens); treated as [PREF_DOCK_BOTTOM] when read. */
         const val PREF_AUTO = "auto"
         const val PREF_SIDE = "side"
 
-        /** 已移除的「音乐在底部」版面（2026-11-17 用户试用后选定 Dock 在底部）；读到按默认处理。 */
+        /**
+         * Removed "music at bottom" layout (2026-11-17, the user settled on dock at bottom after trying it); treated as
+         * the default when read.
+         */
         const val PREF_MUSIC_BOTTOM = "music_bottom"
         const val PREF_DOCK_BOTTOM = "dock_bottom"
 
         /**
-         * 窄屏判据：画布宽高比低于它才看偏好。8:3（1920×720 = 2.67、1280×488 = 2.62）
-         * 一律左右分屏；16:9（1.78）与 800×480（1.67）按用户在设置里选的版面。
+         * Narrow-screen criterion: only below this canvas aspect ratio is the preference consulted. 8:3 (1920x720 = 2.67, 1280x488 = 2.62)
+         * is always side-by-side; 16:9 (1.78) and 800x480 (1.67) follow the layout the user picked in settings.
          */
         const val NARROW_ASPECT = 1.9f
 
@@ -40,9 +43,11 @@ enum class DashLayout(
         ): Boolean = canvasWidth.toFloat() / canvasHeight.coerceAtLeast(1) < NARROW_ASPECT
 
         /**
-         * 按偏好与画布解析本会话版面（纯函数，单测钉死）。偏好**只对窄横屏生效**
-         * （2026-11-17 用户要求：宽屏保持默认）；竖屏车机恒为 [PORTRAIT]；窄屏默认 Dock 在底部，
-         * 只有显式选「左右分屏」才左右分屏。
+         * Resolves this session's layout from the preference and canvas (pure function, pinned by unit tests). The
+         * preference **applies only to narrow landscape**
+         * (2026-11-17 user request: wide screens keep the default); a portrait head unit is always [PORTRAIT];
+         * narrow screens default to dock at bottom,
+         * and only an explicit "side by side" choice splits left/right.
          */
         fun resolve(
             pref: String,

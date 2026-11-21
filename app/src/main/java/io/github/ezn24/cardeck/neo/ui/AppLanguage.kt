@@ -6,7 +6,7 @@ import android.os.LocaleList
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.os.LocaleListCompat
 
-/** 偏好由应用持久化，AppCompat 同步所有 Activity；服务/应用 Context 用相同语言。 */
+/** The preference is persisted by the app and AppCompat syncs all Activities; Service/Application Contexts use the same language. */
 object AppLanguage {
     fun current(context: Context): String {
         if (android.os.Build.VERSION.SDK_INT >= 33) {

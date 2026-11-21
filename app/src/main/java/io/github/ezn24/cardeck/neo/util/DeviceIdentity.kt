@@ -7,19 +7,19 @@ import android.provider.Settings
 import io.github.ezn24.cardeck.neo.shizuku.Shell
 
 /**
- * 本机身份解析：蓝牙 MAC 与设备名（无线 CarPlay 协议必需）。
+ * Local identity resolution: Bluetooth MAC and device name (required by the wireless CarPlay protocol).
  *
- * 背景（Audi MIB3 真车实测，2026-10-09）：Android 11+ 应用层调
- * `BluetoothAdapter.getAddress()` 只会拿到占位 `02:00:00:00:00:00`；
- * 而车机在解析 0x4300 的无线组（bluetoothTransportIdentifier）与后续
- * 0x4E0E 时会校验其是否与实际 RFCOMM 对端一致——占位值导致车机静默丢弃
- * （现象：链路层照常 ACK，CSM 层不再回应，永远等不到 0x4301）。
+ * Background (Audi MIB3 real-car test, 2026-10-09): on Android 11+ app-level
+ * `BluetoothAdapter.getAddress()` only returns the placeholder `02:00:00:00:00:00`;
+ * while the head unit, when parsing the wireless group of 0x4300 (bluetoothTransportIdentifier) and the later
+ * 0x4E0E, checks it against the actual RFCOMM peer; the placeholder makes it silently drop the message
+ * (symptom: link layer still ACKs, CSM layer stops responding, 0x4301 never arrives).
  *
- * 解析顺序：
- *  1. Shizuku shell：`content query --uri content://settings/secure/bluetooth_address`
- *     （shell 身份可读系统安全设置，免 root）
- *  2. `Settings.Secure` 直读（普通应用多数机型读不到，兜底）
- * 成功结果永久缓存；失败 10 秒内不重试（避免每次连接阻塞 4 秒）。
+ * Resolution order:
+ *  1. Shizuku shell: `content query --uri content://settings/secure/bluetooth_address`
+ *     (the shell identity can read secure settings, no root)
+ *  2. Direct `Settings.Secure` read (unreadable for ordinary apps on most devices; fallback)
+ * A successful result is cached permanently; after a failure no retry for 10 seconds (avoids blocking 4 seconds per connection).
  */
 object DeviceIdentity {
     const val PLACEHOLDER_MAC = "02:00:00:00:00:00"
@@ -33,12 +33,12 @@ object DeviceIdentity {
     private var lastAttemptAtMillis = 0L
 
     /**
-     * 真实蓝牙 MAC（大写冒号格式）；解析失败返回占位。
+     * Real Bluetooth MAC (uppercase colon format); returns the placeholder if resolution fails.
      *
-     * @param forceRetry 忽略静默窗口立即重试。ctrl 广播提前到「启动连接」后，
-     *   首次注册可能赶上 Shizuku 尚未就绪、只能拿到占位值；而车机按 TXT id
-     *   （=真实蓝牙 MAC）匹配是否邀请——占位值等于永远不被邀请。广播侧检测到
-     *   占位时必须能立刻重试，而不是等满 10 秒静默窗口。
+     * @param forceRetry ignore the quiet window and retry immediately. With the ctrl broadcast moved ahead of "start connection",
+     *   the first registration may catch Shizuku not ready and only get the placeholder, while the head unit matches by
+     *   TXT id (= real Bluetooth MAC) to decide whether to invite; a placeholder means never being invited. The broadcast side
+     *   must retry at once on detecting a placeholder instead of waiting out the full 10s quiet window.
      */
     fun bluetoothMac(
         context: Context,
@@ -57,14 +57,14 @@ object DeviceIdentity {
     }
 
     /**
-     * 已解析并缓存的本机蓝牙 MAC；尚未解析成功返回 null（不触发 shell 查询）。
+     * Resolved and cached local Bluetooth MAC; null if not yet resolved (does not trigger a shell query).
      *
-     * 供 AirPlay 会话级 SETUP 这类「不能阻塞在 shell 上」的位置使用——
-     * 无线 CarPlay 的 BT 阶段必然先调用过 [bluetoothMac]，走到这里时缓存已就绪。
+     * For places such as the AirPlay session-level SETUP that "must not block on a shell":
+     * the BT phase of wireless CarPlay always called [bluetoothMac] first, so the cache is ready by the time we get here.
      */
     fun cachedBluetoothMac(): String? = cachedMac
 
-    /** 设备名（0x4E09 DeviceInformationUpdate 用；对齐真机发的是本机蓝牙名）。 */
+    /** Device name (used by 0x4E09 DeviceInformationUpdate; matches the real iPhone, which sends the local Bluetooth name). */
     fun deviceName(context: Context): String =
         try {
             context

@@ -3,45 +3,46 @@ package io.github.ezn24.cardeck.neo.iap2
 import io.github.ezn24.cardeck.neo.net.AirPlayFeatures
 
 /**
- * **车机画像**：把散落的版本/能力信号收口成一份可解释的判定。
+ * **Head unit profile**: gathers scattered version/capability signals into one explainable verdict.
  *
- * 信号来自三处、到达时机不同：0x1D01 身份帧（蓝牙 bring-up 早期）、mDNS/`/info` 的
- * features 与 srcvers（端点解析期）、实车行为（挑战长度/拆链特征，走既有 Memory 学习）。
- * 每次有新信号到达都可重算——[classify] 是纯函数，同一输入恒同一输出。
+ * Signals come from three places at different times: the 0x1D01 identity frame (early Bluetooth bring-up), mDNS//info
+ * features and srcvers (endpoint resolution), and real-car behavior (challenge length / link-drop patterns, learned by the
+ * existing Memory classes).
+ * It can be recomputed whenever a new signal arrives; [classify] is a pure function, same input always gives the same output.
  *
- * 两条铁律（HID 描述符教训的推广）：
- *  1. **按能力分支，不按版本号/品牌硬编码**——srcvers/features 只做先验提示，
- *     真正分派以能力清单（收/发清单、audioFormats、hidDescriptors）与实测行为为准；
- *  2. **判定必须可解释**——[describe] 把依据写进日志，判错时一眼能看出是哪条信号误导。
+ * Two iron rules (generalizing the HID descriptor lesson):
+ *  1. **Branch on capability, never hard-code version numbers/brands**: srcvers/features are only priors,
+ *     real dispatch follows capability lists (receive/send lists, audioFormats, hidDescriptors) and measured behavior;
+ *  2. **Verdicts must be explainable**: [describe] writes the evidence into the log so a wrong verdict shows which signal misled.
  */
 object ReceiverProfile {
-    /** 三时代（对照 catplay 分类，§9f）。UNKNOWN = 信号缺失，保持旧路径不激进。 */
+    /** Three eras (follows the catplay classification, §9f). UNKNOWN = signal missing, keep the old path and do not be aggressive. */
     enum class Era { PRE_HOMEKIT, OPTIONAL_PAIRING, MODERN, UNKNOWN }
 
-    /** WiFi 凭据交换协议代际（PR #10 的分派依据，收口进画像）。 */
+    /** WiFi credential exchange protocol generation (basis for the PR #10 dispatch, now folded into the profile). */
     enum class WifiGen { LEGACY, NEW, UNKNOWN }
 
     /**
-     * iAP2 虚拟链路代际（2026-10-23 判定，纯函数）。
+     * iAP2 virtual link generation (decided 2026-10-23, pure function).
      *
-     * **2026-10-23 二次定谳：代际不再分派 marker 行为**——所有车机都必须完成链路
-     * 协商（marker = 车机在等我们的会话表，1Hz 无限重发；不回应则链路到不了
-     * NORMAL，RECORD 后 ~10s 被拆：0.1.9 实测 10.17s、0.1.17 车主实测 10.18s）。
-     * 曾据此对 CLASSIC_MIB3 忽略 marker（0.1.16/0.1.17），其依据「0.1.9 忽略 marker
-     * 时奥迪照常进入」被 0.1.9 自己的日志推翻；「协商挂起车机 UI」的真因是协商完成
-     * 后缺 modesChanged 资源重申（AADisplay r17 时序）。判定保留用于日志与未来
-     * 分派（如 MFi 挑战长度先验、隧道内消息差异）。
+     * **Second ruling 2026-10-23: the generation no longer dispatches marker behavior.** Every head unit must complete link
+     * negotiation (marker = the head unit is waiting for our session table, resent endlessly at 1Hz; without a reply the link never reaches
+     * NORMAL and is torn down ~10s after RECORD: 0.1.9 measured 10.17s, 0.1.17 owner-measured 10.18s).
+     * We once ignored marker for CLASSIC_MIB3 (0.1.16/0.1.17); its premise, "the Audi proceeded normally when 0.1.9 ignored marker",
+     * was refuted by 0.1.9's own log. The real cause of "negotiation hangs the head unit UI" is the missing modesChanged resource
+     * re-assertion after negotiation completes (AADisplay r17 timeline). The verdict is kept for logs and future
+     * dispatch (e.g. MFi challenge length prior, in-tunnel message differences).
      *
-     * 判据（全部来自协议自报，零品牌猜测之外的新依赖）：
-     * DELPHI 制造 + AUDI 型号 + 稀疏清单（合计 <10 项，实测 2+5）→ CLASSIC_MIB3。
-     * 三条同时命中才算——单条都可能误伤（清单稀疏的其它车机、非奥迪的 DELPHI 件）。
-     * 其余一切（含未知车机）→ EVENT_LINK。
+     * Criteria (all from protocol self-reports, no new dependency beyond brand guessing):
+     * DELPHI manufacturer + AUDI model + sparse lists (fewer than 10 items combined, measured 2+5) -> CLASSIC_MIB3.
+     * All three must hit together; any single one can misfire (other head units with sparse lists, non-Audi DELPHI parts).
+     * Everything else (including unknown head units) -> EVENT_LINK.
      */
     enum class LinkGeneration { CLASSIC_MIB3, EVENT_LINK }
 
     /**
-     * 从 0x1D01 自报信号判定链路代际（见 [LinkGeneration] 文档）。
-     * 信号不足（清单未提供/身份缺失）→ EVENT_LINK（0.1.13 前兼容行为）。
+     * Decide the link generation from 0x1D01 self-reported signals (see the [LinkGeneration] docs).
+     * Insufficient signal (lists not provided / identity missing) -> EVENT_LINK (pre-0.1.13 compatible behavior).
      */
     fun linkGenerationOf(signals: Signals): LinkGeneration {
         val manufacturer = signals.manufacturer?.lowercase().orEmpty()
@@ -56,27 +57,27 @@ object ReceiverProfile {
         }
     }
 
-    /** 画像输入：全字段可空——信号到多少算多少。 */
+    /** Profile input: every field is nullable, use whatever signals have arrived. */
     data class Signals(
         val name: String? = null,
         val model: String? = null,
         val manufacturer: String? = null,
-        /** AirPlay features 位图（mDNS TXT / /info）；null = 未取到。 */
+        /** AirPlay features bitmap (mDNS TXT / /info); null = not obtained. */
         val features: Long? = null,
-        /** AirPlay 栈版本（mDNS TXT srcvers / 0x4301 sourceVersion）。 */
+        /** AirPlay stack version (mDNS TXT srcvers / 0x4301 sourceVersion). */
         val srcvers: String? = null,
-        /** 0x1D01 参数 6：车机声明「会发送」的消息号清单；null = 未提供。 */
+        /** 0x1D01 param 6: list of message IDs the head unit declares it will SEND; null = not provided. */
         val sendIds: Set<Int>? = null,
-        /** 0x1D01 参数 7：车机声明「可接收」的消息号清单；null = 未提供。 */
+        /** 0x1D01 param 7: list of message IDs the head unit declares it can RECEIVE; null = not provided. */
         val receiveIds: Set<Int>? = null,
     )
 
     data class Profile(
         val era: Era,
         val wifiGen: WifiGen,
-        /** 身份键（与 MfiLengthMemory/AudioProfileMemory 同源，后续 Memory 并表用）。 */
+        /** Identity key (same source as MfiLengthMemory/AudioProfileMemory, for merging later Memory tables). */
         val identityKey: String,
-        /** 判定依据（可解释性：每条结论对应的信号原文）。 */
+        /** Evidence (explainability: the original signal behind each conclusion). */
         val reasons: List<String>,
     )
 
@@ -87,46 +88,48 @@ object ReceiverProfile {
             when {
                 pairing == null -> Era.UNKNOWN
                 !pairing -> {
-                    reasons += "features(${signals.features?.let { "0x${it.toString(16)}" } ?: "?"}) 无 bit38=HK_PAIRING_AND_ENCRYPT"
+                    reasons += "features(${signals.features?.let { "0x${it.toString(16)}" } ?: "?"}) has no bit38=HK_PAIRING_AND_ENCRYPT"
                     Era.PRE_HOMEKIT
                 }
 
                 else -> {
-                    reasons += "features bit38=HK_PAIRING_AND_ENCRYPT 已声明"
+                    reasons += "features bit38=HK_PAIRING_AND_ENCRYPT declared"
                     Era.MODERN
                 }
             }
         if (signals.srcvers != null) reasons += "srcvers=${signals.srcvers}"
         if (era != Era.PRE_HOMEKIT && signals.srcvers != null) {
-            // 先验提示（不改变判定）：老版本号 + 未声明配对 → v280 可选配对档
+            // Prior hint (does not change the verdict): old version number + no pairing declared -> v280 optional-pairing tier
             val v = signals.srcvers.toDoubleOrNull()?.let { (it * 100).toInt() } ?: 0
-            if (v in 1..36599 && era == Era.UNKNOWN) reasons += "srcvers 提示 v280 可选配对档（仅先验）"
+            if (v in 1..36599 && era == Era.UNKNOWN) reasons += "srcvers hints v280 optional-pairing tier (prior only)"
         }
 
         val wifiGen =
             when {
                 signals.sendIds == null && signals.receiveIds == null -> {
-                    reasons += "0x1D01 未提供收/发清单"
+                    reasons += "0x1D01 provided no receive/send lists"
                     WifiGen.UNKNOWN
                 }
 
                 signals.sendIds?.contains(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION) == true ||
                     signals.receiveIds?.contains(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION) == true -> {
-                    reasons += "清单声明 0x5703/0x5702（旧协议在场）"
+                    reasons += "lists declare 0x5703/0x5702 (legacy protocol present)"
                     WifiGen.LEGACY
                 }
 
                 (signals.sendIds?.size ?: 0) + (signals.receiveIds?.size ?: 0) >= 10 -> {
-                    // 清单齐且相当完整仍无 0x5703/0x5702——BMW iD9 形态（两清单均 10+ 项）。
-                    // 不能仅凭「未声明」判新：奥迪清单只列 CarPlay 生命周期消息（实测
-                    // 发送清单 2 项/可收 5 项，均无 0x57xx），但旧协议工作正常——
-                    // 稀疏清单不算数，保守 UNKNOWN 走旧协议（0x5703 有超时兜底）
-                    reasons += "清单完整（${(signals.sendIds?.size ?: 0) + (signals.receiveIds?.size ?: 0)} 项）仍无 0x5703/0x5702——AP 信息由 0x4301 提供"
+                    // Lists complete and fairly full yet no 0x5703/0x5702: BMW iD9 shape (both lists 10+ items).
+                    // "Not declared" alone must not mean new: the Audi list only has CarPlay lifecycle messages (measured
+                    // send list 2 items / receive list 5 items, none 0x57xx) yet the legacy protocol works fine, so
+                    // sparse lists do not count; conservative UNKNOWN keeps the legacy path (0x5703 has a timeout fallback)
+                    reasons += "lists complete (${(signals.sendIds?.size ?: 0) + (signals.receiveIds?.size ?: 0)} items) yet no " +
+                        "0x5703/0x5702; AP info comes from 0x4301"
                     WifiGen.NEW
                 }
 
                 (signals.sendIds != null || signals.receiveIds != null) -> {
-                    reasons += "清单稀疏且未声明 0x5703/0x5702——不构成「新协议」证据，保守按旧协议（超时兜底）"
+                    reasons += "lists sparse and 0x5703/0x5702 not declared: not evidence of a \"new protocol\", conservatively " +
+                        "treated as legacy (timeout fallback)"
                     WifiGen.UNKNOWN
                 }
 
@@ -135,7 +138,7 @@ object ReceiverProfile {
         return Profile(era, wifiGen, identityKeyOf(signals), reasons)
     }
 
-    /** 身份原文（name+model+manufacturer，与 0x1D01 逐字一致；空档跳过）。 */
+    /** Original identity text (name+model+manufacturer, verbatim as in 0x1D01; skipped when empty). */
     fun identityKeyOf(signals: Signals): String =
         listOfNotNull(
             signals.name?.takeIf { it.isNotBlank() },
@@ -143,8 +146,8 @@ object ReceiverProfile {
             signals.manufacturer?.takeIf { it.isNotBlank() },
         ).joinToString(" ").ifBlank { "unknown" }
 
-    /** 一行可读判定（进文件日志）。 */
+    /** One readable verdict line (goes to the file log). */
     fun describe(profile: Profile): String =
         "PROFILE: era=${profile.era} wifiGen=${profile.wifiGen} key=${MfiLengthMemory.receiverKey(profile.identityKey)}" +
-            " 依据[" + profile.reasons.joinToString("；") + "]"
+            " evidence[" + profile.reasons.joinToString("; ") + "]"
 }

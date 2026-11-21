@@ -11,15 +11,15 @@ import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * mDNS 服务发现：找到接收端（车机/xcertplay）广播的 _airplay._tcp，
- * 解析出 AirPlay 端点与 TXT 记录（deviceid/features/pi/pk/model…）。
+ * mDNS service discovery: finds the _airplay._tcp advertised by the receiver (head unit/xcertplay)
+ * and resolves the AirPlay endpoint and TXT records (deviceid/features/pi/pk/model...).
  *
- * 真实时序中这一步发生在加入车机热点之后、发起 AirPlay 主会话之前。
+ * In the real sequence this step happens after joining the head unit hotspot and before starting the AirPlay main session.
  */
 class CarPlayServiceBrowser(
     context: Context,
     private val log: (String) -> Unit,
-    /** 结果验收：只缓存/上报真正的车机端点（手机双归属时 mDNS 会混入其它 AirPlay 设备）。 */
+    /** Result acceptance: only cache/report real head unit endpoints (on a dual-homed phone mDNS mixes in other AirPlay devices). */
     private val accept: (NsdServiceInfo) -> Boolean = { true },
     private val onEndpoint: (NsdServiceInfo) -> Unit = {},
 ) {
@@ -40,21 +40,22 @@ class CarPlayServiceBrowser(
     private var discovering = false
 
     /**
-     * 已解析到的 `_airplay._tcp`（本网段）。在加入车机热点的瞬间就开始后台发现，
-     * 到真正需要端点地址时通常已命中——对照 catplay：它用常驻 Bonjour cache +
-     * `watch`，收到 ctrl 邀请时地址现成；我们此前才在配对前现查，白等好几秒。
+     * The resolved `_airplay._tcp` (on this subnet). Background discovery starts the instant the head unit hotspot is joined,
+     * so by the time the endpoint address is really needed it has usually hit. Compare catplay: it keeps a resident Bonjour cache +
+     * `watch`, so the address is ready when the ctrl invitation arrives; we used to query right before pairing and waited several
+     * seconds for nothing.
      */
     @Volatile
     private var resolved: NsdServiceInfo? = null
 
-    /** 新会话开始时清掉上一轮缓存（车机可能换了地址/端口）。 */
+    /** Clear the previous round's cache when a new session starts (the head unit may have changed address/port). */
     fun resetCache() {
         resolved = null
     }
 
     /**
-     * 等已解析结果（轮询缓存）。返回 null = 超时仍未发现。
-     * 调用方通常在等待期间继续做别的事（绑定网络、握手），不是纯粹的阻塞 sleep。
+     * Wait for a resolved result (polling the cache). Returns null = still not discovered at timeout.
+     * Callers usually keep doing other things while waiting (binding the network, handshakes); this is not a pure blocking sleep.
      */
     fun awaitEndpoint(timeoutMillis: Long): NsdServiceInfo? {
         val deadline = android.os.SystemClock.uptimeMillis() + timeoutMillis
@@ -71,10 +72,10 @@ class CarPlayServiceBrowser(
 
     fun start(serviceType: String = AIRPLAY_TYPE) {
         if (discovering) {
-            log("$TAG: 已在扫描中")
+            log("$TAG: already scanning")
             return
         }
-        log("$TAG: 开始发现 $serviceType")
+        log("$TAG: starting discovery of $serviceType")
         nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
         discovering = true
     }
@@ -83,7 +84,7 @@ class CarPlayServiceBrowser(
         if (!discovering) return
         runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
         discovering = false
-        log("$TAG: 停止发现")
+        log("$TAG: stopping discovery")
     }
 
     private val discoveryListener =
@@ -93,14 +94,14 @@ class CarPlayServiceBrowser(
                 errorCode: Int,
             ) {
                 discovering = false
-                log("$TAG: 发现启动失败 code=$errorCode")
+                log("$TAG: discovery start failed code=$errorCode")
             }
 
             override fun onStopDiscoveryFailed(
                 serviceType: String,
                 errorCode: Int,
             ) {
-                log("$TAG: 停止失败 code=$errorCode")
+                log("$TAG: stop failed code=$errorCode")
             }
 
             override fun onDiscoveryStarted(serviceType: String) = Unit
@@ -108,12 +109,12 @@ class CarPlayServiceBrowser(
             override fun onDiscoveryStopped(serviceType: String) = Unit
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                log("$TAG: 发现服务 ${serviceInfo.serviceName} (${serviceInfo.serviceType})，解析中…")
+                log("$TAG: service found ${serviceInfo.serviceName} (${serviceInfo.serviceType}), resolving...")
                 resolveWithRetry(serviceInfo, attempts = 3)
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
-                log("$TAG: 服务消失 ${serviceInfo.serviceName}")
+                log("$TAG: service lost ${serviceInfo.serviceName}")
             }
         }
 
@@ -138,7 +139,7 @@ class CarPlayServiceBrowser(
                             resolveWithRetry(info, attempts - 1)
                         }.start()
                     } else {
-                        log("$TAG: 解析失败 ${info.serviceName} code=$errorCode")
+                        log("$TAG: resolve failed ${info.serviceName} code=$errorCode")
                         if (adapter && settled.compareAndSet(false, true)) {
                             deliverAdapterFallback(info, "resolve failed code=$errorCode")
                         }
@@ -180,9 +181,9 @@ class CarPlayServiceBrowser(
                         .orEmpty()
                 "$key=$text"
             }
-        // 验收放在缓存之前：非车机端点（如同一 WiFi 上的 Mac）不得污染 awaitEndpoint
+        // Acceptance goes before the cache: non-head-unit endpoints (such as a Mac on the same WiFi) must not pollute awaitEndpoint
         val accepted = accept(info)
-        log("$TAG: OK ${info.serviceName} -> $host:${info.port}${if (accepted) "" else "（非车机，忽略）"}")
+        log("$TAG: OK ${info.serviceName} -> $host:${info.port}${if (accepted) "" else " (not a head unit, ignored)"}")
         if (txt.isNotEmpty()) log("$TAG: TXT $txt")
         if (accepted) resolved = info
         onEndpoint(info)

@@ -1,6 +1,6 @@
 package io.github.ezn24.cardeck.neo.render
 
-/** 不依赖 Android 的时间曲线；中途反向从当前值起步，避免快速切屏跳变。 */
+/** Android-independent time curve; reversing midway starts from the current value, avoiding jumps on fast display switching. */
 internal data class LayoutMotion(
     val from: Float,
     val to: Float,

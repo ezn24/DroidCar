@@ -20,12 +20,12 @@ import io.github.ezn24.cardeck.neo.ui.WallpaperStore
 import io.github.ezn24.cardeck.neo.util.Bg
 import java.util.concurrent.atomic.AtomicInteger
 
-/** 一张有时限的车机通知；绘字和读取其他 APK 资源都在后台，不保存通知内容。 */
+/** A time-limited car notification; text drawing and reading other APK resources happen in the background; notification content is not stored. */
 object NotificationBannerController {
-    /** 往上滑超过这个距离（流像素）= 关掉横幅。 */
+    /** Swiping up beyond this distance (stream pixels) = dismiss the banner. */
     private const val SWIPE_DISMISS_PX = 30f
 
-    /** 进场（从上方滑入）/ 出场（往上滑出）时长，毫秒。 */
+    /** Duration of enter (slide in from above) / exit (slide out upward), in milliseconds. */
     private const val ENTER_MS = 320L
     private const val EXIT_MS = 220L
     private const val FRAME_MS = 16L
@@ -40,10 +40,10 @@ object NotificationBannerController {
 
     @Volatile private var component: ComponentName? = null
 
-    /** 横幅停稳后的位置；动画帧都由它挪出来。 */
+    /** Resting position of the banner once settled; animation frames are moved off it. */
     @Volatile private var target: OverlayCard? = null
 
-    /** × 的命中区（输出画面坐标）。 */
+    /** Hit area of the x button (output-frame coordinates). */
     @Volatile private var closeZone: android.graphics.RectF? = null
 
     @Volatile private var leaving = false
@@ -59,7 +59,7 @@ object NotificationBannerController {
         sbn: StatusBarNotification,
     ) {
         if (VirtualLauncher.appContext() == null || !DisplayPrefs.showCarNotifications(context)) return
-        // 独立的「通知 App」名单：空 = 全部；否则只放行名单内的 App
+        // Separate "notification apps" list: empty = all; otherwise only apps in the list pass
         val allowed = DisplayPrefs.notificationApps(context)
         if (allowed.isNotEmpty() && sbn.packageName !in allowed) return
         val notification = sbn.notification
@@ -122,7 +122,7 @@ object NotificationBannerController {
                 expiry?.let { handler.removeCallbacks(it) }
                 key = sbn.key
                 component = launch
-                // 已有横幅在显示 → 原位换内容；否则从画面上方滑入
+                // A banner is already showing -> swap the content in place; otherwise slide in from above
                 val from = if (card != null && !leaving) next.top else -next.bitmap.height.toFloat()
                 target = next
                 closeZone = zone
@@ -135,8 +135,9 @@ object NotificationBannerController {
     }
 
     /**
-     * CarPlay 式横幅：左侧圆角 App 图标；右侧首行 App 名 + 「现在」，次行粗体标题，末行内容。
-     * 深浅色跟随手机（与车机壁纸、车机设置同一判据），半透明底 + 柔和投影。
+     * CarPlay-style banner: rounded app icon on the left; on the right the first row is app name + "now", the second a bold title, the
+     * last the content.
+     * Light/dark follows the phone (same criterion as car wallpaper and car settings), translucent background + soft shadow.
      */
     private fun renderBanner(
         scale: Float,
@@ -189,7 +190,7 @@ object NotificationBannerController {
         val textLeft = iconLeft + iconSize + 12f * scale
         val textRight = card.right - pad
 
-        // 右上角关闭键：小圆底 + ×
+        // Top-right close button: small round background + x
         val closeD = 24f * scale
         val closeCx = card.right - 12f * scale - closeD / 2f
         val closeCy = card.top + 12f * scale + closeD / 2f
@@ -204,7 +205,7 @@ object NotificationBannerController {
         canvas.drawLine(closeCx - arm, closeCy - arm, closeCx + arm, closeCy + arm, paint)
         canvas.drawLine(closeCx - arm, closeCy + arm, closeCx + arm, closeCy - arm, paint)
         paint.style = Paint.Style.FILL
-        // 命中区比图形大（车机上手指粗）：右上角一块方形
+        // Hit area larger than the glyph (fingers are thick on the car): a square at the top-right
         val hit = 56f * scale
         val closeRect = android.graphics.RectF(card.right - hit, card.top, card.right + shadow, card.top + hit)
 
@@ -243,7 +244,7 @@ object NotificationBannerController {
         if (key == notificationKey) dismiss()
     }
 
-    /** 往上滑出后清掉；会话结束等需要立即消失的场合用 [clear]。 */
+    /** Cleared after sliding out upward; use [clear] when it must vanish at once (e.g. session end). */
     fun dismiss() {
         handler.post {
             val current = card ?: return@post
@@ -272,7 +273,7 @@ object NotificationBannerController {
         VirtualLauncher.setNotificationOverlay(null)
     }
 
-    /** 在主线程按帧挪动横幅：只换位置与透明度，位图不变（合成器不重传纹理）。 */
+    /** Move the banner per frame on the main thread: only position and alpha change, the bitmap stays (compositor does not re-upload the texture). */
     private fun animate(
         token: Int,
         from: Float,
@@ -291,7 +292,7 @@ object NotificationBannerController {
                     val t = ((android.os.SystemClock.uptimeMillis() - start) / durationMs.toFloat()).coerceIn(0f, 1f)
                     val k = if (easeOut) 1f - (1f - t) * (1f - t) * (1f - t) else t * t * t
                     val top = from + (to - from) * k
-                    // 进场由半透明变实，出场变淡
+                    // Fade from translucent to opaque on enter, fade out on exit
                     val alpha = if (easeOut) 0.4f + 0.6f * k else 1f - 0.6f * k
                     val next = base.moved(top, alpha)
                     card = next

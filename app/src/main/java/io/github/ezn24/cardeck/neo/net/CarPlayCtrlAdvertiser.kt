@@ -14,14 +14,15 @@ import java.net.ServerSocket
 import java.net.Socket
 
 /**
- * 广播手机侧（iPhone 角色）的 _carplay-ctrl._tcp 控制服务并应答接收端探测。
+ * Advertises the phone-side (iPhone role) _carplay-ctrl._tcp control service and answers receiver probes.
  *
- * 无线 CarPlay 中接收端发现该服务后会反连此端口，先发
- * `GET /ctrl-int/1/connect`（携带 AirPlay-Receiver-Device-ID）探测手机是否在线，
- * 期待 HTTP 200（对照 xcertplay CarPlayBonjour.probeOnce：只读状态行）。
- * 探测通过后，iAP2 控制会话经 AirPlay 事件通道的 type-130 隧道接管（Phase 2 后续）。
+ * In wireless CarPlay the receiver connects back to this port after discovering the service, first sending
+ * `GET /ctrl-int/1/connect` (carrying AirPlay-Receiver-Device-ID) to probe whether the phone is online,
+ * and expects HTTP 200 (follows xcertplay CarPlayBonjour.probeOnce: only the status line is read).
+ * After the probe passes, the iAP2 control session is taken over through the type-130 tunnel on the AirPlay event channel (Phase 2
+ * follow-up).
  *
- * 本类同时把每个连接的请求行打进日志——DiPlay 后续发什么会直接可见。
+ * This class also logs the request line of every connection, so whatever DiPlay sends next is directly visible.
  */
 class CarPlayCtrlAdvertiser(
     private val context: Context,
@@ -31,27 +32,30 @@ class CarPlayCtrlAdvertiser(
         const val SERVICE_TYPE = "_carplay-ctrl._tcp"
 
         /**
-         * 发送端在 ctrl TXT 里自报的版本。
+         * Version the sender self-reports in the ctrl TXT.
          *
-         * **必须保持 950.7.1**：2026-10-19 奥迪 MMI 3315 实车对照定谳——改成 catplay 的
-         * 566.25.21（发送端 SDK 版本）后，车机**连 ctrl-int 探测都不再发**、0x4301 永不到达；
-         * 用 950.7.1 时同一台车 0.65 秒内就下发 0x4301。车机在 WiFi 上只看得到这个 TXT，
-         * 它显然是按「接收端/系统广播常见版本」来判断对方形态的。
+         * **Must stay 950.7.1**: ruled on a real Audi MMI 3315, 2026-10-19: after changing to catplay's
+         * 566.25.21 (sender SDK version) the head unit **stopped sending even the ctrl-int probe** and 0x4301 never arrived;
+         * with 950.7.1 the same car sent 0x4301 within 0.65s. The head unit only sees this TXT over WiFi,
+         * and evidently judges the peer's kind by "versions common to receivers/system broadcasts".
          */
         private const val SENDER_SRCVERS = "950.7.1"
 
         /**
-         * ctrl 服务实例名。同理保持 0.1.6 的 `sender`：改名为 `iPhone` 与上一条同时生效，
-         * 无法从单次日志区分归因，故一并回退到已验证可用的组合（2026-10-19）。
+         * ctrl service instance name. Likewise keep the 0.1.6 `sender`: renaming to `iPhone` took effect together with the previous change,
+         * so a single log could not attribute the cause; both were reverted to the combination verified to work (2026-10-19).
          */
         private const val SERVICE_NAME = "sender"
 
-        /** 测试可见：这两个值经真车验证，改动需先复测（见 CarPlayCtrlAdvertiserTest）。 */
+        /**
+         * Visible to tests: these two values were verified on a real car, so changes need a retest first (see
+         * CarPlayCtrlAdvertiserTest).
+         */
         internal fun advertisedSrcversForTest(): String = SENDER_SRCVERS
 
         internal fun advertisedServiceNameForTest(): String = SERVICE_NAME
 
-        /** 测试可见：本类实际广播的服务类型全集（目前只有 ctrl；_device-info 已移除）。 */
+        /** Visible to tests: the full set of service types this class really advertises (only ctrl now; _device-info was removed). */
         internal fun advertisedServiceTypesForTest(): List<String> = listOf(SERVICE_TYPE)
 
         private const val CLOSE_RESPONSE = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -89,14 +93,14 @@ class CarPlayCtrlAdvertiser(
         private const val TAG = "CTRL"
         private const val MAX_HEAD_BYTES = 16 * 1024
 
-        /** 同一 SSID 的强制重注册冷却（见 ensureForNetwork）。 */
+        /** Cooldown for a forced re-registration on the same SSID (see ensureForNetwork). */
         private const val FORCE_COOLDOWN_MILLIS = 2_000L
     }
 
     private var serverSocket: ServerSocket? = null
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
 
-    /** accept 线程是否继续（只有 [stop] 清零；重注册不碰它，端口与线程都保持）。 */
+    /** Whether the accept thread continues (only [stop] clears it; re-registration does not touch it, so port and thread persist). */
     @Volatile
     private var acceptRunning = false
 
@@ -104,17 +108,17 @@ class CarPlayCtrlAdvertiser(
     private var registered = false
 
     /**
-     * 车机 ctrl 邀请计数（每次 `GET /ctrl-int/1/connect` 加一）。
+     * Head unit ctrl invitation counter (incremented on every `GET /ctrl-int/1/connect`).
      *
-     * catplay 发送端的连接触发点就是这条邀请：它代表「车机已发现我们、并打开了
-     * AirPlay 窗口」，收到后立即连 AirPlay，不做固定 sleep。主控据此替代
-     * 原先「交接端点后睡 1.6s」的时序猜测。
+     * The connect trigger of the catplay sender is exactly this invitation: it means "the head unit has discovered us and opened
+     * its AirPlay window", and AirPlay is connected right after receiving it with no fixed sleep. The controller uses it in place of
+     * the earlier "sleep 1.6s after endpoint handoff" timing guess.
      */
     @Volatile
     var inviteCount: Int = 0
         private set
 
-    /** 新一轮连接开始时清零（避免把上一轮的邀请当成本轮信号）。 */
+    /** Cleared when a new connection round starts (so a previous round's invitation is not taken as this round's signal). */
     fun resetInviteCount() {
         inviteCount = 0
     }
@@ -136,39 +140,47 @@ class CarPlayCtrlAdvertiser(
     @Volatile
     var onInvite: ((peer: String?) -> Unit)? = null
 
-    /** 注册时的 WiFi SSID：换网（2.4G→5G 或车机热点切换）后旧注册不可见，需重新注册。 */
+    /**
+     * WiFi SSID at registration time: after a network change (2.4G -> 5G or a head unit hotspot switch) the old registration is
+     * invisible and must be redone.
+     */
     private var registeredSsid: String? = null
 
-    /** 当前生效的注册监听器（每次 start 换新实例，避免 already-in-use）。 */
+    /** Currently active registration listener (a fresh instance on every start, avoiding already-in-use). */
     private var activeListener: NsdManager.RegistrationListener? = null
 
-    /** 本次注册时刻（force 冷却判定用）。 */
+    /** Time of this registration (for the force cooldown check). */
     @Volatile
     private var registeredAtMillis: Long = 0L
 
-    /** 本次注册写入 TXT 的 MAC（占位值 = 车机不会邀请，需尽快重注册）。 */
+    /** MAC written into the TXT at this registration (placeholder = the head unit will not invite us, re-register soon). */
     @Volatile
     private var registeredWithMac: String? = null
 
-    /** 本次注册时进程所处的网络（用于判断「绑定后是否需要重注册」）。 */
+    /** Network the process was on at this registration (to decide "whether to re-register after binding"). */
     private var registeredNetwork: android.net.Network? = null
 
     val port: Int get() = serverSocket?.localPort ?: -1
 
-    /** 当前广播的 TXT id 是否是占位 MAC（车机据此匹配手机，占位则永不邀请）。 */
+    /**
+     * Whether the TXT id currently advertised is a placeholder MAC (the head unit matches phones by it; a placeholder is never
+     * invited).
+     */
     val macPlaceholder: Boolean
         get() = registeredWithMac == DeviceIdentity.PLACEHOLDER_MAC
 
     /**
-     * 确保广播在指定 SSID 的网络上可见（每次会话拿到 0x5703 时调用）。
-     * 真车实测（2026-10-11）：手机从 2.4G 换到 5G 热点后，旧 mDNS 注册
-     * 不再被车机看到（车机不再发 ctrl-int 探测 → 不开 AirPlay 窗口）。
-     * SSID 变化时先注销再重新注册，让广播落到当前网络。
+     * Ensure the advertisement is visible on the network of the given SSID (called whenever a session obtains 0x5703).
+     * Real car measured (2026-10-11): after the phone moved from a 2.4G to a 5G hotspot, the old mDNS registration
+     * was no longer seen by the head unit (no more ctrl-int probes -> AirPlay window not opened).
+     * On an SSID change, unregister then register again so the advertisement lands on the current network.
      *
-     * @param force true = 无条件重新注册（用于「绑定进程网络后」的时机修正：
-     *   mDNS 组播跟随 bindProcessToNetwork 的网络，注册必须发生在绑定之后）。
-     * @param network 绑定的进程网络；与上次注册时的网络不同则必须重注册（不受冷却限制）——
-     *   否则「刚注册完就切到车机热点」时那 2s 冷却会把关键的绑定后重注册吞掉。
+     * @param force true = re-register unconditionally (timing fix "after binding the process network":
+     *   mDNS multicast follows the network of bindProcessToNetwork, so registration must happen after binding).
+     * @param network the bound process network; if it differs from the one at the last registration we must re-register (cooldown
+     * does not apply),
+     * otherwise the 2s cooldown would swallow the crucial post-binding re-registration when "switching to the car hotspot right
+     * after registering".
      */
     @Synchronized
     fun ensureForNetwork(
@@ -177,10 +189,10 @@ class CarPlayCtrlAdvertiser(
         network: android.net.Network? = null,
     ): Boolean {
         if (registered && registeredSsid == ssid && !force && !macPlaceholder) return true
-        // force 冷却：绑定后的一连串「确保」调用（bindCarWifiAndRegister → 端点交接）
-        // 常在同一秒内发生，逐次 unregister+register 会撞 NsdManager 的
-        // listener-already-in-use 并吃 1.2s 重试，反而拖慢连接。
-        // 例外：广播里的 MAC 是占位值、或进程网络已变都不能放过。
+        // Force cooldown: the series of "ensure" calls after binding (bindCarWifiAndRegister -> endpoint handoff)
+        // often happen within the same second, and an unregister+register each time hits NsdManager's
+        // listener-already-in-use and eats a 1.2s retry, which slows the connection instead.
+        // Exceptions: a placeholder MAC in the advertisement, or a changed process network, must not be skipped.
         val sameNetwork = network == null || network == registeredNetwork
         if (force &&
             registered &&
@@ -189,24 +201,27 @@ class CarPlayCtrlAdvertiser(
             sameNetwork &&
             SystemClock.uptimeMillis() - registeredAtMillis < FORCE_COOLDOWN_MILLIS
         ) {
-            log("$TAG: 跳过重复的强制重注册（${SystemClock.uptimeMillis() - registeredAtMillis}ms 前刚注册）")
+            log("$TAG: skipping duplicate forced re-registration (registered ${SystemClock.uptimeMillis() - registeredAtMillis}ms ago)")
             return true
         }
         if (registered) {
-            log("$TAG: 重新注册 mDNS 广播（${registeredSsid ?: "?"}${if (force) "，绑定后时机修正" else " → $ssid"}）")
-            // 只注销服务、**保留监听端口**：Android NSD 没有 catplay/JmDNS 的
-            // reannounce()，重发公告只能注销+重注册；若同时换端口，车机按缓存端口
-            // 探测就会连到已关闭的 socket（xcertplay 车机侧每会话 7 次 ×1.5s 探测，
-            // 中途换端口整轮作废）。2026-10-22 奥迪日志里端口在 6 次重注册中一路跳
-            // （43857→33383→33125→38151→40697→38015），每次都有最长 1.2s 空窗。
+            log(
+                "$TAG: re-registering mDNS advertisement " +
+                    "(${registeredSsid ?: "?"}${if (force) ", post-binding timing fix" else " -> $ssid"})",
+            )
+            // Unregister the service only and **keep the listening port**: Android NSD has no catplay/JmDNS
+            // reannounce(), so re-announcing means unregister+register; if the port changed too, a head unit probing the cached port
+            // would hit a closed socket (xcertplay as head unit probes 7 times x 1.5s per session,
+            // and a mid-way port change voids the whole round). In the Audi log of 2026-10-22 the port jumped over 6 re-registrations
+            // (43857->33383->33125->38151->40697->38015), each with a service gap of up to 1.2s.
             unregisterServiceOnly()
         }
         registeredSsid = ssid
         registeredNetwork = network ?: registeredNetwork
         var ok = start()
         if (!ok) {
-            // 注销是异步的：极端情况下 registerService 会遇到 "listener already in use"，
-            // 稍候重试一次（真车实测 10-11：300ms 不够，需要更长）
+            // Unregistering is asynchronous: in extreme cases registerService hits "listener already in use",
+            // so retry once after a short wait (real car measured 10-11: 300ms is not enough, a longer wait is needed)
             try {
                 Thread.sleep(1_200)
             } catch (_: InterruptedException) {
@@ -220,8 +235,8 @@ class CarPlayCtrlAdvertiser(
     fun start(): Boolean {
         if (registered) return true
         return try {
-            // 端口在整个 advertiser 生命周期内固定：重注册只换 mDNS 注册、复用同一个
-            // socket 与 accept 线程（见 ensureForNetwork 的注释）。
+            // The port is fixed for the whole advertiser lifetime: re-registration only swaps the mDNS registration and reuses the same
+            // socket and accept thread (see the ensureForNetwork comment).
             val socket =
                 serverSocket ?: ServerSocket(0).also { created ->
                     serverSocket = created
@@ -231,52 +246,60 @@ class CarPlayCtrlAdvertiser(
                         start()
                     }
                 }
-            // 占位 MAC 时强制重试一次（启动连接即发布广播时，Shizuku 可能还没就绪；
-            // 广播内容错了车机就永远不会邀请我们）
+            // With a placeholder MAC, force one retry (when the advertisement is published as soon as the connection starts,
+            // Shizuku may not be ready;
+            // a wrong advertisement means the head unit never invites us)
             var mac = DeviceIdentity.bluetoothMac(context)
             if (mac == DeviceIdentity.PLACEHOLDER_MAC) {
                 mac = DeviceIdentity.bluetoothMac(context, forceRetry = true)
-                log("$TAG: 蓝牙 MAC 解析为占位值，已强制重试${if (mac == DeviceIdentity.PLACEHOLDER_MAC) "（仍未成功——车机可能不会邀请，请确认 Shizuku 已启动）" else "成功"}")
+                val retryResult =
+                    if (mac == DeviceIdentity.PLACEHOLDER_MAC) {
+                        "still failed (the head unit may not invite us; make sure Shizuku is running)"
+                    } else {
+                        "succeeded"
+                    }
+                log("$TAG: Bluetooth MAC resolved to the placeholder, forced retry $retryResult")
             }
             val info =
                 NsdServiceInfo().apply {
                     serviceName = SERVICE_NAME
                     serviceType = SERVICE_TYPE
                     setPort(socket.localPort)
-                    // TXT id = 本机真实蓝牙 MAC（catplay CarPlayInviter 实证：车机按此
-                    // 匹配待邀请的手机，占位值会导致车机永远不邀请 → 0x4301 永不到达）。
+                    // TXT id = the real Bluetooth MAC of this phone (confirmed by catplay CarPlayInviter: the head unit matches
+                    // the phone to invite by it, and a placeholder makes the head unit never invite -> 0x4301 never arrives).
                     setAttribute("id", mac)
                     setAttribute("srcvers", SENDER_SRCVERS)
                 }
-            // 每次注册用全新 listener：unregisterService 是异步的，复用同一个 listener
-            // 会撞上 "listener already in use"（真车实测 10-11 卡住 ctrl 广播）
+            // Use a brand-new listener for every registration: unregisterService is asynchronous, and reusing one listener
+            // hits "listener already in use" (real car measured 10-11: it blocked the ctrl advertisement)
             val freshListener = createListener()
             activeListener = freshListener
             nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, freshListener)
             registered = true
             registeredAtMillis = SystemClock.uptimeMillis()
             registeredWithMac = mac
-            // 车机在 WiFi 上唯一可见的手机身份就是这几个 TXT 字段：占位 MAC / 版本不符都会
-            // 直接导致「不发 ctrl 探测、0x4301 永不到达」，而此前日志完全看不到它们
-            // （2026-10-19 奥迪 0.1.7 排查时无法归因），故每次注册都打一行。
+            // The only phone identity the head unit sees over WiFi is these TXT fields: a placeholder MAC / wrong version both
+            // directly cause "no ctrl probe, 0x4301 never arrives", and earlier logs showed none of them
+            // (could not attribute the cause in the Audi 0.1.7 investigation of 2026-10-19), so one line is logged on every registration.
             log(
-                "$TAG: 已监听 :${socket.localPort}，广播 $SERVICE_TYPE " +
+                "$TAG: listening on :${socket.localPort}, advertising $SERVICE_TYPE " +
                     "name=$SERVICE_NAME id=$mac srcvers=$SENDER_SRCVERS" +
-                    if (mac == DeviceIdentity.PLACEHOLDER_MAC) "（⚠ 占位 MAC：车机不会邀请）" else "",
+                    if (mac == DeviceIdentity.PLACEHOLDER_MAC) " (WARNING placeholder MAC: the head unit will not invite)" else "",
             )
             if (mac == DeviceIdentity.PLACEHOLDER_MAC) {
-                // 占位 id 车机不会邀请：后台等 Shizuku/MAC 就绪后立刻重注册，
-                // 别让「广播提前到启动连接」反而把 TXT id 写错（2026-10-18）。
+                // A head unit never invites with a placeholder id: wait in the background for Shizuku/MAC to be ready, then
+                // re-register at once,
+                // so that "advertising as early as connection start" does not end up writing a wrong TXT id (2026-10-18).
                 Bg.run("ctrl-mac-repair") { repairPlaceholderMac() }
             }
             true
         } catch (error: Exception) {
-            log("$TAG: 启动失败 - ${error.message}")
+            log("$TAG: start failed - ${error.message}")
             false
         }
     }
 
-    /** 占位 MAC 的自我修复：每 2s 重试解析，成功后按当前 SSID 重注册一次。 */
+    /** Self-repair of a placeholder MAC: retry resolving every 2s and re-register once for the current SSID on success. */
     private fun repairPlaceholderMac() {
         repeat(15) {
             try {
@@ -287,11 +310,14 @@ class CarPlayCtrlAdvertiser(
             if (!registered || !macPlaceholder) return
             val mac = DeviceIdentity.bluetoothMac(context, forceRetry = true)
             if (mac == DeviceIdentity.PLACEHOLDER_MAC) return@repeat
-            log("$TAG: 蓝牙 MAC 已解析为 $mac——重新注册 ctrl 广播（修复占位 id）")
+            log("$TAG: Bluetooth MAC resolved to $mac; re-registering the ctrl advertisement (fixing the placeholder id)")
             ensureForNetwork(registeredSsid ?: "", force = true)
             return
         }
-        log("$TAG: 30s 内未能解析真实蓝牙 MAC——ctrl 广播 id 仍是占位值，车机可能不会邀请（请确认 Shizuku 已启动）")
+        log(
+            "$TAG: could not resolve the real Bluetooth MAC within 30s; the ctrl advertisement id is still the placeholder and the " +
+                "head unit may not invite (make sure Shizuku is running)",
+        )
     }
 
     private fun acceptLoop() {
@@ -314,7 +340,7 @@ class CarPlayCtrlAdvertiser(
             val input = BufferedInputStream(client.getInputStream())
             val head = readUntilHeaderEnd(input)
             if (head.isEmpty()) {
-                log("$TAG: $peer 连入但无请求（EOF）")
+                log("$TAG: $peer connected but sent no request (EOF)")
                 return
             }
             val requestLine = head.lineSequence().firstOrNull() ?: ""
@@ -326,8 +352,9 @@ class CarPlayCtrlAdvertiser(
                     .joinToString("; ") { it.trim() }
             log("$TAG: $peer -> [$requestLine] $headers")
 
-            // 车机 ctrl 邀请：这是「车机已发现手机、AirPlay 窗口已开」的权威信号
-            // （catplay CarPlayCtrlSession：收到即把邀请交给连接流程）。
+            // Head unit ctrl invitation: the authoritative signal that "the head unit has discovered the phone and the AirPlay
+            // window is open"
+            // (catplay CarPlayCtrlSession: the invitation is handed to the connect flow on receipt).
             if (requestLine.startsWith("GET /ctrl-int/1/connect")) {
                 val receiverId =
                     head
@@ -337,7 +364,7 @@ class CarPlayCtrlAdvertiser(
                         }?.substringAfter(':')
                         ?.trim()
                 inviteCount++
-                log("$TAG: ✓ 车机 ctrl 邀请（第 $inviteCount 次，receiver=${receiverId ?: "?"}）——AirPlay 窗口已开启")
+                log("$TAG: OK head unit ctrl invitation (#$inviteCount, receiver=${receiverId ?: "?"}); AirPlay window opened")
             }
 
             val output = client.getOutputStream()
@@ -348,9 +375,9 @@ class CarPlayCtrlAdvertiser(
             }
             val response = ctrlResponse(head, adapter)
             if (requestLine.startsWith("GET /ctrl-int/")) {
-                log("$TAG: ✓ 应答 ctrl-int 探测 200 OK${if (adapter) "（keep-alive，转接盒模式）" else ""}")
+                log("$TAG: OK answered ctrl-int probe 200 OK${if (adapter) " (keep-alive, adapter mode)" else ""}")
             } else {
-                log("$TAG: 未识别的请求，按 200 空应答处理（后续实现按需细化）")
+                log("$TAG: unrecognized request, answered with an empty 200 (to be refined later as needed)")
             }
             output.write(response.toByteArray(Charsets.US_ASCII))
             output.flush()
@@ -363,7 +390,7 @@ class CarPlayCtrlAdvertiser(
                 }
             }
 
-            // 对端 Connection: close 会自行断开；等待期间若还有字节（隧道/事件），转储出来
+            // A peer Connection: close disconnects by itself; if more bytes arrive while waiting (tunnel/event), dump them
             client.soTimeout = 3_000
             val rest = ByteArrayOutputStream()
             val buffer = ByteArray(4096)
@@ -375,19 +402,19 @@ class CarPlayCtrlAdvertiser(
                     if (rest.size() > 64 * 1024) break
                 }
             } catch (_: IOException) {
-                // 读超时即停止转储
+                // Stop dumping on read timeout
             }
             if (rest.size() > 0) {
                 log(
-                    "$TAG: 应答后收到 ${rest.size()} 字节：" +
+                    "$TAG: received ${rest.size()} bytes after replying: " +
                         rest.toByteArray().take(64).joinToString(" ") {
                             "%02x".format(it.toInt() and 0xFF)
                         },
                 )
             }
-            log("$TAG: $peer 连接结束")
+            log("$TAG: $peer connection ended")
         } catch (error: IOException) {
-            log("$TAG: $peer 连接异常 - ${error.message}")
+            log("$TAG: $peer connection error - ${error.message}")
         } finally {
             runCatching { client.close() }
         }
@@ -411,7 +438,7 @@ class CarPlayCtrlAdvertiser(
         return buffer.toString("ISO-8859-1")
     }
 
-    /** 只注销 mDNS 注册，保留监听 socket 与 accept 线程（重注册用，端口不变）。 */
+    /** Unregister only the mDNS registration, keep the listening socket and accept thread (for re-registration, port unchanged). */
     @Synchronized
     private fun unregisterServiceOnly() {
         registered = false
@@ -428,23 +455,23 @@ class CarPlayCtrlAdvertiser(
         acceptRunning = false
         runCatching { serverSocket?.close() }
         serverSocket = null
-        log("$TAG: 已停止")
+        log("$TAG: stopped")
     }
 
-    /** 每次注册新建 listener（见 start() 注释；复用同一实例会触发 already in use）。 */
+    /** Create a new listener per registration (see the start() comment; reusing one instance triggers already in use). */
     private fun createListener(): NsdManager.RegistrationListener =
         object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
-                log("$TAG: mDNS 注册成功 ${serviceInfo.serviceName}")
+                log("$TAG: mDNS registration succeeded ${serviceInfo.serviceName}")
             }
 
             override fun onRegistrationFailed(
                 serviceInfo: NsdServiceInfo,
                 errorCode: Int,
             ) {
-                // 重置状态：下一次 ensureForNetwork（新会话的 0x5703）会重新注册
+                // Reset state: the next ensureForNetwork (0x5703 of a new session) will register again
                 registered = false
-                log("$TAG: mDNS 注册失败 code=$errorCode（下次会话自动重试）")
+                log("$TAG: mDNS registration failed code=$errorCode (will retry automatically next session)")
             }
 
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit

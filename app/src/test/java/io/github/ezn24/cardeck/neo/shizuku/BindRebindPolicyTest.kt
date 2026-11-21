@@ -5,30 +5,30 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * UserService 绑定重发策略（2026-10-22 Redmi K60E「触控注入必然死锁」的回归钉子）。
+ * UserService bind-resend policy (regression pin for the 2026-10-22 Redmi K60E "touch injection inevitably deadlocks").
  *
- * 实测现场：视频正常推流、触摸事件到达手机，但注入从第一次起就失败，失败计数涨到
- * 1700+；日志每 2~3 秒刷一次「绑定卡死状态已解除（binding 超时未回调），立即重试」。
+ * The scene: video streams fine and touch events reach the phone, but injection fails from the very first attempt, with the failure count climbing to
+ * 1700+; the log flushes "binding stuck state cleared (binding timed out without callback), retrying immediately" every 2~3 seconds.
  *
- * 根因是判定窗口（1.5s）与正常回调延迟同量级，且判死后会 unbindUserService(remove=true)
- * ——该参数会**杀掉远端服务进程**。于是「发起 → 1.5s 判死 → 杀进程 → 重新 spawn →
- * 回调又晚到」形成自持抖动，永不收敛。
+ * The root cause is that the judgment window (1.5s) is of the same order as the normal callback delay, and after declaring it dead it calls unbindUserService(remove=true)
+ * -- that parameter **kills the remote service process**. So "initiate -> 1.5s declared dead -> kill process -> respawn ->
+ * callback is late again" forms a self-sustaining jitter that never converges.
  */
 class BindRebindPolicyTest {
     private val timeout = 8_000L
 
     @Test
     fun idleStateIsReadyToRebind() {
-        // 当前没有进行中的绑定 → 可以直接发起
+        // No binding currently in progress -> can initiate directly
         assertTrue(shouldRebind(binding = false, waitedMs = 0, stuckTimeoutMs = timeout))
     }
 
     @Test
     fun freshlyIssuedBindingKeepsWaiting() {
-        // 刚发起（含旧实现会误判的 1.5s 点）都要继续等——这正是死锁的根源
+        // Just initiated (including the 1.5s point the old implementation misjudged) must keep waiting -- this is the root of the deadlock
         listOf(0L, 100L, 1_500L, 1_501L, 3_000L, 7_999L).forEach { waited ->
             assertFalse(
-                "等待 ${waited}ms 不应判卡死（旧实现在 1.5s 就判死并杀服务进程）",
+                "Waiting ${waited}ms should not be judged stuck (the old implementation declared it dead at 1.5s and killed the service process)",
                 shouldRebind(binding = true, waitedMs = waited, stuckTimeoutMs = timeout),
             )
         }
@@ -42,7 +42,7 @@ class BindRebindPolicyTest {
 
     @Test
     fun zeroBindingSinceIsTreatedAsJustIssued() {
-        // bindingSince 未记录（0）时不应当成「已等很久」而立刻重发
+        // When bindingSince is not recorded (0), it must not be treated as "waited a long time" and resent immediately
         assertFalse(shouldRebind(binding = true, waitedMs = 0, stuckTimeoutMs = timeout))
     }
 }

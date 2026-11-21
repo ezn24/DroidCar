@@ -8,12 +8,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * **隧道重放回归**：录制的车机隧道 CSM（IAPLINK rx）逐条喂给真实的
- * [VirtualIap2Link]（MIB3 形态），我们回出的 CSM 消息号序列必须与录制的
- * 隧道 tx 序列一致（0x4E0C/0x4E0B 等含随机内容，比对消息号与首现顺序）。
+ * **Tunnel replay regression**: recorded head-unit tunnel CSMs (IAPLINK rx) are fed one by one to the real
+ * [VirtualIap2Link] (MIB3 form); the CSM message ID sequence we reply with must match the recorded
+ * tunnel tx sequence (0x4E0C/0x4E0B etc. contain random content, so compare message IDs and first-occurrence order).
  *
- * 车机侧由引擎扮演（复用 VirtualIap2LinkTest 的换帧法），录制的 CSM 体
- * 经引擎注入——聚焦控制会话状态机，不重演链路层。
+ * The head-unit side is played by the engine (reusing the frame-swapping method of VirtualIap2LinkTest); recorded CSM bodies
+ * are injected via the engine -- focusing on the control-session state machine, not replaying the link layer.
  */
 class TunnelReplayTest {
     @Test
@@ -21,12 +21,12 @@ class TunnelReplayTest {
         val fixtures = CarFixture.loadDirectory()
         val usable = fixtures.filter { it.tunnelRx.isNotEmpty() }
         if (usable.isEmpty()) {
-            println("REPLAY: 无隧道 fixture——跳过")
+            println("REPLAY: no tunnel fixtures -- skipping")
             return
         }
         val failures = ArrayList<String>()
         usable.forEach { fixture -> replay(fixture, failures) }
-        assertTrue("隧道重放回归失败：\n" + failures.joinToString("\n"), failures.isEmpty())
+        assertTrue("Tunnel replay regression failed:\n" + failures.joinToString("\n"), failures.isEmpty())
     }
 
     private class Harness {
@@ -84,11 +84,11 @@ class TunnelReplayTest {
         h.link.armMib3()
         h.car.start(h.engineClock)
         h.exchange()
-        assertEquals("${fixture.car}: 链路未达 NORMAL", Iap2LinkEngine.State.NORMAL, h.car.state)
+        assertEquals("${fixture.car}: link did not reach NORMAL", Iap2LinkEngine.State.NORMAL, h.car.state)
 
         fixture.tunnelRx.forEach { (messageId, body) ->
             assertTrue(
-                "${fixture.car}: 注入 0x${messageId.toString(16)} 失败（引擎拒绝入队）",
+                "${fixture.car}: injecting 0x${messageId.toString(16)} failed (engine rejected the enqueue)",
                 h.car.sendControl(Iap2Csm.encode(messageId, body), h.engineClock),
             )
             h.exchange()
@@ -96,17 +96,17 @@ class TunnelReplayTest {
 
         val replayCore = distinctCsmIds(extractCsmPayloads(h.controlAll))
         val recordedCore = fixture.tunnelTxIds.distinct()
-        // 旧版录制的应答可能少于现行代码（有意的新增，如 MIB3 突发）——
-        // 断言「录制 = 回放的有序子序列」：少答/乱序/换序都会红，有意追加放行
+        // Replies recorded by an older version may be fewer than current code's (intentional additions, e.g. the MIB3 burst) --
+        // assert "recorded = ordered subsequence of replay": missing/out-of-order/reordered replies go red, intentional additions pass
         val subsequenceOk = isOrderedSubsequence(recordedCore, replayCore)
         if (!subsequenceOk) {
             failures.add(
-                "${fixture.car}: 隧道应答序列漂移（录制应为回放的有序子序列）\n" +
-                    "  录制=${recordedCore.joinToString { "0x%04x".format(it) }}\n" +
-                    "  回放=${replayCore.joinToString { "0x%04x".format(it) }}",
+                "${fixture.car}: tunnel reply sequence drift (recorded should be an ordered subsequence of replay)\n" +
+                    "  recorded=${recordedCore.joinToString { "0x%04x".format(it) }}\n" +
+                    "  replay=${replayCore.joinToString { "0x%04x".format(it) }}",
             )
         } else {
-            println("REPLAY ✓ ${fixture.car} 隧道序列一致（录制 ${recordedCore.size} ⊆ 回放 ${replayCore.size}）")
+            println("REPLAY ✓ ${fixture.car} tunnel sequence matches (recorded ${recordedCore.size} ⊆ replay ${replayCore.size})")
         }
     }
 

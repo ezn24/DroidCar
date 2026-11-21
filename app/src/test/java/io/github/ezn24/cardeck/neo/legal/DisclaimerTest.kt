@@ -9,7 +9,7 @@ import org.junit.Test
 class DisclaimerPolicyTest {
     @Test
     fun contentNotScrollableOnlyNeedsCountdown() {
-        // 文案一屏放得下（无需滚动）：只等倒计时
+        // The copy fits on one screen (no scrolling needed): only wait for the countdown
         assertFalse(canAcceptDisclaimer(countdownDone = false, contentScrollable = false, scrolledToBottom = false))
         assertTrue(canAcceptDisclaimer(countdownDone = true, contentScrollable = false, scrolledToBottom = false))
     }
@@ -23,7 +23,7 @@ class DisclaimerPolicyTest {
 
     @Test
     fun shorterElapsedButAtBottomStillBlocked() {
-        // 滑到底了但没等够 10 秒：仍不可接受（两个条件是并列的）
+        // Scrolled to the bottom but did not wait the full 10 seconds: still not acceptable (the two conditions are parallel)
         assertFalse(canAcceptDisclaimer(countdownDone = false, contentScrollable = true, scrolledToBottom = true))
     }
 }
@@ -37,9 +37,9 @@ class DisclaimerVersionTest {
     @Test
     fun acceptedCurrentVersionNeedsNothing() {
         assertFalse(needsDisclaimerAtLaunch(acceptedVersion = 1, currentVersion = 1))
-        // 老版本接受过（1）但当前是 2：文案变了必须重新确认
+        // An older version was accepted (1) but the current one is 2: the copy changed, must reconfirm
         assertTrue(needsDisclaimerAtLaunch(acceptedVersion = 1, currentVersion = 2))
-        // 已接受更高版本（回退安装旧 APK）：不再打扰
+        // A higher version already accepted (rolled back to an older APK): do not disturb
         assertFalse(needsDisclaimerAtLaunch(acceptedVersion = 3, currentVersion = 2))
     }
 }
@@ -47,7 +47,7 @@ class DisclaimerVersionTest {
 class DisclaimerHintTest {
     @Test
     fun hintsExplainWhyAcceptIsBlocked() {
-        // 两者都没满足：提示同时给出倒计时与滑动要求
+        // Neither met: the hint gives both the countdown and the scrolling requirement
         assertEquals(
             DisclaimerBlock.SCROLL_AND_WAIT,
             disclaimerBlockReason(
@@ -56,7 +56,7 @@ class DisclaimerHintTest {
                 scrolledToBottom = false,
             ),
         )
-        // 只有倒计时
+        // Countdown only
         assertEquals(
             DisclaimerBlock.WAIT,
             disclaimerBlockReason(
@@ -65,7 +65,7 @@ class DisclaimerHintTest {
                 scrolledToBottom = false,
             ),
         )
-        // 只有滚动
+        // Scrolling only
         assertEquals(
             DisclaimerBlock.SCROLL,
             disclaimerBlockReason(
@@ -74,7 +74,7 @@ class DisclaimerHintTest {
                 scrolledToBottom = false,
             ),
         )
-        // 已可接受：无提示
+        // Already acceptable: no hint
         assertNull(
             disclaimerBlockReason(
                 countdownDone = true,
@@ -86,7 +86,7 @@ class DisclaimerHintTest {
 }
 
 class DisclaimerContentTest {
-    /** 读 strings.xml 里的免责声明正文（单测工作目录 = app 模块）。 */
+    /** Reads the disclaimer body from strings.xml (the unit-test working directory = the app module). */
     private fun disclaimerText(folder: String): Map<String, String> {
         val xml = java.io.File("src/main/res/$folder/strings.xml").readText()
         return Regex("""<string name="(disclaimer_s\d_(?:title|body))">(.*?)</string>""")
@@ -104,7 +104,7 @@ class DisclaimerContentTest {
 
     @Test
     fun contentCoversMandatoryTopics() {
-        // 分享出去必须讲清：测试范围、驾驶风险、系统权限、非官方与商标
+        // When shared it must make clear: test scope, driving risk, system permissions, unofficial status and trademarks
         val hans = disclaimerText("values").values.joinToString(" ")
         assertTrue(hans.contains("已经测试过的组合只有"))
         assertTrue(hans.contains("驾驶安全"))
@@ -119,7 +119,7 @@ class DisclaimerContentTest {
 
     @Test
     fun contentHasNoMarkdownMarkers() {
-        // 正文直接进 TextView：`**`/`#` 会原样显示，属排版事故
+        // The body goes straight into a TextView: `**`/`#` are shown literally, which is a formatting accident
         for (folder in locales) {
             val text = disclaimerText(folder).values.joinToString("")
             assertFalse(folder, text.contains("**"))

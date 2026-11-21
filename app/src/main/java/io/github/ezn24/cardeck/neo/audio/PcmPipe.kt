@@ -2,7 +2,7 @@ package io.github.ezn24.cardeck.neo.audio
 
 import java.io.InputStream
 
-/** 管线每次 read 可短读；必须拼成完整 PCM 帧，不能把短读当作整包丢弃。 */
+/** The pipe may short-read on each read; assemble complete PCM frames instead of dropping a short read as a whole packet. */
 internal fun readPcmFrame(
     input: InputStream,
     frame: ByteArray,

@@ -19,12 +19,13 @@ import io.github.ezn24.cardeck.neo.ui.WallpaperStore
 import io.github.ezn24.cardeck.neo.util.Bg
 
 /**
- * CarPlay dock（独立虚拟屏，含时钟/电量/运行中应用/回桌面）。
+ * CarPlay dock (separate virtual display: clock / battery / running apps / back to desktop).
  *
- * 两种形态（布局见 res/layout）：
- *  - 横屏车机：dock 是左侧竖条 → activity_dock_sidebar.xml（时钟居顶、回桌面居底）
- *  - 竖屏车机：dock 是底部横条 → activity_dock_bar.xml（⌂ | 应用横排 | 时间/电量）
- * 形态由 dock 虚拟屏自身宽高决定（竖条 height>width；横条 width>height），与车机方向自动对齐。
+ * Two forms (layouts in res/layout):
+ *  - Landscape head unit: dock is a left vertical strip -> activity_dock_sidebar.xml (clock on top, home at the bottom)
+ *  - Portrait head unit: dock is a bottom bar -> activity_dock_bar.xml (home | apps in a row | time/battery)
+ * The form is decided by the dock virtual display's own size (strip: height>width; bar: width>height), so it aligns with the head-unit
+ * orientation automatically.
  */
 class DockActivity : AppCompatActivity() {
     private var appsContainer: LinearLayout? = null
@@ -32,7 +33,7 @@ class DockActivity : AppCompatActivity() {
     private var batteryView: io.github.ezn24.cardeck.neo.ui.BatteryGlyphView? = null
     private var statusView: io.github.ezn24.cardeck.neo.ui.StatusGlyphsView? = null
 
-    /** 蜂窝信号回调（SignalStrengthsListener 无需权限）。 */
+    /** Cellular signal callback (SignalStrengthsListener needs no permission). */
     private val signalCallback =
         object :
             android.telephony.TelephonyCallback(),
@@ -42,15 +43,15 @@ class DockActivity : AppCompatActivity() {
             }
         }
 
-    /** 无 SIM / 未就绪时整排信号点置暗（-1）。 */
+    /** With no SIM / not ready, dim the whole row of signal dots (-1). */
     private fun cellLevelOf(level: Int): Int {
         val tm = getSystemService(android.telephony.TelephonyManager::class.java) ?: return -1
         return if (tm.simState == android.telephony.TelephonyManager.SIM_STATE_READY) level else -1
     }
 
     /**
-     * Wi-Fi 格数：跟踪任一 Wi-Fi 网络的 RSSI（会话中即车机热点）。回调在后台线程，
-     * 投回主线程更新；断开时隐藏图标。
+     * Wi-Fi bars: tracks the RSSI of any Wi-Fi network (during a session, the head-unit hotspot). The callback runs on a background thread,
+     * so it is posted back to the main thread to update; the icon is hidden on disconnect.
      */
     private val wifiCallback =
         object : android.net.ConnectivityManager.NetworkCallback() {
@@ -77,10 +78,12 @@ class DockActivity : AppCompatActivity() {
     private var barForm = false
 
     /**
-     * 设计基准密度（420dpi）的当前倍率。dock 屏密度由 SessionController 按画布短边等比
-     * 下发（奥迪 1160×540→420 不变；测试台 2320×1080→840，dock 与文字/图标整体 ×2）。
-     * 布局 XML 用 dp 自动随密度缩放；字号/模糊半径等按「设计 px × 本倍率」在代码里设，
-     * 保证高分辨率车机下 dock 内容与画布同比例（2026-10-17 修复「高分辨率下显得小」）。
+     * Current multiplier over the design baseline density (420dpi). The dock display density is sent by SessionController proportionally
+     * to the canvas short side
+     * (Audi 1160x540 -> 420 unchanged; test bench 2320x1080 -> 840, dock and text/icons all x2).
+     * Layout XML uses dp and scales with density automatically; font size / blur radius etc. are set in code as "design px x this
+     * multiplier",
+     * so dock content keeps the canvas proportion on high-resolution head units (2026-10-17 fix for "looks small at high resolution").
      */
     private val designScale: Float
         get() = resources.displayMetrics.densityDpi / 420f
@@ -100,7 +103,7 @@ class DockActivity : AppCompatActivity() {
     private val clockTicker =
         object : Runnable {
             override fun run() {
-                // 无秒显示（用户要求）：对齐到下一分钟边界刷新，秒内不做无用重绘
+                // No seconds shown (user request): align refresh to the next minute boundary, no useless redraws within the minute
                 clockView?.text =
                     android.text.format.DateFormat
                         .format("HH:mm", System.currentTimeMillis())
@@ -110,14 +113,14 @@ class DockActivity : AppCompatActivity() {
             }
         }
 
-    /** 壁纸背景（全流画布切片，与桌面同源同路径——交界处逐像素连续）。 */
+    /** Wallpaper background (slice of the full-stream canvas, same source and path as the desktop - pixel-continuous at the seam). */
     private var wallpaperView: ImageView? = null
     private var wallpaperShownVersion = -1L
 
-    /** 壁纸变更监听（WallpaperStore 主线程回调；解码在本类自行切后台线程）。 */
+    /** Wallpaper change listener (WallpaperStore main-thread callback; decoding is moved to a background thread by this class). */
     private val wallpaperListener = { _: Long -> refreshWallpaperIfChanged() }
 
-    /** dock 外观偏好监听（设置页拖动滑条即时生效）。 */
+    /** Dock appearance preference listener (the settings slider takes effect live). */
     private val dockPrefsListener: () -> Unit = { runOnUiThread { applyDockPrefs() } }
 
     private val batteryReceiver =
@@ -141,8 +144,9 @@ class DockActivity : AppCompatActivity() {
         wallpaperView = findViewById(R.id.dockWallpaper)
         findViewById<ImageView>(R.id.dockHome).apply {
             setOnClickListener { Bg.run("dock-home") { VirtualLauncher.onHomePressed() } }
-            // 图标随模式切换：仪表盘激活=房屋（点按回桌面）；否则=田字格（点按进仪表盘）。
-            // 应用中与桌面同为田字格——两种场景下的动作都是进仪表盘，语义一致。
+            // Icon follows the mode: dashboard active = house (tap returns to desktop); otherwise = grid (tap enters the dashboard).
+            // In an app and on the desktop it is the grid in both cases - the action is "enter the dashboard" either way, so the semantics
+            // stay consistent.
             VirtualLauncher.addDashboardListener { dashboard ->
                 runOnUiThread {
                     setImageResource(
@@ -158,23 +162,24 @@ class DockActivity : AppCompatActivity() {
         VirtualLauncher.addRunningAppsListener(refreshListener)
         pollHandler.postDelayed(pollRunnable, 3_000)
         clockHandler.post(clockTicker)
-        // 字号按「设计 px × designScale」设置（不进 XML：荣耀 ROM 上 autoSize 对窄 dock
-        // 不生效，仍需布局完成后按实测宽度手工缩钟表——见 fitClockText；13/22 为原型值）
+        // Font sizes are set as "design px x designScale" (not in XML: on the Honor ROM autoSize does not
+        // work for the narrow dock, so the clock still has to be shrunk by hand from the measured width after layout - see fitClockText;
+        // 13/22 are prototype values)
         clockView?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 30f * designScale)
-        // 电池图标高度与原百分比文字同一设计基准（13 设计 px），随 dock 缩放
+        // Battery icon height uses the same design baseline as the old percentage text (13 design px) and scales with the dock
         batteryView?.let { v -> v.layoutParams = v.layoutParams.apply { height = (21f * designScale).toInt().coerceAtLeast(1) } }
         statusView?.let { v -> v.layoutParams = v.layoutParams.apply { height = (17f * designScale).toInt().coerceAtLeast(1) } }
         startStatusTracking()
         clockView?.post { fitClockText(clockView!!) }
         setupWallpaper()
-        // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
+        // Register change notification + reconcile once immediately (covers changes before registration - events are not replayed)
         WallpaperStore
             .addListener(wallpaperListener)
         refreshWallpaperIfChanged()
-        // dock 外观（暗幕/模糊）：应用当前值 + 监听设置页调整
+        // Dock appearance (scrim/blur): apply the current value + listen for settings changes
         DockPrefs.addListener(dockPrefsListener)
         applyDockPrefs()
-        // 系统受保护广播：ACTION_BATTERY_CHANGED 为 sticky，注册即回填当前电量
+        // System protected broadcast: ACTION_BATTERY_CHANGED is sticky, so registering backfills the current level
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
     }
 
@@ -201,12 +206,12 @@ class DockActivity : AppCompatActivity() {
     }
 
     /**
-     * 壁纸切片：dock 窗口内画「全流画布壁纸」中本条带对应的部分。
-     * dock 虚拟屏与流 1:1（420dpi），canvas 视图 = 流画布尺寸：
-     *  - 侧栏（横屏车机）：流左条，偏移 (0, 0)
-     *  - 底栏（竖屏车机）：流底条，偏移 (0, -(appHeight))
-     * 窗口必须不透明：半透明窗口下系统会往这块虚拟屏合成手机自身壁纸
-     * （曾致 dock 显示手机壁纸、与桌面壁纸错位——2026-10-12 实测根因）。
+     * Wallpaper slice: draws, inside the dock window, the part of the "full-stream canvas wallpaper" that this strip covers.
+     * The dock virtual display is 1:1 with the stream (420dpi) and the canvas view = stream canvas size:
+     *  - Sidebar (landscape head unit): left strip of the stream, offset (0, 0)
+     *  - Bottom bar (portrait head unit): bottom strip of the stream, offset (0, -(appHeight))
+     * The window must be opaque: with a translucent window the system composites the phone's own wallpaper onto this virtual display
+     * (this once made the dock show the phone wallpaper, misaligned with the desktop wallpaper - root cause measured 2026-10-12).
      */
     private fun setupWallpaper() {
         val launcher = VirtualLauncher
@@ -228,9 +233,9 @@ class DockActivity : AppCompatActivity() {
     }
 
     /**
-     * 应用 dock 外观偏好：暗幕强度（scrim View 的黑 alpha）+ 背景高斯模糊
-     * （RenderEffect，API 31+；半径按 dock 物理像素，最大 40px——乘 designScale
-     * 保证高分辨率车机上模糊观感与奥迪基准一致）。
+     * Applies the dock appearance preferences: scrim strength (black alpha of the scrim View) + background Gaussian blur
+     * (RenderEffect, API 31+; radius in dock physical pixels, max 40px - multiplied by designScale
+     * so the blur looks the same on high-resolution head units as on the Audi baseline).
      */
     private fun applyDockPrefs() {
         val scrim = findViewById<View>(R.id.dockScrim) ?: return
@@ -255,7 +260,10 @@ class DockActivity : AppCompatActivity() {
         }
     }
 
-    /** 壁纸版本变化时后台重解码并换图（监听器模式下与桌面同步更新）。 */
+    /**
+     * Re-decodes and swaps the image in the background when the wallpaper version changes (updated in sync with the desktop via the
+     * listener).
+     */
     private fun refreshWallpaperIfChanged() {
         val view = wallpaperView ?: return
         val current = WallpaperStore.version
@@ -278,12 +286,12 @@ class DockActivity : AppCompatActivity() {
                 )
                 runOnUiThread { view.setImageBitmap(bitmap) }
             } else {
-                VirtualLauncher.logSink?.invoke("WALLPAPER-DOCK: 解码失败")
+                VirtualLauncher.logSink?.invoke("WALLPAPER-DOCK: decode failed")
             }
         }
     }
 
-    /** 逐级缩小字号直至文本宽度放得下（设计 px × designScale；行程 22→12，对照设计原型）。 */
+    /** Shrinks the font step by step until the text fits the width (design px x designScale; trip 22 -> 12, per the design prototype). */
     private fun fitClockText(view: TextView) {
         val available = view.width - view.paddingLeft - view.paddingRight
         if (available <= 0) return
@@ -309,7 +317,7 @@ class DockActivity : AppCompatActivity() {
         runOnUiThread { batteryView?.setLevel(percent, charging) }
     }
 
-    /** 时间下方的信号/Wi-Fi 状态行：注册系统回调（失败只影响这一行，不影响 dock）。 */
+    /** Signal / Wi-Fi status row under the time: registers system callbacks (a failure only affects this row, not the dock). */
     private fun startStatusTracking() {
         runCatching {
             val tm = getSystemService(android.telephony.TelephonyManager::class.java) ?: return@runCatching
@@ -328,13 +336,17 @@ class DockActivity : AppCompatActivity() {
 
     private var lastRendered: List<String> = emptyList()
 
-    /** 上次渲染用的图标表（桌面扫描换新后需重绘：dock 常比扫描先完成首绘）。 */
+    /**
+     * Icon table used in the last render (redraw after the desktop scan refreshes: the dock often finishes its first draw before the scan).
+     */
     private var lastIconCache: Map<android.content.ComponentName, android.graphics.drawable.Drawable>? = null
 
     /**
-     * 运行中应用的图标。缓存键是桌面扫描出的启动组件，而地图/媒体区是按 resolveActivity
-     * 解析出的组件启动的——启动入口是 activity-alias 时（如高德）两者类名不同，精确查找
-     * 落空就成了默认机器人图标。依次退到：同包名的缓存项 → 系统组件图标 → 应用图标。
+     * Icon of a running app. The cache key is the launch component found by the desktop scan, while the map/media areas launch the
+     * component
+     * resolved via resolveActivity - when the launch entry is an activity-alias (e.g. Amap) the class names differ, and an exact lookup
+     * misses and falls to the default robot icon. Fallbacks in order: cache entry with the same package -> system component icon -> app
+     * icon.
      */
     private fun iconFor(
         component: android.content.ComponentName,
@@ -360,9 +372,9 @@ class DockActivity : AppCompatActivity() {
         val pad = (6 * density).toInt()
         apps.forEach { component ->
             val drawable = iconFor(component, iconCache)
-            // 位图化渲染（与桌面网格同一路径）：直接 setImageDrawable 会让 ImageView
-            // 长期持有共享 Drawable 实例，其 bounds 被网格重绑改写后渲染错位
-            // （实机故障：点 home 后 dock 图标变小且偏左）
+            // Render as a bitmap (same path as the desktop grid): setImageDrawable directly would let the ImageView
+            // hold the shared Drawable instance for a long time, and once the grid rebind rewrites its bounds the rendering is misaligned
+            // (real-device failure: after tapping home the dock icons shrank and shifted left)
             val bitmap = AppIcons.rounded(drawable, iconPx)
             container.addView(
                 ImageView(this).apply {
@@ -378,5 +390,5 @@ class DockActivity : AppCompatActivity() {
         }
     }
 
-    override fun onBackPressed() = Unit // dock 常驻，不响应返回
+    override fun onBackPressed() = Unit // The dock is resident and ignores Back
 }

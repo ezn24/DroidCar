@@ -3,8 +3,8 @@ name: Build Signed Neo APK
 on:
   push:
     branches: [neo]
-    # 只改文件/设计稿不出包：推送里的文件**全部**命中下列规则才跳过，
-    # 夹带任何代码/资源改动照常构建。需要时可手动 workflow_dispatch。
+    # Changes to files/design drafts only do not produce a build: skipped only when **all** files in the push match the rules below;
+    # any code/resource change mixed in builds as usual. Can be run manually via workflow_dispatch when needed.
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   build:
-    name: 構建正式簽名 APK
+    name: Build signed release APK
     if: github.ref == 'refs/heads/neo'
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -32,42 +32,42 @@ jobs:
       sha: ${{ steps.package.outputs.sha }}
       cert: ${{ steps.package.outputs.cert }}
     steps:
-      - name: 檢出程式碼
+      - name: Check out source
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-          # 构建号 = 提交数（git rev-list --count HEAD），需要完整历史
+          # Build number = commit count (git rev-list --count HEAD), which needs the full history
           fetch-depth: 0
 
-      # AGP 8.7 要求 JDK 17，且与 app/build.gradle.kts 的 jvmTarget 一致
-      - name: 安装 JDK 17
+      # AGP 8.7 requires JDK 17, consistent with jvmTarget in app/build.gradle.kts
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: 配置 Gradle
+      - name: Configure Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: 單元測試與 Lint
+      - name: Unit tests and lint
         run: bash ./gradlew :app:testStandardDebugUnitTest :app:lintStandardDebug --stacktrace
 
-      - name: 计算版本号
+      - name: Compute version
         id: version
         run: |
           set -euo pipefail
           BASE=$(sed -n 's/^val appVersionName = "\(.*\)"/\1/p' app/build.gradle.kts)
-          test -n "$BASE" || { echo "::error::无法从 app/build.gradle.kts 读取 appVersionName"; exit 1; }
-          # 构建号用「提交数」而非 run_number：同一个提交在本地与 CI 得到同一版本号，
-          # 且随提交单调递增（run_number 与本地手工构建号对不上，CI 包反而比本机装的小、装不上）
+          test -n "$BASE" || { echo "::error::cannot read appVersionName from app/build.gradle.kts"; exit 1; }
+          # The build number is the commit count rather than run_number: the same commit gets the same version locally and in CI,
+          # and it increases monotonically with commits (run_number does not match local manual build numbers, so the CI package could be smaller than the one installed locally and fail to install)
           BUILD_NUMBER=$(git rev-list --count HEAD)
           echo "build=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
           VERSION="${BASE}.${BUILD_NUMBER}"
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "name=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "本次版本：$VERSION（versionCode = base*10000 + ${BUILD_NUMBER}）"
+          echo "Version for this run: $VERSION (versionCode = base*10000 + ${BUILD_NUMBER})"
 
-      - name: 建置簽名 APK
+      - name: Build signed APK
         env:
           BUILD_NUMBER: ${{ steps.version.outputs.build }}
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -117,7 +117,7 @@ jobs:
           unset KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD
           bash ./gradlew :app:assembleStandardRelease "-Pcardeck.buildNumber=$BUILD_NUMBER" --stacktrace
 
-      - name: 校验签名并打包
+      - name: Verify signature and package
         id: package
         env:
           VERSION: ${{ steps.version.outputs.name }}
@@ -125,29 +125,29 @@ jobs:
         run: |
           set -euo pipefail
           APK=app/build/outputs/apk/standard/release/app-standard-release.apk
-          test -f "$APK" || { echo "::error::未找到 $APK"; exit 1; }
+          test -f "$APK" || { echo "::error::$APK not found"; exit 1; }
 
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
           APKSIGNER=$(ls "$SDK"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n1)
-          test -n "$APKSIGNER" || { echo "::error::找不到 apksigner"; exit 1; }
+          test -n "$APKSIGNER" || { echo "::error::apksigner not found"; exit 1; }
           "$APKSIGNER" verify --print-certs "$APK" | tee certs.txt
 
-          # 配了 keystore 却仍是 debug 证书 = keystore.properties 没被读到，绝不能放出去
+          # A keystore was configured but the certificate is still debug = keystore.properties was not read; it must never be released
           if grep -q "CN=Android Debug" certs.txt; then
-            echo "::error::产物是 debug 签名——正式签名配置没有生效（检查 keystore.properties 与 storeFile 路径）"
+            echo "::error::artifact is debug-signed: the release signing config did not take effect (check keystore.properties and the storeFile path)"
             exit 1
           fi
           CERT=$(grep "certificate SHA-256 digest" certs.txt | head -n1 | sed 's/.*digest: //')
-          test -n "$CERT" || { echo "::error::读不到签名证书指纹"; exit 1; }
+          test -n "$CERT" || { echo "::error::cannot read the signing certificate fingerprint"; exit 1; }
 
           if [ -n "${EXPECTED_CERT:-}" ]; then
             EXPECTED=$(printf '%s' "$EXPECTED_CERT" | tr -d ': ' | tr 'A-F' 'a-f')
             ACTUAL=$(printf '%s' "$CERT" | tr -d ': ' | tr 'A-F' 'a-f')
             if [ "$EXPECTED" != "$ACTUAL" ]; then
-              echo "::error::签名证书与 EXPECTED_CERT_SHA256 不一致：期望 $EXPECTED，实际 $ACTUAL"
+              echo "::error::signing certificate does not match EXPECTED_CERT_SHA256: expected $EXPECTED, actual $ACTUAL"
               exit 1
             fi
-            echo "签名证书与 EXPECTED_CERT_SHA256 一致"
+            echo "signing certificate matches EXPECTED_CERT_SHA256"
           fi
 
           NAME="CarDeck-Neo-${VERSION}-release.apk"
@@ -160,18 +160,18 @@ jobs:
             echo "cert=$CERT"
             echo "size=$SIZE"
           } >> "$GITHUB_OUTPUT"
-          echo "已生成 $NAME（$SIZE）"
+          echo "Generated $NAME ($SIZE)"
 
-      - name: 上传 APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.name }}
           path: ${{ steps.package.outputs.name }}
           if-no-files-found: error
           retention-days: 30
-          overwrite: 'true' # 重跑同一 run 时版本号不变，覆盖旧产物而不是失败
+          overwrite: 'true' # Re-running the same run keeps the version number, so the old artifact is overwritten instead of failing
 
-      - name: 写入运行摘要
+      - name: Write run summary
         env:
           VERSION: ${{ steps.version.outputs.name }}
           NAME: ${{ steps.package.outputs.name }}
@@ -181,22 +181,22 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "### CarDeck Neo ${VERSION}（正式签名）"
+            echo "### CarDeck Neo ${VERSION} (release signed)"
             echo
-            echo "| 项 | 值 |"
+            echo "| Item | Value |"
             echo "|---|---|"
             echo "| APK | ${NAME} |"
-            echo "| APK 大小 | ${SIZE} |"
+            echo "| APK size | ${SIZE} |"
             echo "| SHA-256 | ${SHA} |"
-            echo "| 签名证书 SHA-256 | ${CERT} |"
+            echo "| Signing certificate SHA-256 | ${CERT} |"
             echo
-            echo "安装：adb install -r ${NAME}"
+            echo "Install: adb install -r ${NAME}"
             echo
-            echo "> Artifacts 列表里显示的体积是**压缩包**大小（dex 在 APK 内不压缩，再打包会缩到约 45%）；"
-            echo "> 解压后的 APK 体积见上表。"
+            echo "> The size shown in the Artifacts list is the **zipped** size (dex is stored uncompressed inside the APK, so re-zipping shrinks it to about 45%);"
+            echo "> The unzipped APK size is in the table above."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 上传测试报告（失败时便于定位）
+      - name: Upload test reports (to help diagnose failures)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -209,14 +209,14 @@ jobs:
           retention-days: 7
 
   release:
-    name: 發佈簽名 APK
+    name: Publish signed APK
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      # 更新內容由「上一個 Release 的 tag → 本次提交」之間的提交訊息生成，需要完整歷史與 tag
-      - name: 檢出程式碼（產生更新內容用）
+      # Release notes are generated from the commit messages between the previous Release's tag and this commit, so the full history and tags are needed
+      - name: Check out source (for generating release notes)
         uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -224,12 +224,12 @@ jobs:
           fetch-tags: true
           path: src
 
-      - name: 下載已驗證的 APK
+      - name: Download the verified APK
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build.outputs.apk }}
 
-      - name: 建立 GitHub Release
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -242,21 +242,21 @@ jobs:
           printf '%s  %s\n' "$APK_SHA256" "$APK" | sha256sum --check
           TAG="v${VERSION}"
           if gh release view "$TAG" --json isDraft,assets --jq ".isDraft == false and any(.assets[]; .name == \"$APK\")" | grep -qx true; then
-            echo "Release $TAG 已發佈"
+            echo "Release $TAG published"
             exit 0
           fi
-          # 上一個已發佈的版本（不是本次）：更新內容 = 它到本次提交之間的全部提交
+          # The previous published version (not this one): release notes = all commits between it and this commit
           PREV=$(gh release list --limit 20 --json tagName,isDraft --jq "[.[] | select(.isDraft | not) | .tagName | select(. != \"$TAG\")][0] // empty")
           NOTES="$RUNNER_TEMP/release-notes.md"
           {
-            echo "## 更新內容"
+            echo "## What's changed"
             echo
             if [ -n "$PREV" ] && git -C src rev-parse -q --verify "refs/tags/$PREV" >/dev/null; then
               RANGE="$PREV..$GITHUB_SHA"
             else
               RANGE="$GITHUB_SHA"
             fi
-            # 每個提交：標題作小節、內文原樣保留；去掉 Co-Authored-By 等尾註
+            # For each commit: the subject becomes a section, the body is kept verbatim; trailers such as Co-Authored-By are stripped
             git -C src log --no-merges --reverse --format='%x1e%s%x1f%b' "$RANGE" -n 50 |
               python3 -c '
           import sys
@@ -273,13 +273,13 @@ jobs:
               print()
           '
             if [ -n "$PREV" ]; then
-              printf '完整變更：https://github.com/%s/compare/%s...%s\n\n' "$GH_REPO" "$PREV" "$TAG"
+              printf '**Full changelog**: https://github.com/%s/compare/%s...%s\n\n' "$GH_REPO" "$PREV" "$TAG"
             fi
-            echo "## 下載與校驗"
+            echo "## Download and verify"
             echo
-            printf '正式簽名 APK：`%s`\n\n' "$APK"
-            printf -- '- APK SHA-256：`%s`\n' "$APK_SHA256"
-            printf -- '- 簽名憑證 SHA-256：`%s`\n' "$CERT_SHA256"
+            printf 'Release-signed APK: `%s`\n\n' "$APK"
+            printf -- '- APK SHA-256: `%s`\n' "$APK_SHA256"
+            printf -- '- Signing certificate SHA-256: `%s`\n' "$CERT_SHA256"
           } > "$NOTES"
           cat "$NOTES"
           gh release create "$TAG" "$APK" --target "$GITHUB_SHA" \

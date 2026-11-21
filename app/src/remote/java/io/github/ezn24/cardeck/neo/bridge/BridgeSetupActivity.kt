@@ -20,19 +20,19 @@ import java.io.File
 import java.lang.ref.WeakReference
 
 /**
- * 远程调试设置页（remote 变体的第二个桌面入口）：
- * 填服务器地址与配对码 → 连接；展示连接状态；引导悬浮窗/安装权限。
+ * Remote debug settings page (the second launcher entry of the remote variant):
+ * enter server address and pairing code -> connect; shows connection state; guides the overlay/install permissions.
  *
- * 兼任调试弹窗宿主：APK 安装确认、重装后续接询问等**必须用正规弹窗**
- * （DarkMessageDialog）——悬浮窗易被忽略（用户实测反馈）。App 后台时由
- * [ReinstallFlow]/[BridgeApp] 带参拉起本页（EXTRA_PROMPT），onCreate/onNewIntent 弹。
+ * Also hosts the debug dialogs: APK install confirmation, post-reinstall resume prompt etc. **must use proper dialogs**
+ * (DarkMessageDialog), since overlays are easily ignored (user feedback). When the app is in the background,
+ * [ReinstallFlow]/[BridgeApp] launch this page with arguments (EXTRA_PROMPT) and onCreate/onNewIntent shows them.
  */
 class BridgeSetupActivity : AppCompatActivity() {
     private val refresh = Handler(Looper.getMainLooper())
     private val ticker =
         object : Runnable {
             override fun run() {
-                // statusLine()：退避重连期间带「Ns 后自动重试」实时倒计时
+                // statusLine(): live "auto retry in Ns" countdown during backoff reconnects
                 statusText?.text = "状态：${BridgeClient.statusLine()}"
                 refresh.postDelayed(this, 1_000)
             }
@@ -65,7 +65,7 @@ class BridgeSetupActivity : AppCompatActivity() {
                 setText(BridgePrefs.serverUrl(this@BridgeSetupActivity))
                 imeOptions = EditorInfo.IME_ACTION_NEXT
                 setSingleLine()
-                // 主题默认字色是黑，深色窗口上不可见（用户实测），必须显式给亮色
+                // The theme default text color is black, invisible on a dark window (user observed); a light color must be set explicitly
                 setTextColor(0xFFE0E0E5.toInt())
                 setHintTextColor(0xFF8A9099.toInt())
             }
@@ -87,7 +87,7 @@ class BridgeSetupActivity : AppCompatActivity() {
                         codeInput.text.toString(),
                     )
                     BridgePrefs.setAutoConnect(this@BridgeSetupActivity, true)
-                    // 悬浮窗权限顺手引导（提示窗依赖）
+                    // Also guide the overlay permission (the hint window depends on it)
                     if (!Settings.canDrawOverlays(this@BridgeSetupActivity)) {
                         runCatching {
                             startActivity(
@@ -198,7 +198,7 @@ class BridgeSetupActivity : AppCompatActivity() {
         refresh.removeCallbacks(ticker)
     }
 
-    /** 带参拉起时弹对应的正规弹窗（App 后台时安装确认/重装续接走这条路）。 */
+    /** When launched with arguments, show the matching proper dialog (the install-confirmation / reinstall-resume path while the app is in the background). */
     private fun handlePromptIntent(intent: Intent?) {
         when (intent?.getStringExtra(EXTRA_PROMPT)) {
             "install" -> {
@@ -208,8 +208,9 @@ class BridgeSetupActivity : AppCompatActivity() {
             }
             "resume" -> promptResume()
             "confirm" -> {
-                // 安装确认的前台转发：系统确认框从后台 Receiver 直接拉起会被
-                // 荣耀静默拦截（无异常无界面），由前台 Activity 启动必然生效
+                // Foreground forwarding of the install confirmation: the system confirmation launched directly from a background Receiver
+                // is
+                // silently blocked by Honor (no exception, no UI); starting it from a foreground Activity always works
                 val confirm = ReinstallFlow.pendingConfirmIntent
                 if (confirm == null) {
                     android.widget.Toast
@@ -228,7 +229,7 @@ class BridgeSetupActivity : AppCompatActivity() {
         }
     }
 
-    /** 新版本安装确认（正规弹窗；悬浮窗形式已被用户反馈否决）。 */
+    /** New-version install confirmation (proper dialog; the overlay form was rejected by user feedback). */
     fun promptInstall(
         file: File,
         version: String,
@@ -255,7 +256,7 @@ class BridgeSetupActivity : AppCompatActivity() {
         )
     }
 
-    /** 重装后的续接询问。 */
+    /** Post-reinstall resume prompt. */
     fun promptResume() {
         DarkMessageDialog.show(
             this,
@@ -280,13 +281,13 @@ class BridgeSetupActivity : AppCompatActivity() {
     companion object {
         private const val EXTRA_PROMPT = "prompt"
 
-        /** 当前已 resume 的实例（弱引用防泄漏）：调试弹窗需要有前台的 Activity 宿主。 */
+        /** Currently resumed instance (weak reference to avoid leaks): debug dialogs need a foreground Activity host. */
         @Volatile
         private var resumedRef: WeakReference<BridgeSetupActivity>? = null
 
         fun resumed(): BridgeSetupActivity? = resumedRef?.get()
 
-        /** 安装确认前台转发：把设置页带到前台，由它启动系统确认界面。 */
+        /** Install confirmation foreground forwarding: bring the settings page to the foreground so it launches the system confirmation UI. */
         fun startForConfirm(context: android.content.Context) {
             runCatching {
                 context.startActivity(
@@ -298,7 +299,7 @@ class BridgeSetupActivity : AppCompatActivity() {
             }
         }
 
-        /** 供 App 后台场景带参拉起本页并弹续接询问。 */
+        /** Launch this page with arguments from the app-background case to show the resume prompt. */
         fun startForResume(context: android.content.Context) {
             runCatching {
                 context.startActivity(

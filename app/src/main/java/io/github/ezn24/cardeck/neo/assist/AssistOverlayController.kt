@@ -10,45 +10,48 @@ import io.github.ezn24.cardeck.neo.shizuku.Shell
 import io.github.ezn24.cardeck.neo.util.Bg
 
 /**
- * 语音助理上车（实验）：让 Gemini **原生浮层**（四色光效 + 「問 Gemini」条）显示在车机上。
+ * Voice assistant on the car (experimental): shows the Gemini **native overlay** (four-color glow + "Ask Gemini" bar) on the head unit.
  *
- * 2026-11-15 S24 Ultra 实测结论（决定了这套做法）：
- *  - Gemini 浮层是 Google 应用里的普通 Activity（`FloatyActivity`），开在**当前焦点屏**；
- *    「Hey Google」通常落在手机主屏，但它的 task 可以用 `am display move-stack` 搬到车机屏，
- *    搬过去后原生渲染、可直接触摸——比镜像裁剪好看得多（镜像方案已放弃）；
- *  - 车机屏上它会被仪表盘地图/媒体卡（合成器画在应用屏之上）盖住，需要暂时让出卡片；
- *  - 应用侧录音回调、甚至 shell 侧录音配置都看不到 Gemini 的 HOTWORD 录音，
- *    可靠信号是 Google 应用的 RECORD_AUDIO / RECORD_AUDIO_HOTWORD AppOp（shell 查询）。
+ * Findings from the 2026-11-15 S24 Ultra tests (these shaped the approach):
+ * - The Gemini overlay is a plain Activity inside the Google app (`FloatyActivity`), opened on the **currently focused display**;
+ * "Hey Google" usually lands on the phone's main display, but its task can be moved to the car display with
+ * `am display move-stack`, after which it renders natively and is directly touchable, far better than mirror cropping (mirroring was
+ * dropped);
+ * - On the car display it is covered by the dashboard map/media cards (the compositor draws them above the app display), so the cards
+ * must yield temporarily;
+ * - App-side recording callbacks, and even shell-side recording configs, cannot see Gemini's HOTWORD recording;
+ * the reliable signal is the Google app's RECORD_AUDIO / RECORD_AUDIO_HOTWORD AppOps (queried via shell).
  *
- * 流程：每 [MIC_WATCH_MS] 问一次 shell「助理开麦了吗」（一次 binder）→ 开麦后每
- * [POLL_INTERVAL_MS] 跑 `dumpsys window windows` 找浮层 → 在手机屏就搬到桌面所在车机屏 →
- * 在车机屏就让出卡片 → 浮层消失后恢复。所有 shell/binder 调用都在 [thread] 上。
+ * Flow: every [MIC_WATCH_MS] ask the shell "is the assistant listening?" (one binder call); once listening, every
+ * [POLL_INTERVAL_MS] run `dumpsys window windows` to find the overlay; if it is on the phone display, move it to the car display hosting
+ * the desktop;
+ * if it is on a car display, yield the cards; restore after it disappears. All shell/binder calls run on [thread].
  */
 object AssistOverlayController {
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
     private var log: (String) -> Unit = {}
 
-    /** 以下状态只在 [thread] 上读写。 */
+    /** The state below is read and written only on [thread]. */
     private var polling = false
     private var misses = 0
     private var micActive = false
     private var watchState = ""
 
-    /** 浮层当前所在的车机屏（-1 = 不在车机上）。 */
+    /** Car display the overlay is currently on (-1 = not on the car). */
     @Volatile
     private var carDisplayId = -1
 
-    /** 浮层是否正显示在车机上（TouchRouter：点 dock 关浮层）。 */
+    /** Whether the overlay is showing on the car (TouchRouter: tapping the dock closes it). */
     fun isOnCar(): Boolean = carDisplayId >= 0
 
-    /** 浮层在助理透明屏上（TouchRouter：应用区触摸全交给它）。 */
+    /** Overlay is on the assistant transparent display (TouchRouter: hands all app-area touches to it). */
     fun isOnAssistLayer(): Boolean = carDisplayId >= 0 && carDisplayId == VirtualLauncher.assistDisplayId
 
-    /** 已经搬过的 task：它若又回到手机屏，说明用户在车机上把它收起了（见 [poll]）。 */
+    /** Task already moved: if it returns to the phone display, the user dismissed it on the car (see [poll]). */
     private var movedTaskId = -1
 
-    /** 浮层当前的 task（关闭用）。 */
+    /** Current overlay task (used to close it). */
     @Volatile
     private var currentTaskId = -1
 
@@ -61,22 +64,23 @@ object AssistOverlayController {
                         try {
                             svc.isAssistantListening()
                         } catch (t: Throwable) {
-                            // 旧版 UserService 进程没有该方法（重装后首连可能复用旧进程）
-                            if (watchState != "unavailable") log("ASSIST: shell 开麦查询不可用：$t")
+                            // Older UserService process lacks this method (first connect after reinstall may reuse the old process)
+                            if (watchState != "unavailable") log("ASSIST: shell mic query unavailable: $t")
                             watchState = "unavailable"
                             null
                         }
                     if (listening != null) {
-                        if (watchState != "ok") log("ASSIST: shell 开麦查询已就绪（AppOps）")
+                        if (watchState != "ok") log("ASSIST: shell mic query ready (AppOps)")
                         watchState = "ok"
                         if (listening != micActive) {
                             micActive = listening
-                            log("ASSIST: 助理开麦 active=$listening")
+                            log("ASSIST: assistant mic active=$listening")
                         }
                         if (listening) beginPolling()
                     }
                 }
-                // 只在本会话的线程上续排（stop→start 后旧线程残留的一次执行不得串进新线程）
+                // Reschedule only on this session's thread (a leftover run of an old thread after stop->start must not leak into the new
+                // one)
                 val h = handler ?: return
                 if (h.looper == android.os.Looper.myLooper()) h.postDelayed(this, MIC_WATCH_MS)
             }
@@ -91,7 +95,7 @@ object AssistOverlayController {
             }
         }
 
-    /** 会话 attach 时调用（VirtualLauncher）；偏好关闭时什么都不做。 */
+    /** Called on session attach (VirtualLauncher); does nothing when the preference is off. */
     @Synchronized
     fun start(
         context: Context,
@@ -105,11 +109,11 @@ object AssistOverlayController {
         val h = Handler(t.looper)
         thread = t
         handler = h
-        log("ASSIST: 已启用（等待语音助理开麦）")
+        log("ASSIST: enabled (waiting for the voice assistant to open the mic)")
         h.post(micWatch)
     }
 
-    /** 会话 detach 时调用：恢复卡片、停线程。 */
+    /** Called on session detach: restore cards, stop the thread. */
     @Synchronized
     fun stop() {
         val h = handler ?: return
@@ -123,7 +127,7 @@ object AssistOverlayController {
         }
     }
 
-    /** 设置面板切换：会话中立即生效。 */
+    /** Settings panel toggle: takes effect immediately during a session. */
     fun onPrefChanged(
         context: Context,
         enabled: Boolean,
@@ -136,17 +140,18 @@ object AssistOverlayController {
     }
 
     /**
-     * 车机上点了浮层够不着的地方（dock 屏）：结束浮层。返回 true = 已处理（调用方吞掉这次点击）。
+     * User tapped somewhere the overlay cannot reach on the car (dock display): end the overlay. Returns true = handled (caller swallows
+     * the tap).
      *
-     * 不能发 BACK：Gemini 把 BACK 当「收起」，task 会跳回手机屏继续挂着（实测还带着
-     * 从音乐里误识别的文字待发送）。直接移除 task 才是真正结束。
+     * Cannot send BACK: Gemini treats BACK as "collapse" and the task jumps back to the phone display and lingers (observed with
+     * misrecognized text from music pending to send). Removing the task is what truly ends it.
      */
     fun dismissFromCar(): Boolean {
         val display = carDisplayId
         val task = currentTaskId
         if (display < 0 || task < 0) return false
         Bg.run("assist-dismiss") { removeTask(task) }
-        log("ASSIST: 车机点击 dock → 结束助理浮层 task=$task")
+        log("ASSIST: car tap on dock -> ending assistant overlay task=$task")
         return true
     }
 
@@ -159,7 +164,7 @@ object AssistOverlayController {
         if (polling) return
         polling = true
         misses = 0
-        log("ASSIST: 开始核对助理窗口")
+        log("ASSIST: start checking assistant window")
         handler?.post(pollTask)
     }
 
@@ -170,9 +175,12 @@ object AssistOverlayController {
             misses = 0
             currentTaskId = window.taskId
             if (window.displayId == 0 && window.taskId >= 0 && window.taskId == movedTaskId) {
-                // 搬上车机的浮层自己回到了手机屏：用户在车机上点空白处收起了它。
-                // Gemini 收起后会在手机上挂着（可能带误识别的文字），直接结束。
-                log("ASSIST: 助理浮层从车机屏回到手机 task=${window.taskId} → 视为在车机上关闭，结束它")
+                // The overlay moved to the car returned to the phone display by itself: the user tapped blank space on the car to
+                // collapse it.
+                // After collapsing Gemini lingers on the phone (possibly with misrecognized text), so end it directly.
+                log(
+                    "ASSIST: assistant overlay returned from car display to phone task=${window.taskId} -> treated as closed on the car, ending it",
+                )
                 removeTask(window.taskId)
                 leaveCarDisplay()
                 return
@@ -186,19 +194,20 @@ object AssistOverlayController {
         if (carDisplayId >= 0 && misses >= HIDE_AFTER_MISSES) leaveCarDisplay()
         if (carDisplayId < 0 && !micActive && misses >= HIDE_AFTER_MISSES) {
             polling = false
-            log("ASSIST: 助理窗口不在，停止核对")
+            log("ASSIST: assistant window gone, stop checking")
         } else if (carDisplayId < 0 && misses >= GIVE_UP_MISSES) {
             polling = false
-            log("ASSIST: 持续开麦但无助理窗口（$misses 次），停止核对")
+            log("ASSIST: mic stays active but no assistant window ($misses times), stop checking")
         }
     }
 
     /**
-     * 浮层该待的车机屏（2026-11-15 用户两轮反馈后的定案）：
-     *  - 首选**助理透明屏**（CarPlayAssist）：合成器把它当顶层半透明叠在整个应用区上——
-     *    光效铺满全屏、对话条在底部，地图/媒体卡照常可见（「让出卡片」会让地图消失，
-     *    「搬到地图屏」又只占地图卡，两者都被否决）；
-     *  - 透明屏建不出来时退回：仪表盘/全屏地图 → 地图屏；其它 → 当前活动应用屏。
+     * Where the overlay should live (settled after two rounds of user feedback on 2026-11-15):
+     * - Preferred: the **assistant transparent display** (CarPlayAssist): the compositor layers it translucently over the whole app area,
+     * glow fills the screen, chat bar at the bottom, map/media cards stay visible (yielding the cards made the map vanish,
+     * and moving it to the map display only covered the map card; both were rejected);
+     * - If the transparent display cannot be created, fall back to: dashboard/fullscreen map -> map display; otherwise -> current active
+     * app display.
      */
     private fun targetDisplay(): Int {
         val assist = VirtualLauncher.ensureAssistDisplay()
@@ -210,10 +219,10 @@ object AssistOverlayController {
         }
     }
 
-    /** 已搬过的 (task, 目标屏)：同一组合只搬一次，失败或被系统拒绝也不反复重试。 */
+    /** Already moved (task, target display) pairs: each combination is moved once, no repeated retries on failure or system refusal. */
     private var movedTarget = -1
 
-    /** 把浮层 task 搬到 [target]；返回是否发起了搬移（本轮不再处理显示状态）。 */
+    /** Move the overlay task to [target]; returns whether a move was started (no display-state handling this round). */
     private fun moveTo(
         task: Int,
         target: Int,
@@ -222,22 +231,24 @@ object AssistOverlayController {
         movedTaskId = task
         movedTarget = target
         val r = Shell.exec("am display move-stack $task $target", timeoutMs = 3_000L)
-        log("ASSIST: 助理浮层 task=$task → 搬到车机屏 $target ok=${r.ok} ${r.output.take(80)}")
+        log("ASSIST: assistant overlay task=$task -> moved to car display $target ok=${r.ok} ${r.output.take(80)}")
         return r.ok
     }
 
-    /** 浮层在车机屏；若落在被仪表盘卡片盖住的屏上（搬移失败时的兜底），暂时让出卡片。 */
+    /** Overlay is on a car display; if it sits on a display covered by dashboard cards (fallback when a move fails), yield the cards temporarily. */
     private fun showOnCarDisplay(displayId: Int) {
         if (carDisplayId == displayId) return
         carDisplayId = displayId
         VirtualLauncher.setAssistLayerVisible(displayId == VirtualLauncher.assistDisplayId)
         val uncovered = VirtualLauncher.setAssistOnCarDisplay(displayId)
-        log("ASSIST: 助理浮层在车机屏 display=$displayId → ${if (uncovered) "让出仪表盘卡片" else "非桌面所在屏，原样显示"}")
+        log(
+            "ASSIST: assistant overlay on car display display=$displayId -> ${if (uncovered) "yielding dashboard cards" else "not the desktop display, shown as is"}",
+        )
     }
 
     private fun leaveCarDisplay() {
         if (carDisplayId < 0) return
-        log("ASSIST: 车机屏上的助理浮层已关闭 display=$carDisplayId → 恢复仪表盘卡片")
+        log("ASSIST: assistant overlay on the car display closed display=$carDisplayId -> restoring dashboard cards")
         carDisplayId = -1
         VirtualLauncher.setAssistLayerVisible(false)
         VirtualLauncher.setAssistOnCarDisplay(-1)
@@ -246,9 +257,9 @@ object AssistOverlayController {
     private const val MIC_WATCH_MS = 400L
     private const val POLL_INTERVAL_MS = 450L
 
-    /** 连续多少次看不到窗口才算关闭（dumpsys 偶发漏块，单次不可信）。 */
+    /** Consecutive misses before the window counts as closed (dumpsys occasionally drops a block, one read is not trustworthy). */
     private const val HIDE_AFTER_MISSES = 2
 
-    /** 一直开麦却始终没有助理窗口：放弃核对，等下一次开麦。 */
+    /** Keeps listening but never sees an assistant window: stop checking, wait for the next mic open. */
     private const val GIVE_UP_MISSES = 20
 }

@@ -1,1194 +1,573 @@
-## 2026-11-18 无线 CarPlay 转接盒模式（移植自 zz85/cardeck，MIT，未实机验证）
+# AGENTS.md - Guide for AI coding assistants and developers
 
-- 来源：fork zz85/cardeck 的 be86bb9 / a03afde（smartBox-136F 实测），以 cherry-pick 合入，新文件注释为英文。a03afde 里的 Bigme ROM 修正（不带 `OWN_DISPLAY_GROUP`）按用户决定未合入。
-- 闸门 `bt/AdapterMode.active`：目标设备名像转接盒（smartBox/CarLink/Carlinkit/AutoKit/CPC200）时 `startConnection` 置位；目标为「自动」时由 `Iap2BluetoothServer` 在盒子撥入 `…cafe` 时置位（必须早于 `Iap2LinkChannel` 构造）。为 false 时其它车机行为不变。
-- 与车机相反的几处：盒子是 RFCOMM 客户端、先发 SYN（我们原样回显参数）；WiFi 隧道等盒子先发（`AdapterIapLink`）；RECORD 后发 `disableBluetooth`；mDNS SRV 为 `(none).local.` 时改用 DHCP 服务器/邀请方/网关；H.264 Baseline；requestUI/forceKeyFrame 时重发 VideoConfig+IDR（`RePrimeGate`）；已认得手机的盒子只发 WiFi 邀请，由邀请直接开会话。
-- 连接中 ACL 断开有 60s 宽限（`CarPlayService.AUTO_STOP_GRACE_MILLIS`），推流中照旧忽略。
+This file is the working memory of the project: build rules, architecture, protocol facts and every pitfall that has already cost a debugging session. Read the section that covers the code you are about to change before changing it. Items marked "(unverified on a real car)" were only tested on a bench receiver or not at all.
 
-## 2026-11-20 上游 issue 兼容修正（待真车验证）
+## 1. Overview
 
-- **蓝牙车机链路初始序号随机**（`Iap2LinkChannel(carLink = true)` → `Iap2LinkEngine.randomInitialSequence()`）：福特 SYNC+ 2.0 对固定 99 的 SYN 零应答、换值即通（上游 #25）。单测/重放默认仍 99；转接盒与 WiFi 隧道不随机。
-- **NORMAL 后连续 marker = 车机求重协商**（`renegotiateOnPeerMarker`，同样只在蓝牙车机链路开）：3s 内两个 marker → 回 marker + 新序号 SYN，5s 窗内回显车机新 SYN。凯迪拉克 CT5 实测闭环（上游 #27），但该车 SETUP 仍 500，这是必要不充分条件。
-- **画质（上游 #26，大众 MIB3 比原生糊）**：码率改 `encoderBitrate()`（像素×8、4~12Mbps、60fps×1.5、总上限 12；HEVC 取 65%）+ 编码器支持时 **CBR**（高通 VBR 10s 平均实测超目标 75~80%，用户取舍稳定优先）；设置→显示「清晰优先」（`DisplayPrefs.clarityFirst`，默认关）请求 High profile，编码器按 High+L4 → L4 → 自动逐级降级；转接盒恒 Baseline。日志 `VIDEO: 画质 …` 一行摘要，keepAlive 行带实际码率；实际 profile 看 VideoConfig 行（66/77/100）。部分编码器会静默忽略 KEY_PROFILE（同 KEY_LEVEL），以 SPS 为准。
-- **静止降频（对照真 iPhone）**：WinPlay `diagnostics.json`（`%APPDATA%/winplay/data/`，每 10s 一条「视频运行统计」累计字节/帧）显示 iPhone 静止时 0~0.4fps、≈0Mbps、无短周期 I 帧，变动时峰值 ~13Mbps。合成器改 `composeIntervalMs`：静止 1s 内仍 33ms，之后每秒 1 帧；周期 I 帧 3s → 30s。**取代上文「静止心跳 33ms」约定**；保底 1fps 是 2026-10-09「无帧→冻结」的兜底，真车未验证。
-- **静止码率 / 卡顿 / 延迟（WinPlay 对照真 iPhone）**：① QP 下限 I20/P22（`KEY_VIDEO_QP_*_MIN`）——没有它高通编码器会把预算用满，地图定位点动画每帧 16~30KB，加上后 1~3KB；② 码率总上限 12Mbps（16.6 时移动地图峰值 19~20Mbps、WinPlay 反复背压）；③ 视频口 `sendBufferSize=256KB` + 编码器低延迟提示（`KEY_PRIORITY/LATENCY/OPERATING_RATE`）；④ **触摸注入必须 ASYNC（mode 0）**：旧 mode 2 = WAIT_FOR_FINISH，每个 MOVE 都等 App 处理完，Google 地图按住转圈时事件排队，「拖不动、松手后地图自己继续转」。
-- **HEVC（实验，设置→显示「HEVC 编码」默认关）**：协议事实来自 CarPlayStation（Windows 接收端，GPL-3.0 只读对照）——接收端 `/info` 放**空字典 `hevcInfo`**，且会话 SETUP 应答 `enabledFeatures` 含 `"hevc"`（我们的提议清单本就带 hevc），两者都有才算支持（`SetupInfo.hevc`）。VideoConfig 体为 `[u32 BE 盒长]["hvcC"][HEVCDecoderConfigurationRecord]`、头偏移 6 加 0x08；帧仍 4 字节长度前缀，**不得**套 H.264 的 SPS level 补丁（`annexBToLengthPrefixed(patchH264Level=false)`）。组装见 `video/HevcConfig`。WinPlay 无 hevcInfo。CarPlayStation 本机 MFi 签名可用自签 P-256（我们跳过 0xAA03 校验）。真车形态未验证。
-- **`cmd wifi connect-network` 一律带 `-d`**（`WifiConnectCommand.AUTOJOIN_DISABLED`）：该命令会覆盖同名已保存网络的配置，不带 `-d` 时用户在系统里关掉的「自动连线」每次连接都被改回开（WinPlay 实测）。车机热点无互联网，不该被系统自动连。
-- **通用车机 0x4300 双群组**（`CarPlayAvailability.body(dualGroup=…)`，0x1D01 制造商含 General Motors 才启用）：群组 0 = 可用 + 24 位大写十六进制设备标识（MAC 派生），群组 1 = 可用 + 蓝牙 MAC。来自 fork chengshl/cardeck（MIT）Buick E5（B233）实车：单群组时卡在 0x4301 之前，双群组后出画面。上游别克/凯迪拉克（#1/#12/#20/#24/#27）多卡在同一阶段。0x4e0c 已走带 ACK 的 send、0x4301 无线子参数已解析 SSID/密码，二者无需再移植。
-- 上游 #25 另两条（0x4E0E 改「u8 类型 + MAC」、稀疏清单判 NEW）**不采纳**：前者与转接盒/真 iPhone 的「MAC + UDID」格式冲突，后者与奥迪 3315 稀疏清单仍需 0x5702 的定谳冲突。
+- CarDeck Neo turns a non-rooted Android phone into a **wireless CarPlay sender** (the iPhone role). Reference device: Honor Magic7 Pro. Bench receivers: DiPlay on a Redmi K40, WinPlay (Windows), CarPlayStation (Windows). Real cars: Audi MIB3 (MMI 3315, 6318, 9310, 4xxx), BMW, GM, VW MIB3, Ford, Cadillac CT5.
+- The phone draws its own head-unit launcher on virtual displays, encodes it (H.264, optionally HEVC) and streams it to the head unit; head-unit touch is injected back into the virtual displays through Shizuku (shell uid 2000).
+- Protocol chain: Bluetooth iAP2 (RFCOMM) -> head-unit Wi-Fi hotspot credentials -> Wi-Fi join -> mDNS (`_carplay-ctrl._tcp`, `_airplay._tcp`) -> AirPlay (pairing, encrypted RTSP control, event channel, stream setup) -> video + audio streams (+ optional microphone uplink).
+- Shizuku is mandatory. Without it there are no virtual displays, no touch injection and no window/display state.
+- Fork of upstream `shaonialife/cardeck` (MIT). This repo: `ezn24/cardeck-neo`, working branch `neo`. Wireless-adapter mode was ported from `zz85/cardeck` (MIT).
 
-## 2026-11-18 断线收尾三坑
+### Package and identifiers
 
-- **推流中忽略车机蓝牙 ACL 断开**：接收端交接到 WiFi 后放掉蓝牙是正常行为（WinPlay RECORD 后 ~3s 断 ACL），「上车自动连接」的 ACL_DISCONNECTED 曾把健康会话当下车拆掉（「刚连上就断」）。真下车靠 WiFi onLost / onEnded 收尾。
-- **`cmd wifi forget-network` 只认 netId**，传 SSID 必失败。静默入网（connect-network）存的热点记在 prefs `wifi/appSavedSsids`，会话末按 netId 清除；用户自己保留的同名网络不删。
-- **虚拟屏带 `DESTROY_CONTENT_ON_REMOVAL`(1<<8)** 只结束活动，任务仍以「最近使用」留在手机；detach 时先 `am stack remove` 车机屏任务（连最近使用一起删）再释放屏，两步在同一后台任务里按序执行（detach 可能在主线程）。
-- **React Native App（Discord）量字用手机屏密度、画字用所在屏密度**：车机屏密度≠手机就裁字，与运行中改密度无关。解法 `ChatMode.matchPhone`：应用屏 `wm size` 逻辑放大到「密度=手机密度时 dp 不变」，`activeAppScale()` 乘同一倍率。桌面在 AppHi 屏，别动那块。
-- 平板版面实测：ChatGPT、YouTube 188dpi 下是平板版；微信任何密度都是单栏（主页标题重复是微信自身问题）。2026-11-18 再测：150dpi（sw768 xlarge）、逻辑 2920×1200@240（短边 800dp）+ force-stop 冷启动，微信版面与 267dpi 完全相同——它不用系统密度/配置决定版面，外部调不出平板双栏。
-- 车机任务 ID 持久记在 prefs `settings/carTaskIds`：detach 与下次 attach 都按它 removeTask 补删（保留当前车机屏上的任务），覆盖强停/崩溃没走 detach 的路径。
-- **VideoSender.onEnded(byPeer)**：本机 `stop()`（换轮次、断开）也会走到 onEnded，用 `byPeer` 区分。连线页「车机断开后等待回连」（`DisplayPrefs.waitForReconnect`，默认关）关闭时，仅对端断开才整个 `disconnect`。「车机声音」开关（`DisplayPrefs.carAudio`，默认开）取代连接前的声音弹窗，自动连接同样遵守。
-- adb 导出日志（release 包不能 run-as）：`am broadcast -a io.github.shaonialife.cardeck.EXPORT_LOG -p <包名> --ez all true`，结果数据即文件路径。
-- 聊天模式排除微信、Discord：不支持运行中改密度（标题重复 / 字形乱码）。通知横幅动画只换 OverlayCard 位置，合成器按位图身份决定是否重传纹理。
+- Source root: `app/src/main/java/io/github/ezn24/cardeck/neo/`. Package `io.github.ezn24.cardeck.neo` equals the `applicationId` (installs side by side with upstream CarDeck).
+- Remote-debug variant `applicationId`: `io.github.ezn24.cardeck.neo.rd`.
+- Always build component names as `packageName + "/" + X::class.java.name`. Never hard-code package strings or use relative class names (see Remote debug bridge). The external `cardeck-bridge` repo must follow the same package if it references it.
+- A new package name is a new app: Shizuku permission, notification-listener access, overlay permission and appops grants must all be granted again.
 
-## 2026-11-17 车机麦克风上行（v1，待真车验证）
+### Language conventions
 
-- 全部协议事实与实验数据在 `docs/MIC-RESEARCH.md`。要点：手机发 `type=100 audioType=speechRecognition input=true` 的 SETUP，`dataPort` 填**手机自己**的 UDP 端口；车机包格式与我们下行同构，密钥标签 `DataStream-Input-Encryption-Key`，PCM 是**大端**。
-- Android 侧靠 shell 的 `MODIFY_AUDIO_ROUTING` 注册 AudioPolicy 录音注入（`startMicInjection`）：注入期间**手机自己的麦克风对所有 App 失效**，只能在语音进行中存在；热词（HOTWORD/SoundTrigger）注入不到。
-- 触发：会话中任何 App 录音（UserService `activeMicApps`，AppOps 监视）自动切换；车机语音键 `requestSiri` 另外唤起助理。会话退役与 onEnded 两端都要 `CarMicController.detach`，新增会话收尾路径时别漏。
-- WinPlay 已端到端验证（2026-11-17）。四个隐蔽坑见 MIC-RESEARCH「WinPlay 端到端打通」：注入轨道要 `setContext(shell)`、tags 只能 `addr=` 开头、麦克风流期间必须发下行（静音）接收端才开麦、**不要校验麦克风包的 RTP 版本位**（WinPlay 包头 bug）。
+- Code comments and log messages: English (converted from Chinese 2026-11-21; logs exported before that are Chinese, so log parsers such as `tools/extract_car_fixtures.py` match both). Comments explain why and the measured evidence, not what the code does. A few hard-coded UI strings in Kotlin are still Chinese and should move to string resources.
+- User-facing UI text: Android string resources only. Default `values/` is Simplified Chinese, `values-b+zh+Hant/` Traditional Chinese, `values-en/` English. Keep all three in sync. Settings menus must resolve text dynamically, never cache labels in static lists (language switch).
+- `reference/` holds GPL reference repos (gitignored). Read for protocol facts only; never copy code into this project and never redistribute.
 
-## 2026-11-17 包名改为 io.github.ezn24.cardeck.neo
+## 2. Build, test, release
 
-- 只改了 `applicationId`（与上游 CarDeck 可并存）；`namespace` 与源码包路径仍是 `io.github.shaonialife.cardeck`，类名/组件类路径不变。组件名一律 `packageName + "/" + X::class.java.name`，**不要**写死包名字符串。remote 变体为 `io.github.ezn24.cardeck.neo.rd`；外层 cardeck-bridge 若写死了旧包名需同步。
-- 换包名 = 新应用：Shizuku、通知使用权、悬浮窗、appops 放行等授权都要在新包上重新授予。
-
-## 2026-11-17 MD3 手机端 / 跟手翻页 / 壁纸双槽
-
-- **手机端色彩**：`m3_*` 令牌在 `values/`（浅）与 `values-night/`（深）分别取系统 Material You 色板（`system_accent*/neutral*`，minSdk 31），surface 四档用 `res/color(-night)/` + `android:lStar` 精确色调；改色改 `colors_gen` 取值表。车机设置（SettingsActivity、竖屏转发的 PhoneSettings/SettingsContent）同样跟随手机深浅色（用户要求，与壁纸深/浅槽位一致）；dock/桌面仍是固定深色设计。
-- **设置面板颜色走主题属性 `panel*`**（attrs.xml）：Launcher 主题给旧 iOS 深色值，App 主题与 Settings 主题给 m3 令牌。面板布局/drawable/代码里不要再写十六进制色，用 `?attr/panel…` 或 `SettingsRows.color()`。
-- **仪表盘左滑 = 跟手 fakeDrag**：`DashboardSwipeGesture` 按下先不注入，定性后才放行——左拖 → `beginDashboardDragOut` + pager `fakeDragBy`（GL 地图层随 onPageScrolled 走），点按 → 起点补发 down+up，竖滑/右滑 → 起点补 down 后照常注入。这是音乐卡防误触的关键：翻页手势全程不给媒体卡/音乐 App 任何事件。
-- **声音授权**：Shizuku 就绪走 `SilentProjectionActivity`（appops 放行，不弹窗）；否则录音 → 投屏**依次**弹（同时弹两个系统窗会互相顶位，即长期的「弹窗动一下」）。
-- **壁纸深/浅两槽**（`WallpaperStore.Slot`），跟随手机深浅色（`attach` 监听配置变更，两槽不同才 markChanged）；浅色默认「同深色」。内置图案 `WallpaperPresets` 为代码绘制渐变（原创，非第三方素材）。
-
-## 2026-11-17 仪表盘版式随分辨率自适应
-
-- **地图屏/媒体屏密度随画布等比**（`MAP_DISPLAY_DPI` = 200 × DashMetrics.scale，下限 120）：此前固定 200dpi，800×480 下地图屏只有 ~534×271dp，Google 地图搜索栏+底部面板吃满高度、地图只剩一条缝——这才是「小分辨率地图显得很小」的根因，与分屏方式无关。
-- 版面偏好**只对窄横屏生效**（宽高比 < 1.9）；宽屏一律左右分屏；**窄屏默认 Dock 在底部**，只有显式选「左右分屏」才左右分屏（旧「自动」/「音乐在底部」值按默认处理）。
-
-- **版面（DashLayout）**：「dock 在哪」(`dockAtBottom`) 与「怎么分屏」(`splitVertical`) 已拆开——SIDE_BY_SIDE / MUSIC_BOTTOM（dock 左 + 上地图下音乐条）/ DOCK_BOTTOM（Android Auto 式，横屏 dock 底部、厚度 ×0.72）/ PORTRAIT（竖屏车机固定）。偏好在 设置→显示→仪表盘版面（下次连接生效），「自动」= 画布宽高比 < 1.9 用音乐条。**新代码判断几何时先想清楚要的是 dock 位置还是分屏方向**；设置页的「窄屏」用 `isPortraitCanvas()`。
-- 音乐条版面媒体 App 不嵌进细长条（`launchMediaApp` 转 `launchApp` 正常打开）；卡片用 `view_dashboard_strip.xml`（id 与竖卡相同）。`PaneBounds` 上下分屏分支的 x 从 dockWidth 起（竖屏车机传 0，行为不变）。
-- 横屏 dock 底部时也有超采样应用屏：TouchRouter 的 dockAtBottom 分支走 `activeAppDisplayId()` + `activeAppScale()`。
-
-- 流像素常量（`CARD_MARGIN_PX`/`DASH_GAP_PX`/`DASH_HANDLE_TOUCH_PX`/`TILE_CORNER_RADIUS`）不再写死：随 `DashMetrics.scale`（流画布短边 / 720）等比，1920×720 下与旧值一致。`DashMetrics.configure` 必须先于 attach 里任何几何推导。新增流像素尺寸一律乘 scale，勿裸写数字。
-- 地图/媒体比例按应用区形状算（`VirtualLauncher.dashSplitFractionFor`，单测 `DashSplitAdaptiveTest`）：媒体卡保持「宽/高 ≈ 0.62」（竖屏「高/宽 ≈ 0.45」），地图吃掉其余，钳制 0.55~0.8。1920×720 → 0.75（即 3:1），1280×720 → ~0.60。日志行 `LAUNCHER: 仪表盘版式 画布=… 缩放=… 地图比例=…`。
-- 卡片内容（GridActivity 媒体卡）用 dp，应用屏密度本就随屏高等比（逻辑高 ~432dp 恒定），不需另行缩放；真正要随分辨率调的是**横向比例**。
-
-## 2026-11-16 效能约定（改动前先看）
-
-- **手机主页在会话中多半看不见**（暗幕/物理面板断电），但 Activity 仍是前台：任何循环动画或定时刷新都要随 `ScreenDimmer.isCovering()` / `addCoverListener` 和 onPause 暂停（见 `MainActivity.syncPhoneUiActivity`）。实测此前主页波纹动画让 RenderThread 成为全进程最耗 CPU 的线程（~7%）。
-- **周期 I 帧 3s**（`VideoSender.KEYFRAME_INTERVAL_S`）：I 帧 ~550KB / P 帧 5–20KB；车机要帧走 `forceKeyFrame` → `requestKeyFrame` 即时补。改回 1s 前先确认真车确实需要。
-- **日志异步落盘**（`DebugFileLog` 单写线程 + 队列）：不要在热路径（视频/触摸/音频线程）上做同步文件 I/O；高频事件（每帧、每个 I 帧）不要逐条打日志。
-- **合成循环事件驱动**：输入新帧 / 叠加层 / 布局动画通过 `wake()` 叫醒，不要再加固定 sleep 轮询；每次 draw 复用 `posBuf/texBuf`，不要在 draw 里分配直接缓冲。静止心跳仍是 33ms（降频前要真车验证，历史上出过「无帧 → 接收端画面冻结」）。
-- **视频帧打包**：`annexBToLengthPrefixed` 一次扫描出定长数组（单测与旧实现逐字节对照），AES 原地加密；socket 外包 `BufferedOutputStream`，头与体一次发出。
-- **媒体轮询只在会话中**：`MediaListenerService` 会话外不做每秒 getActiveSessions（全天耗电），靠回调。
-
-## 2026-11-15 语音助理上车、分屏地图直控（跨会话结论）
-
-- **Gemini 浮层是普通 Activity**（`googlequicksearchbox/...FloatyActivity`，`ty=BASE_APPLICATION`），不是 VOICE_INTERACTION 窗口；开在**当前焦点屏**。「Hey Google」多落在手机主屏，`am display move-stack <task> <gridDisplay>` 可把它搬上车机屏，原生渲染、可触摸。镜像裁剪方案试过，观感差已放弃。
-- **检测开麦只能靠 AppOps**：应用侧 `AudioRecordingCallback`、甚至 shell 侧 `getActiveRecordingConfigurations` 都看不到 Gemini 的 `src:HOTWORD` 录音（S24 实测）；可靠的是 Google 应用的 `RECORD_AUDIO` / `RECORD_AUDIO_HOTWORD` op（UserService `isAssistantListening`，shell 有 WATCH_APPOPS）。
-- **关浮层要 `am stack remove`，不能发 BACK**：Gemini 把 BACK 当「收起」，task 跳回手机屏挂着（还带误识别文字）。点浮层所在屏空白处由 Gemini 自己正常结束。
-- **仪表盘 / 全屏地图时把浮层搬到地图屏**（叠在地图卡上，地图照常可见；分屏地图卡可直触，浮层收得到点击）；其它情况搬到当前活动应用屏。曾用「让出卡片」（`tilesSuppressed`）方案，地图会整块消失被用户否决，现仅作搬移失败时的兜底。
-- Gemini 唤起时会截手机主屏当 screen context，搬上车机后可能显示那张手机截图（竖屏、居中）——是 Gemini 自身行为。
-- 应用进程对 display 0 的 `getRealMetrics` 会话中可能读到车机虚拟屏尺寸（S24 读成 2628x1080）；要手机真实尺寸用 `wm size`。
-- 分屏地图卡直控：地图屏分屏时 resize 成 `mapPaneBounds` 尺寸，触摸坐标只需平移；卡内起手不得起仪表盘左滑（否则拖地图翻页）。
-
-## 0.1.39 連線直接進分屏
-
-- 新連線先設定分屏為首頁，再啟動 Dock 和桌面；背景啟動預設地圖，回到分屏時沿用已切換的地圖。
-- Android ICU 會拒絕任務解析規則中未跳脫的右大括號，導致地圖、媒體和背景管理的任務操作中斷。規則改用明確的十六進位字元；查詢或解析異常不應阻斷 App 啟動。
-
-## 0.1.37 背景應用及地圖選擇
-
-- 背景應用僅由 Dock 進入。清單以本次連線成功啟動紀錄為準，包含自動開啟的預設地圖；斷線清空。關閉操作仍以車機任務實際 ID 為範圍。
-- 「切換目前地圖」和「選擇其他已安裝應用」共用有圖示的搜尋選擇器。切換目前地圖不寫入預設偏好。先前桌面入口、任務掃描載入清單約定已由本節取代。
-- 目標倉庫 ezn24/cardeck-neo 的 neo 分支；使用者明確要求推送前，只修改本機。
-
-## 0.1.36 背景應用管理
-
-- 應用頁固定「背景應用」入口；長按 Dock Home 也可開啟。點 App 切換、單獨關閉或全部關閉；返回應用頁。
-- 以實際車機 Task 清單為來源，解析 Samsung `Display #N` 與 Honor `Display: mDisplayId=N`；排除手機主屏、Dock、CarDeck 自身所有 affinity。
-- 關閉僅移除車機視窗，不 force-stop 套件；音樂服務可能繼續播放。執行前重新取 task ID，完成後重讀驗證；失敗顯示可重試訊息。
-- shell 查詢、關閉命令、APK 圖示和名稱讀取都在背景；不以記憶體 runningApps 當真實程序狀態。
-
-0.1.35 最新需求：正常分頁順序為儀表盤（0）→應用頁（1+）。儀表盤僅左滑前進；應用第一頁右滑由原生 pager 返回儀表盤。已移除邊界攔截和 onPageSelected 強制退回；用 dashboardUserDragging 區分使用者拖動與自動動畫，使用者拖動不可阻斷 MOVE/UP 注入。拖動期間預覽 GL，IDLE 才提交模式；取消拖動保持原模式。優先於下文單向禁用及雙向同目的地舊約定。
-
-0.1.34：實機紀錄顯示有一次右滑已成功觸發，其餘多段為向左滑；儀表盤改為左右橫滑均可返回應用頁，開始追蹤不再依賴注入 pressed 或地圖點按狀態。橫向手勢限制優先於舊版單方向約定。
-
-0.1.33：整個儀表盤（包含嵌入媒體 App）可右滑返回應用頁；MOVE 達距離即觸發，跨區域保持手勢歸屬，觸發後吞掉剩餘事件，支援抬手座標 0,0。優先於舊媒體區排除約定。
-
-0.1.32 媒體返回改為 GL 浮動鍵，mediaAppBounds 等於完整 mediaPaneBounds；不再保留頂部橫列空間。
-
-使用者最新決定（0.1.32）：恢復儀表盤地圖卡／播放控制右滑返回應用頁，優先於下文禁用手勢的舊約定。嵌入媒體 App 的內部手勢保留。
-
-## 0.1.32 顯示切換
-
-- ViewPager 的非 Home 位置同步不可改寫 GL 層；IDLE 收尾只在 dashboardPageAnimating 時生效，並以當前 mapFullscreen/dashboardMode 決定目標。
-- 已在媒體屏運行的 singleTask App 從桌面重開應返回儀表盤媒體區，不能直接切向另一張空白應用屏。
-- 固定直式地圖需要啟動前完成方向相容覆蓋；session_maps 持久記錄待撤銷包，斷線恢復，不改使用者強制橫屏偏好。
-
-# AGENTS.md — 给 AI 编码助手的项目指引
-
-## 0.1.31 主线程与仪表盘导航
-
-- 2026-11-02 实机 ANR：GridActivity.reload 的主线程 loadLabel/loadIcon 卡住 10s+。所有冷应用扫描必须后台；调用 cachedApps 的主线程冷路径会被检查阻止。缓存图标限制为 144px。
-- 模式由 Dock 驱动，ViewPager2 选中回调不能提前写模式或隐藏地图。GL 地图/媒体层跟随同一个 onPageScrolled 进度，IDLE 后才隐藏；期间禁止 reload 重绑适配器。
-- 手指不得跨仪表盘/应用页边界切换；应用页内部翻页保留。
-- 媒体 App 使用 mediaAppBounds，顶部留出 GridActivity 的返回播放控制列，建屏/绘制/触控三处必须一致。
-- 仪表盘地图触摸在前置 PaneBounds 命中处理中独占；后续旧分流只能处理 mapFullscreen，不能再用 dashboardMode 判左侧/上方地图。
-- 通知横幅默认关闭，最多持有一张，绘图/其他 APK 资源读取在后台；系统提示卡优先，断开时清空，不记录通知内容。
-
-## 2026-11-02 媒体区域与会话地图
-
-- 媒体 App 必须在 CarPlayMedia 独立屏显示，不能再调用普通 launchApp 退出仪表盘。release、旧屏清理、方向策略与 GL 输入都包含媒体屏。
-- PaneBounds 是建屏、GL 和触摸唯一几何来源；对调位置只平移，不改变两块屏尺寸。媒体按住手势跨到地图时仍需保持媒体归属并正确收笔。
-- activeMapComponent 只记录会话内前台地图，返回仪表盘不能重新强制默认；切地图要复用同屏任务，不杀旧导航进程。
-- 新 AIDL 方法追加到末尾，保留旧事务编号，避免更新期间旧 Shizuku 服务误处理触摸调用。
-- 系统输出采集限于 REMOTE_SUBMIX，不使用麦克风；输出管线、AudioRecord 与媒体会话一起释放，不能泄漏录制。
-- WinPlay 的 SETUP 200 与持续 UDP 包不等于声音正常；必须看 PCM 非零比例。2026-11-02 Samsung/Spotify 最初两种采集均全零；切到下一首后 shell REMOTE_SUBMIX 探测取得 97,989/114,688 非零样本、峰值 8,628，而原播放捕获仍全零。已证实新来源有效，WinPlay 最终播放仍需新版端到端验证。
-
-## 2026-11-01 仪表盘与语言变更（优先于下文旧拖拽约定）
-
-- 仪表盘固定地图/媒体 3:1，旧 `dashSplitFraction` 不再读取；不要重新启用拖拽入口。
-- 地图卡触点仅用于展开，不注入后台地图；过渡期间不注入静态坐标。
-- GL 负责 320ms 矩形/圆角动画，虚拟屏 resize 必须在后台并同步 SurfaceTexture buffer。
-- 默认地图可选任意已安装且有启动入口的应用；手动选择的包同样需要走地图屏路由。
-- UI 文案从 Android 资源读取，需同步简中、繁中、英文；日志保留中文。设置菜单必须动态取文案，不能在静态列表缓存旧语言。
-- 构建、交互和验证说明：`docs/DASHBOARD-UX.md`。不自动开启模拟器；实车验证由用户完成。
-
-让一台未 root 的 Android 手机（荣耀 Magic7 Pro）扮演 **CarPlay 发送端（iPhone 角色）**：
-自绘车机桌面 → H.264 编码推流 → 奥迪车机 / DiPlay 测试台（Redmi K40 上的接收端）显示，
-车机触摸经 Shizuku（shell 权限）回注虚拟屏。协议链路：蓝牙 iAP2 → 车机热点 → mDNS →
-AirPlay（配对/控制/事件/流）→ 视频 + 音频推流。
-
-## 常用命令
+### Commands
 
 ```bash
-./gradlew assembleStandardDebug         # 构建（日常包；远程调试版为 assembleRemoteDebug）
-./gradlew testStandardDebugUnitTest     # 单元测试（协议层/编解码为主）
-./gradlew :app:lintStandardDebug        # Android Lint（存量问题在基线，新问题会失败）
-./gradlew spotlessApply                 # 代码格式化（ktlint official 风格，规则在 .editorconfig）
-adb -s <serial> shell am force-stop io.github.ezn24.cardeck.neo   # 安装前必须先杀应用
+./gradlew assembleStandardDebug          # daily build (remote-debug build: assembleRemoteDebug)
+./gradlew testStandardDebugUnitTest      # unit tests (mostly protocol / codecs)
+./gradlew :app:lintStandardDebug         # Android Lint; existing issues are baselined, new ones fail
+./gradlew spotlessApply                  # formatting (ktlint official, rules in .editorconfig)
+adb -s <serial> shell am force-stop io.github.ezn24.cardeck.neo   # always before install
 adb -s <serial> install -r app/build/outputs/apk/standard/debug/app-standard-debug.apk
 ```
 
-**安装流程（重要）**：会话进行中直接 `adb install` 时，系统安装确认弹窗会落到车机侧
-虚拟屏上（无人点得到，表现为 User rejected / 卡住）。**必须先 force-stop 再 install**；
-若仍被拒，先 `input keyevent KEYCODE_WAKEUP` 亮屏再装——**熄屏时确认弹窗无人应答会被
-系统自动拒绝**（2026-10-15 实测三次 INSTALL_FAILED_ABORTED，亮屏后即成）。
+- Flavor dimension `bridge`: `standard` (daily/release, normal package) and `remote` (`.rd` suffix, debug bridge code only in `app/src/remote/`, dependencies via `remoteDebugImplementation`; nothing reaches standard builds). Task names are flavored (`assembleStandardDebug`, `lintStandardDebug`, `testStandardDebugUnitTest`).
+- Do not start emulators. Real-car verification is done by the user. Do not claim a build or test passed unless it was actually run.
 
-**装过 release 包之后 debug 包装不上**（2026-10-18）：`app-debug.apk` 用 debug 证书、
-release 包用正式 keystore，`adb install -r` 会报
-`INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match`。同一台机器上要换类型只能
-先 `adb uninstall`（会丢应用数据/Shizuku 授权），或直接改用
-`./gradlew :app:assembleRelease` 的产物验证——**推荐后者**，签名一致、可覆盖安装。
-注意 release 包不可 debuggable，`run-as ... tail files/main_debug.log` 会报
-`package not debuggable`；日志验证要另走 debug 包或临时开 debuggable。
+### Installing on the phone
 
-**卸载应用不会释放虚拟屏**（2026-10-18 实测，比上面更隐蔽）：虚拟屏由 Shizuku 的
-UserService 子进程持有，**父应用卸载后该进程仍存活**，4 块屏（CarPlayDock/App/AppHi/Map）
-继续占位。此时再 `adb install`，确认弹窗仍会落到这些屏上，表现为「安装卡死」，
-而且因为应用已卸载、**无法靠「启动应用自动清理残留」补救**（那条路径需要应用存在）。
-更糟的是每次尝试安装都会新叠一个 `PackageInstallerActivity`（实测堆积 11 个）。
-处置（按顺序）：
-1. `adb shell ps -A -o PID,NAME | grep car_input` 找到 `:<包名后缀>` 的 UserService 进程
-   （名形如 `io.github.ezn24.cardeck.neo:car_input`，UID 为 shell）；
-2. `adb shell kill <PID>` —— 进程退出，虚拟屏立即全部释放（实测 kill 后
-   `dumpsys display | grep CarPlay` 为空）；
-3. `adb shell am force-stop com.android.packageinstaller` 清掉堆积的安装弹窗；
-4. 再 `adb install`。
-（`adb install --user 0` / `-g` 等参数**绕不过** Honor 的安装确认弹窗，别指望静默安装。）
-残留屏数量与是否为「上次会话遗留」可用 `dumpsys display | grep -oE '"CarPlay[A-Za-z]+", displayId [0-9]+'`
-快速核对。
+- **Force-stop before install.** During a session the system install confirmation dialog lands on a car-side virtual display where nobody can tap it (`User rejected` / hang).
+- If it is still rejected, run `input keyevent KEYCODE_WAKEUP` first: with the screen off the unanswered dialog is auto-rejected (`INSTALL_FAILED_ABORTED`, reproduced three times 2026-10-15).
+- **Release then debug fails**: `INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match`. Either `adb uninstall` (loses data and Shizuku grant) or, preferred, verify with `./gradlew :app:assembleStandardRelease` output. Release builds are not debuggable, so `run-as` fails; use the log-export broadcast instead.
+- **Uninstall does not free virtual displays** (2026-10-18). They are owned by the Shizuku UserService child process (`io.github.ezn24.cardeck.neo:car_input`, uid shell), which survives uninstall. Installing then hangs (dialog on a virtual display) and every retry stacks another `PackageInstallerActivity` (11 observed). Recovery, in order:
+  1. `adb shell ps -A -o PID,NAME | grep car_input`
+  2. `adb shell kill <PID>` (displays are released immediately)
+  3. `adb shell am force-stop com.android.packageinstaller`
+  4. `adb install` again.
+- `adb install --user 0` or `-g` does not bypass Honor's install confirmation.
+- Check leftover displays: `dumpsys display | grep -oE '"CarPlay[A-Za-z]+", displayId [0-9]+'`.
+- Wireless adb streaming install can hang silently on large APKs; use `adb push` + `pm install`.
 
-**发布（GitHub Release）**：
-```bash
-# 1) 改 app/build.gradle.kts 的 appVersionName（versionCode 自动推导）
-# 2) 用正式密钥构建（需仓库根目录有 keystore.properties + .jks，均已 gitignore）
-./gradlew :app:assembleStandardRelease
-# 3) 验证签名的 CN 不是 "Android Debug"（必须是自己的证书，见下）
-$ANDROID_HOME/build-tools/<ver>/apksigner verify --print-certs app/build/outputs/apk/standard/release/app-standard-release.apk
-# 4) 打 tag 并发布（APK 重命名成 CarDeck-<版本>.apk，备注里写 SHA-256 与签名指纹）
-git tag -a v0.1.0 -m "CarDeck 0.1.0"; git push origin v0.1.0
-gh release create v0.1.0 CarDeck-0.1.0.apk --title "..." --notes-file notes.md --latest
-```
-**CI（`.github/workflows/android-ci.yml`，2026-10-22 起）**：每次 push 自动出**正式签名**包，
-版本号自动累计——传 `-Pcardeck.buildNumber=<提交数>`（`git rev-list --count HEAD`，2026-11-18 起取代 run_number；**本地出包也必须传同一个值**，否则本机装的包与 CI 包版本号对不上、CI 包可能比本机的小而装不上），得到
-`versionName=<appVersionName>.<N>`、`versionCode=base*10000+N`（能覆盖安装上一版；
-base 升 patch 时自动反超）。产物名 `CarDeck-<版本>-release.apk`，**只在 Actions Artifacts，
-不发 GitHub Release**（`permissions: contents: read`）。签名来自仓库 Secrets
-`KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD`（可选
-`EXPECTED_CERT_SHA256` 做指纹比对）；**没配 KEYSTORE_BASE64 流水线直接失败**，
-且 Gradle 侧 `check` 会拦「带构建号却没有 keystore.properties」，不允许 debug 签名的
-「正式版」流出去。本地 `assembleRelease` 不带 `-P` 时仍是纯 base 版本（`1_130_000`）。
-**签名是不可逆决定**：debug 证书签的包一经发出，以后换正式证书时已安装用户必须
-卸载重装（证书不同无法覆盖安装）。所以**首个公开版本就必须用正式 keystore**。
-keystore 与密码只存本地/密码管理器：私钥泄露 = 任何人可签发覆盖安装的更新；
-私钥丢失 = 已安装用户再也收不到更新。证书 SHA-256 指纹写进 Release 备注，
-便于用户核对下载完整性。
+### Versioning, CI and signing
 
-**提交**：pre-commit 钩子（`.githooks/pre-commit`，经 `core.hooksPath` 启用；克隆后需
-执行一次 `git config core.hooksPath .githooks`）会自动格式化暂存的 kt/kts 并跑
-`lintDebug`，失败即拦截。存量 lint 问题豁免在 `app/lint-baseline.xml`——新代码引入
-问题会直接失败；实际修复后条目自动失效，有意豁免经评审后 `./gradlew :app:updateLintBaseline`。
-协作约定：功能完成后**装机给用户验证，用户说「提交」才 git commit**。
+- `appVersionName` lives in `app/build.gradle.kts`; `versionCode` is derived.
+- Build number = commit count: pass `-Pcardeck.buildNumber=$(git rev-list --count HEAD)` (replaced `run_number` on 2026-11-18). Result: `versionName=<appVersionName>.<N>`, `versionCode=base*10000+N`. **Local release builds must pass the same value**, otherwise the local APK and CI APK versions diverge and CI builds may refuse to install over it. Without `-P` the version is the bare base (e.g. `1_130_000`).
+- CI: `.github/workflows/android-ci.yml` builds a properly signed APK on every push, artifact `CarDeck-<version>-release.apk`, uploaded as Actions artifact only (`permissions: contents: read`).
+- Signing secrets: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`, optional `EXPECTED_CERT_SHA256`. Missing `KEYSTORE_BASE64` fails the pipeline; Gradle `check` also blocks "build number set but no `keystore.properties`" so a debug-signed "release" cannot escape.
+- Local release signing needs `keystore.properties` + `.jks` in the repo root (gitignored; template `keystore.properties.example`).
+- Signing is irreversible: users who installed a debug-signed build must uninstall to move to the real certificate. The first public build must use the real keystore. A leaked key lets anyone ship updates; a lost key ends updates for existing users. Keep keystore and passwords only locally / in a password manager.
+- Release steps:
+  1. Bump `appVersionName`.
+  2. `./gradlew :app:assembleStandardRelease -Pcardeck.buildNumber=<N>`.
+  3. `apksigner verify --print-certs app/build/outputs/apk/standard/release/app-standard-release.apk`: CN must not be `Android Debug`.
+  4. Rename to `CarDeck-<version>.apk`, tag, `gh release create ... --latest`. Release notes include SHA-256 and certificate fingerprint. GitHub Release notes list what changed and are generated from the commit messages, so write commit messages as user-readable change descriptions.
 
-**作者邮箱（公开仓库，硬性要求）**：本仓库已公开（github.com/shaonialife/cardeck），
-提交里的作者/提交者邮箱**只允许 `*@users.noreply.github.com`**
-（`16135960+shaonialife@users.noreply.github.com`）。**绝不能出现公司/私人邮箱**——
-提交推送后无法真正撤回，GitHub 会永久索引，搜索引擎也能关联到你的雇主。
-四层防护（均已实测）：
-1. **仓库局部 `.git/config`** 已设 noreply 邮箱，覆盖全局 `~/.gitconfig` 里的公司邮箱
-   （根因就是全局配置是公司邮箱，任何新仓库都会默认带上）；
-2. **`pre-commit` 守门**：`user.email` 不在白名单直接拒绝提交；
-3. **`pre-push` 扫描**：检查**所有待推送提交**的 `%ae`/`%ce`，非白名单即拒绝推送。
-   这条覆盖 pre-commit 挡不住的情况——`--no-verify`、cherry-pick/rebase 沿用原提交
-   作者、从其它仓库 pull 进来的历史；
-4. 必要时 `git filter-branch --env-filter` 改写历史（已对全部提交执行过一次）。
+### Commits
 
-**踩坑记录**：`git reflog expire --expire=now --all` 会**连带清掉 stash 的 reflog**，
-使 `git stash list` 变空（`refs/stash` 引用与内容其实还在，只是列表读 reflog）。
-误清后可用 `git update-ref --create-reflog refs/stash <sha>` 或手工补
-`.git/logs/refs/stash` 恢复。另：shell 脚本里 `$var` 紧跟中文/全角字符
-（如 `$remote_ref（`）会被当成变量名的一部分，必须写成 `${remote_ref}`。
+- Workflow: finish the feature, install for the user to verify, commit only when the user says "commit". Push only on explicit request; until then change local files only.
+- Hooks: `.githooks/pre-commit` (enable once per clone: `git config core.hooksPath .githooks`) formats staged kt/kts and runs lint; failures block. Baseline `app/lint-baseline.xml`; fixed entries expire automatically; intentional waivers via `./gradlew :app:updateLintBaseline` after review.
+- **Author/committer email must be a GitHub noreply address.** For this repo: `62716651+ezn24@users.noreply.github.com`. (Upstream `shaonialife/cardeck` uses `16135960+shaonialife@users.noreply.github.com`; that belongs to upstream.) Never a company or private address: pushed commits are permanently indexed. Defenses: repo-local `.git/config` email overriding the global one; `pre-commit` rejects non-whitelisted `user.email`; `pre-push` scans `%ae`/`%ce` of every pushed commit (covers `--no-verify`, cherry-picks, rebases, pulled history); history rewrite with `git filter-branch --env-filter` as last resort.
+- `git reflog expire --expire=now --all` also empties the stash reflog (`git stash list` shows nothing though `refs/stash` remains). Restore with `git update-ref --create-reflog refs/stash <sha>`.
+- In shell scripts, a variable followed by a CJK or full-width character must be written `${var}`, otherwise the character becomes part of the name.
 
-**调试**：logcat 受限（HKS），运行日志走文件 `files/main_debug.log`（任意线程
-`SessionController.appendLog` 写入）：
-`adb shell "run-as io.github.ezn24.cardeck.neo grep/tail files/main_debug.log"`。
-接收端画面验证：`adb -s <测试台serial> exec-out screencap -p`。
+### Debugging and logs
 
-## 架构速览
+- logcat is restricted (HKS) on Honor. Runtime log goes to `files/main_debug.log` via `SessionController.appendLog` (any thread): `adb shell "run-as io.github.ezn24.cardeck.neo tail files/main_debug.log"` (debug builds only).
+- Release builds: `am broadcast -a io.github.ezn24.cardeck.neo.EXPORT_LOG -p <package> --ez all true`; the result data is the exported file path.
+- Receiver screen check: `adb -s <bench-serial> exec-out screencap -p`.
+- Export (`util/LogExporter`) writes to `Download/CarDeck/` through `MediaStore.Downloads` (no storage permission, visible to file managers and share sheets). `filesDir` and `Android/data/<pkg>` are hidden from Android 11+ file managers. The export dialog (`DarkMessageDialog`) shows absolute path and size; a snackbar disappears too fast.
+- Default export = current process only: `SenderApp.onCreate` calls `DebugFileLog.markSessionStart`, writing `SESSION_MARKER` into the file; export takes everything after the last marker. Long-press export = `Scope.ALL`. The marker must be in the file (the 2 MB truncation invalidates memory offsets) and must be re-written after truncation. No marker (old files) falls back to the full file.
+- `appendLog` replaces `\u0000` with a visible symbol; NUL bytes made exported logs unreadable binaries.
+- Honor ROM directory opening: implicit `ACTION_VIEW` + `vnd.android.document/directory` resolves to random apps (NetEase Music observed). Use explicit `ComponentName("com.android.documentsui", "com.android.documentsui.files.FilesActivity")` with `document/primary%3ADownload%2FCarDeck`, then fall back to implicit, storage root, then text instructions. Never rely on implicit intents for system UI.
+
+### Car replay regression tests
+
+- Pipeline: `tools/extract_car_fixtures.py` extracts `RAW rx/tx` (Bluetooth link) and `IAPLINK rx` (tunnel CSM) from logs into JSONL fixtures under `app/src/test/resources/carplay/fixtures/` (**gitignored by default**: they contain real addresses and SSIDs; adding one requires line-by-line review and redaction).
+- `replay/BtLinkReplayTest` replays through the real `Iap2LinkChannel` + `Iap2SenderSession`; `replay/TunnelReplayTest` replays the `VirtualIap2Link` control session. Assertion: recorded responses must be an ordered prefix/subsequence of replayed responses.
+- Run the extractor after every real-car debugging session.
+- RAW dump budget is per byte (4096 B per direction; 512 B did not even cover the identification frame).
+- A complete frame length does not mean intact bytes: truncation can splice tails into a fake frame of correct length. The extractor validates exactly like the engine (header 9 bytes sum to 0, payload + trailing checksum sum to 0) before trimming.
+- Assertion tiers (`rxHasIdent`): full assertions only if the identification frame survived, otherwise link layer only (SYN, adoption, 0x1D00). Tunnel layer uses ordered subsequence (allows intentional additions such as the MIB3 burst).
+
+## 3. Architecture
 
 ```
-bt/          蓝牙 iAP2：Server（测试台回连）/ Client（真车主动连）+ BtSessionGate
-iap2/        iAP2 链路层 + CSM + 发送端会话（0x5703 热点凭据 / 0x4301 AirPlay 端点）
-net/         WiFi 入网绑定（WifiCarPlayConnector）+ mDNS ctrl 广播 + ctrl-int HTTP
-airplay/     AirPlay：SRP 配对、加密 RTSP 控制通道、事件通道、流协商、ChaCha20 加密
-video/       MediaCodec Surface 输入 H.264 → 128B 头 + ChaCha20 帧封装 TCP 推流
-audio/       AudioPlaybackCapture → RTP/ChaCha20 over UDP
-launcher/    隐形屏启动器（核心）：四块受信虚拟屏
-render/      DualDisplayComposer：GL 合成多虚拟屏画面 → 编码器 Surface（出帧节奏在此）
-input/       TouchRouter：车机触摸按坐标分流注入 dock/app/map 屏
-shizuku/     Shell（cmd 执行）+ CarInputClient（触摸注入/虚拟屏创建/resize，AIDL UserService）
-SessionController  会话总管（进程级单例）：链路生命周期、配对、WiFi 自动加入、取消
-launcher/settings/ 设置面板体系（Fragment）：车机双栏与手机二级菜单共用同一套面板
-media/       通知使用权 → 媒体会话状态（音乐卡数据源）
-ui/ScreenDimmer  常亮+暗幕；WallpaperStore 壁纸
-MainActivity 手机侧操作台 UI（英雄卡状态机 1s 轮询）
+SessionController   Process-wide session manager: link lifecycle, pairing, Wi-Fi join, cancellation
+SenderApp           Application; log session marker
+MainActivity        Phone-side console UI (hero card state machine, 1 s polling)
+PhoneSettingsActivity, AutomationActivity
+bt/                 Bluetooth iAP2: Iap2BluetoothServer (bench calls back), client (real car, outbound),
+                    BtSessionGate, BtProfiles, AdapterMode, CarBluetoothReceiver
+iap2/               iAP2 link layer, CSM, sender session (0x5703 hotspot creds, 0x4301 AirPlay endpoint),
+                    ReceiverProfile, MfiLengthMemory
+transport/          Iap2LinkChannel, DuplexStream
+net/                Wi-Fi join (WifiCarPlayConnector), ctrl mDNS advertiser, ctrl-int HTTP, TcpLiveness, EndpointHosts
+airplay/            SRP pairing, encrypted RTSP control, event channel, stream negotiation, ChaCha20,
+                    VirtualIap2Link (Wi-Fi tunnel), AirPlayClient
+video/              MediaCodec Surface input H.264/HEVC, 128-byte header + ChaCha20 framing over TCP, HevcConfig
+audio/              AudioPlaybackCapture / REMOTE_SUBMIX -> RTP/ChaCha20 over UDP; SilentProjectionActivity; mic uplink
+capture/            HiddenDisplaySource, ScreenSource
+launcher/           Hidden-display launcher (core): virtual displays, VirtualLauncher, DockActivity, GridActivity,
+                    dashboard; launcher/settings/ settings panels shared by car two-pane UI and phone submenus
+render/             DualDisplayComposer: GL composition of the virtual displays into the encoder Surface (frame pacing)
+input/              TouchRouter: routes head-unit touch to dock/app/map displays; HID decoders
+shizuku/            Shell (cmd execution), CarInputClient (touch injection, display create/resize, AIDL UserService)
+service/            CarPlayService (foreground service)
+media/              Notification listener -> media session state (music card)
+notifications/      Notification banner controller/policy
+assist/             Voice assistant overlay handling
+ui/                 ScreenDimmer, WallpaperStore, PanelWindow, DarkMessageDialog
+legal/              Disclaimer gate
+util/               Bg, DebugFileLog, DeviceIdentity, LogExporter, SessionHooks, CarScreenshot
 ```
 
-**虚拟屏**（横屏车机，全部经 Shizuku shell 创建）：CarPlayDock（左侧竖条，自有
-DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超采样应用屏，
-竖屏锁定应用 letterbox 缓解）+ CarPlayMap（地图屏，仪表盘 tile/全屏间动态 resize）。
-竖屏车机时 dock 落底部、无 Hi 屏。
+### Virtual displays (all created through the Shizuku shell)
 
-## 关键约定与已踩过的坑（改代码前必读）
+- **CarPlayDock**: dock strip (left on landscape, bottom on portrait cars), own `DockActivity`, untrusted.
+- **CarPlayApp**: native app display.
+- **CarPlayAppHi**: supersampled app display (letterbox relief for portrait-locked apps). Not present on portrait cars.
+- **CarPlayMap**: map display, dynamically resized between dashboard tile and fullscreen.
+- **CarPlayMedia**: separate media display for the dashboard media pane.
 
-- **首页旋转：声明 configChanges 不重建 + 横屏双栏**（2026-10-18）：手机侧首页是
-  有状态的操作台（滚动位置、折叠卡、已填 SSID、正在显示的弹窗），系统重建会全部丢掉，
-  所以 `MainActivity` 声明了 `orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden`。
-  **代价是 `layout-land/` 不会生效**，横屏排布只能在 `onConfigurationChanged` 里手工切：
-  `applyContentLayout(landscape)` 在横屏把英雄卡**移出 ScrollView**、挂到 `contentArea`
-  左缘固定（右栏 `mainScroll` 用左内边距让位），竖屏再移回 `contentRow`——
-  英雄卡若留在同一个 ScrollView 里，滑右栏会把它一起带走（用户实测反馈）。
-  移动父容器后 layoutParams 类型会变（LinearLayout ⇄ FrameLayout），必须整体重建；
-  横屏高度要 `WRAP_CONTENT`（FrameLayout 里 MATCH_PARENT 会把按钮顶到卡片底缘）。
-  **onCreate 也必须调一次**——以横屏启动不会触发 onConfigurationChanged。
-  横屏屏高只有 ~300dp，实测预算：顶部栏 60 + 波形框 70 + 状态 40 + 副标题 20 +
-  间距 18 + 按钮 52 + 内边距 24 ≈ 284dp 刚好放得下「未连接 + 启动连接」；波形框压矮后
-  圆盘要同步缩到 44dp（否则 74dp 圆盘撑满框、弧线被完全挤出可视区），CARPLAY 标签
-  在横屏隐藏。`SignalWavesView` 按 **min(宽比, 高比)** 缩放（原先只按宽度，压矮即溢出），
-  `hubPlate`/`hubCaption` 用 gravity 居中而非固定 marginTop（后者按 176dp 算死，压矮必错位）。
-  **英雄卡宽度不要读 `contentArea.width`**：旋转瞬间它还是旧方向的测量值（竖屏 1168 →
-  横屏里英雄卡只剩 537px、副标题挤成三行），要用 `屏幕宽 - 页面内边距` 推算。
-  弹窗尺寸统一走 `ui/PanelWindow`（宽度 92% 屏宽 + 可选高度比例），它维护「正在显示」
-  的弱引用清单，`onConfigurationChanged` 调 `resizeShowing(this)` 重算——不重算的话
-  弹窗会保持竖屏宽度、在横屏里只占中间一半。
-- **线程**：短命一次性任务用 `Bg.run("name") { }`（util/Bg.kt，cached 池）；长驻循环
-  线程（GL 合成、链路 reader/pacer、accept 循环、看门狗等）保持独立 Thread——需要
-  命名、interrupt 和生命周期持有，不要收进池。主线程禁止 IO/解码（封面等走专用执行器）。
-- **UI 线程绝对禁止 `Shell.exec`/Shizuku 调用**（2026-10-18 系统排查，两次真机 ANR 的
-  共同根因）：每条 `Shell.exec` 都是 `newProcess` + 进程等待，正常 ~100ms、超时上限
-  可达数秒；`detach()` 里 3 屏 ×(set+get) = 6 条直接 ANR，横屏勾选框的 `setEnabled`
-  2 条（各 4s 超时）最坏 8s 也够 ANR。**已加运行时守卫**：`Shell.exec` 检测到主线程
-  调用时累加 `mainThreadViolations` 并写文件日志
-  （`SHELL: ⚠ 主线程调用 shell（第 N 次）cmd=…`），接线在 `SessionController.ensure`。
-  出现该日志即说明有新代码走了 UI 线程，必须改 `Bg.run` / 异步包装。
-  排查结论（2026-10-18 全量复查）：`MainActivity`（refreshShellState/resetShellState/
-  releaseDisplays/通知授权）、`ScreenDimmer`、`SessionController`（autoJoinCarWifi/
-  shellWifiStatus，仅由 Bg 调用）、`DeviceIdentity.bluetoothMac`（调用方均在后台）、
-  `VirtualLauncher.launchApp`（三个调用点都包在 Bg）均已正确；本次修掉的两处是
-  `VirtualLauncher.detach` 与 `AppOrientationCompat.setEnabled`（后者新增
-  `setEnabledAsync` 供 UI 用，内部执行器串行保证连点顺序）。
-  另注意 `BtProfiles.proxy()` 用 `getProfileProxy`，其**回调经主线程 Handler 投递**——
-  在主线程调用必然等满 1.2s 超时并返回 null（已加显式主线程守卫与告警日志），
-  这类「阻塞等主线程回调」的 API 一律只能在后台调用。
-- **Shizuku 未就绪必须硬拦连接**（2026-10-18 用户实测：手动停掉 Shizuku 后仍能点
-  「启动连接」）：隐形屏模式的虚拟屏创建、触摸注入、窗口/显示状态读取全部经 Shizuku
-  shell，未就绪时放行只会走到「蓝牙已连、车机黑屏 + 触摸全丢」的半残态。
-  拦截点在两条路径上都设了：`ensureShizukuReady`（CTA 前置，排在蓝牙之前）与
-  `startConnectionNow` 开头（授权回调等延迟路径的兜底）。三态引导文案由
-  `ShizukuGate.guidanceOf` 给出**互不相同**的动作（未装=无跳转只说明；未运行=打开
-  Shizuku App；未授权=请求授权并自动续连），因为「未就绪」一句话无法指导用户。
-  **连接准备清单把 Shizuku 计为第 1 项**（`readyCount` 现在 x/4），状态行本身可点开引导。
-  授权结果经 `Shizuku.OnRequestPermissionResultListener` 驱动：granted 时刷新状态并
-  在 `pendingShizukuThenConnect` 置位时自动继续，Activity 销毁必须注销监听。
-  提示弹窗统一走 `ui/DarkMessageDialog`——裸 `AlertDialog.Builder.setMessage` 在
-  `Theme.AppCompat.DayNight` 下是**浅色**的，与全深色 UI 割裂（同日真机截图暴露）。
-  该组件支持 1~2 个操作横排靠右、3 个及以上**竖排等宽**（窄屏横排会挤爆；竖排时次要
-  按钮也要上胶囊底，否则只有主按钮是实心整宽、权重失衡）；`Emphasis` 区分主操作
-  （实心青）/ 正文按钮 / 危险操作（暗红）；`dismissOnClick=false` 可保留弹窗重试。
-  已统一：Shizuku 引导、音频选择、取消连接、断开连接、蓝牙未开启、加入热点、
-  残留虚拟屏、悬浮窗权限、横屏残留（列表外横幅 + 行内清除）。
-- **三套坐标系**：车机触摸 = 通告视图坐标系（如 1160×540）；流/虚拟屏 = 缩放后尺寸
-  （如 1450×674）。`TouchRouter.setCoordinateScale` 在会话建立时换算，改动触摸路由
-  时不要破坏这层映射。地图屏坐标 = 显示内容本身（动态 resize 后）。
-- **dock 尺寸必须随画布分辨率等比**（2026-10-17 修复「高分辨率下车机 dock 文字/图标
-  显小」）：dock 的所有尺寸源自设计稿 `design/launcher-proto.html`（基准画布
-  1160×540@420dpi，dock 48dp=126px、时钟 22px）。**dock 屏密度由 SessionController
-  按画布短边等比下发**（`420 × min(流W,流H)/540`，上限 1680）——奥迪基准下系数恰为
-  1.0、行为与旧版完全一致；测试台 2320×1080（2×）下密度 840，dock 条 252px、文字/
-  图标同步 ×2，占画布短边恒定 23.3%。此前密度固定 `420×缩放%`，高分辨率车机上 dock
-  相对画布减半显小（应用屏密度是自适应算的，所以只有 dock 显小）。配套约定：
-  ① dock 布局（`activity_dock_sidebar/bar.xml`）**全部用 dp**（= 设计 px ÷ 2.625），
-  禁止 px 写死；② 字号在 `DockActivity` 按「设计 px × designScale」以 PX 设置
-  （designScale = densityDpi/420；不用 sp——dock 是像素级设计画布，不跟手机字体缩放）；
-  ③ 模糊半径等物理像素量同样乘 designScale；④ `fitClockText` 的行程/步进也按
-  designScale 缩放。改 dock 视觉时先确认这三处都随密度走。
-- **竖屏桌面网格行数自适应**（2026-10-17 修复「竖屏单元格占用范围过大」：用户开
-  「显示布局边界」截图暴露——固定 3 行把格子拉成 ~1:2.5 瘦高条，图标只占三成、
-  大片空框）：`GridActivity.computeCellMetrics()` 按**格子目标高宽比 1.25** 自适应
-  行数（`usableH / (格宽 × 1.25)`，钳制 3~6 行）——横屏 CarPlay 规格仍算出 3 行、
-  行为与旧版完全一致；竖屏（如 648×1241 应用屏）算出 6 行（对齐 iPhone 竖屏主屏
-  4×6 观感），格子收敛到 ~154×193。分页容量 = `COLUMNS × rows`（运行时字段，
-  勿回退成常量）。UI 验证技巧：手机开发者选项「显示布局边界」下截图，单元格
-  红框即实况边界；改尺寸后先算 `usableH/(格宽×1.25)` 再对照截图红框高度核对。
-- **流尺寸必须为偶数**（H.264 4:2:0）：奇数高度会让编码器首帧输入时进错误态且
-  曾被静默吞掉。缩放计算后统一在 SessionController 对齐（VideoSender 内另有兜底）。
-- **虚拟屏 resize 必须同步消费端**：`VirtualDisplay.resize` 后要
-  `SurfaceTexture.setDefaultBufferSize(新尺寸)`，否则投影把新内容画进旧 buffer 左上角
-  （内容偏居左、宽度只剩比例值）。
-- **虚拟屏上的应用弹不出键盘：两条独立原因，都必须修**（2026-10-17 定谳，车机侧
-  「设置」搜索框点击无键盘根因；已实现并经真机端到端验证——车机屏弹键盘、点击按键
-  文本进入搜索框）：
-  **① 私有屏拒绝第三方 IME 窗口**：`createVirtualDisplay` 不声明
-  `VIRTUAL_DISPLAY_FLAG_PUBLIC` 时屏带 `FLAG_PRIVATE`（owner=shell uid 2000），而
-  `WMS.addWindow` 的访问闸 `displayContent.hasAccess(session.mUid)` → `Display.hasAccess`
-  对私有屏只放行 owner/system/root/UID-present——**输入法（uid 10xxx）的键盘窗口被
-  `ADD_INVALID_DISPLAY(-9)` 拒绝**，`SoftInputWindow.show()` 捕获后进入
-  `REJECTED_AT_LEAST_ONCE` **永不重试**（表现为 IME 服务侧 `mViewsCreated/mWindowVisible=
-  true` 但 WM 里没有 InputMethod 窗口、`mImeWindow` 恒 null）。修复：受信屏 flags 加
-  `VIRTUAL_DISPLAY_FLAG_PUBLIC`（公开 API = 1；只放宽窗口访问，「公开屏默认自动镜像」
-  仅在不声明 OWN_CONTENT_ONLY 时生效，我们已声明，不受影响；dock 屏保持私有）。
-  **② IME 展示策略默认 FALLBACK**：`VIRTUAL_DISPLAY_FLAG_TRUSTED` 只保证受信，**虚拟屏的
-  IME 展示策略默认是 `DISPLAY_IME_POLICY_FALLBACK_DISPLAY`**（`dumpsys window displays`
-  里该屏 SettingsEntry `mShouldShowIme=null` 即此默认值）——IMMS 的
-  `computeImeDisplayIdForTarget` 对非 LOCAL 策略一律返回默认屏，键盘请求被路由到
-  **手机主屏**。修复：创建受信屏后 shell 反射调 `IWindowManager.setDisplayImePolicy(id,
-  LOCAL)`——**LOCAL 值必须运行时反射读 `android.view.WindowManager.DISPLAY_IME_POLICY_LOCAL`
-  而非硬编码**（本机 ROM 有魔改枚举值的风险，用户 2026-10-17 提示；AOSP = 0，读不到回落 0
-  并记日志）。IWindowManager 代理走 `ServiceManager.getService("window")` +
-  `IWindowManager$Stub.asInterface` 反射（`WindowManagerGlobal.getWindowManagerService`
-  在本 ROM 上会致进程被杀，勿用）；需 `INTERNAL_SYSTEM_WINDOW`，本机
-  `com.android.shell` 已授予，`wm`/`cmd window` 均无对应命令。策略按 display 实例
-  （uniqueId 含代次）记录、虚拟屏每次会话重建，故必须随 createDisplay 重设（幂等）；
-  只对受信屏可设（否则 WMS 抛 SecurityException）。
-  两条都要修才通：只设策略 → 令牌迁到虚拟屏但窗口被 private 闸拒绝（实测
-  `imeDisplayId=299` 而 `mImeWindow=null`、show 卡在
-  `PHASE_SERVER_SET_REMOTE_TARGET_IME_VISIBILITY(49)`）；只放开 PUBLIC 不设策略 → 键盘
-  仍落手机屏。**诊断工具**：反射读 `WindowManager` 全部 IME_POLICY 字段 + 逐屏读策略
-  （`/data/local/tmp/const.jar ImeConst <ids...>`）；`dumpsys` 看 `mViewsCreated` 与
-  `mImeWindow` 是否同真。改动文件：`CarInputServiceImpl.createDisplay`。
-- **虚拟屏必须「忽略应用请求的方向」**（2026-10-18 定谳，头条旋转整屏的根因）：
-  竖屏应用（头条等）在横屏虚拟屏上会请求 portrait，系统照办就把**整块虚拟屏**旋转
-  ——`dumpsys display` 可见 `rotation 0→3`、`real 2251x1152→1152x2251`。后果是一连串：
-  合成器按整幅映射 → 画面比例异常；`TouchRouter` 按未旋转尺寸换算坐标 → 点击漂移、
-  点不到目标；退回桌面时仍是旋转态 → 「桌面分辨率也变了」。
-  修法：会话建立时对 **app / appHi / map 三块屏**执行
-  `cmd window set-ignore-orientation-request -d <id> true`，`detach` 时置回 false
-  （必须在释放虚拟屏**之前**，否则 id 失效、设置以 uniqueId 残留到下次会话）。
-  **踩过的坑**：这条命令只接受 `true|1|false|0`，传 `reset` 会报
-  `Error: expecting true, 1, false, 0, but we get reset` 且**只写 stderr**——
-  而 `Shell.exec` 不读 stderr，于是旧代码静默无效了整整一段时间（方向策略从未生效）。
-  现在 `setIgnoreOrientationRequest()` 写完**读回校验**，失败会打印
-  `⚠ 应用屏忽略方向请求失败`。**新增任何 shell 写操作都应读回确认**，
-  尤其 `cmd window` 这类参数校验严格的命令。
-- **GL 绘制坐标约定**：DualDisplayComposer 顶点/裁剪的 y 全程是 **GL 坐标（底部
-  原点，向上增长）**，触摸/流坐标是顶部原点——两套方向相反，混用即出 bug。圆角
-  裁剪矩形（uClipRect）必须与顶点同坐标系直传；曾因翻转成屏幕坐标 + 全高 tile
-  对称重合而长期未暴露，半高 tile（竖屏）整块被 discard（地图卡不可见根因，
-  2026-10-14）。部分区域可见性异常时优先核对该区域顶点与裁剪的坐标系一致性。
-- **出帧节奏**在 DualDisplayComposer 合成循环：有新帧按 `1000/targetFps` 节流，
-  静止画面保底 33ms 心跳（编码器断粮 = 接收端画面冻结）；「新帧」只统计会画进
-  输出画面的输入（dock + 活动应用屏 + tile 可见时的 map）。
-- **默认地图解析禁止回环**（2026-10-18，「卸载重装后地图卡不渲染」根因）：
-  `DefaultMapPrefs.resolve()` 在「未设置默认地图」时曾回调
-  `VirtualLauncher.defaultMapComponent()`，而后者只是转调回 `resolve()` ——
-  无限递归 → `StackOverflowError`。触发条件恰好是**偏好为空**（卸载重装/清除数据
-  后的状态），所以症状是「重装后首次连接地图卡黑屏、在车机设置里重选一次默认地图
-  就恢复」。异常还被 `Bg.run` 的 catch 吞进 logcat（本机型 HKS 加密读不到），
-  文件日志完全静默——极易误判成虚拟屏/合成器问题。
-  现状：解析逻辑集中在纯函数 `resolveDefaultMap()`（显式优先 → 优先序扫描），
-  单测 `DefaultMapPrefsTest` 覆盖 5 条路径（含「反复解析必须终止」）。
-  **改默认地图相关代码时不要引入跨对象互调**；`VirtualLauncher.defaultMapComponent`
-  只允许单向转调 `DefaultMapPrefs`。
-- **会话生命周期钩子**：强制横屏覆盖（AppOrientationCompat）attach 时 applyAll、
-  retireSession/onEnded 时 resetAll——新加系统级写入（settings/cmd）照此模式收口。
-- **锁屏/息屏对虚拟屏的影响：两条独立 token 路径 + ALWAYS_UNLOCKED 豁免**（2026-10-23
-  荣耀 Magic7 Pro 真机实证，flag 修复已落地、整车链路待车验证）：
-  手机按电源键后车机冻结/黑屏是系统两条休眠路径叠加：① **keyguard sleep token**
-  （锁屏时 KeyguardController 给每块屏发 token → 活动暂停）；② **Display-off sleep
-  token**（PUBLIC 虚拟屏没有 `FLAG_NEVER_BLANK`——AOSP 只给非 PUBLIC 屏配，系统熄屏时
-  虚拟屏电源态跟随主屏变 OFF/DOZE → WM 发 token）。修复：`CarInputServiceImpl.
-  createDisplay` 给屏加 **`VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED`（@hide，1<<12）**——
-  `setKeyguardShown` 对带此 flag 的屏直接忽略（连 PIN 安全锁也不影响），锁屏不再发
-  keyguard token；**必须同时声明 `VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP`（1<<11）**，
-  否则 flag 被系统剥掉（文档明说「只对不在默认 display group 的虚拟屏有效」，实测不带
-  时创建成功但读回 display.flags 无此位）。权限 `ADD_ALWAYS_UNLOCKED_DISPLAY`/
-  `ADD_TRUSTED_DISPLAY` 经实测 shell 已持有（dumpsys package com.android.shell）；
-  ROM 拒绝时降级去掉重试（createDisplay 内置回退）。真机验证：带 flag 的屏锁屏后
-  无 keyguard token，亮屏（仍 PIN 锁定）即自动苏醒、活动 RESUMED、画面帧恢复。
-  **配套认知**：① 屏在**熄屏态创建**会出生即带 Display-off token（休眠），交互态创建
-  才出生即醒——产品建屏发生在用户操作手机时，无此问题；② 系统真休眠（按电源键）期间
-  窗口表面会被剥离，唤醒后表面重挂在本 ROM 上不稳定（活动 RESUMED 但 mHasSurface=
-  false，靠后续亮屏稳态/活动重启恢复）——所以「按电源键」场景仍需产品侧配合：
-  引导用「假息屏」而非电源键。
-  **「连接时真息屏」（PR17，2026-10-24 合入）默认关**（设置→显示，用户要求）：
-  断电由暗幕承载（`enterDimNow`，同手动假息屏路径）——面板断电后触摸 IC 实测
-  仍工作（荣耀：黑屏下触摸直达 UI），点暗幕即唤醒；暗幕同时是口袋误触盾。
-  **按电源键 = 真休眠 = 车机冻结风险**（Keyguard/表面剥离，本 ROM 不稳），
-  正确姿势是点暗幕、别按电源键；降级路径（暗幕不可用）裸断电只能按电源键救。
-  **真·假息屏已实现（2026-10-23 真机验证）**：`ICarInput.setScreenPower(on)` 在
-  UserService 里反射 `SurfaceControl.setDisplayPowerMode(token, POWER_MODE_OFF/NORMAL)`
-  （需要 ACCESS_SURFACE_FLINGER，shell 已持有）。系统保持交互态 → 虚拟屏零影响
-  （`dumpsys power` mWakefulness 一直 Awake），物理面板真断电（
-  `dumpsys SurfaceFlinger` 头部 `powerMode=Off/On/Doze` 可直接核对）。屏幕暗着
-  但**没锁屏没睡眠**，触摸探针唤醒、会话结束/暗幕开关/detach 三路收口恢复供电、
-  SCREEN_OFF 广播（真休眠）清 `panelOffByUs` 标记把面板交还系统。
-  **token 获取入口随系统版本迁移，荣耀 A17 实测只有 ③ 通**：①
-  `SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken`（Android 11~14，
-  本机 NoSuchMethodException）→ ② `android.hardware.display.DisplayControl`（部分
-  新系统，本机 ClassNotFoundException）→ ③ `SurfaceControl.getInternalDisplayToken`
-  （本机可用）。三分支都失败时 setScreenPower 返回 false，暗幕自动退回纯遮罩态。
-  **注意**：面板断电后物理触摸能否唤醒未在真机验证（bench 用的是注入事件）——
-  若数字死屏不拾取，唤醒路径 = 电源键（真休眠一次再亮）。
-  **暗幕仍保留，角色变化**：①setScreenPower 失败（老 ROM/Shizuku 未就绪）时的降级
-  手段；②假息屏期间的误触盾——面板灭着时若无这层可点击遮罩，兜里触摸会点到前台
-  应用（如「断开连接」）。面板断电时暗幕不可见，不影响观感。
-  **生命周期收口（2026-10-23 用户实测 bug）**：假息屏中按电源键真休眠时，SCREEN_OFF
-  必须**同时**清面板标记、撤暗幕、停计时——否则解锁后暗幕还盖在锁屏上，要多点一下
-  才消失；USER_PRESENT（解锁）再重排计时——指纹/人脸解锁不产生屏幕触摸事件，探针
-  收不到，不补排的话解锁后自动假息屏是停摆的。
-  诊断：`dumpsys window displays` 看各屏 `mSleeping`/`mAllSleepTokens`；
-  `dumpsys display` 看虚拟屏 `state`； UserService 建屏读回校验打在
-  `/data/local/tmp/carinput_svc.log`（含 token 入口与 setScreenPower 结果）。
-- **暗幕/常亮必须由会话驱动，不能由 App 启动驱动**（2026-10-19 用户实测
-  「会话已断开、过一会儿仍然启动暗幕」）：`ScreenDimmer.attach` 原先在启动时就
-  `schedule()` 45 秒定时器，而车机侧断开走的是 `VideoSender.onEnded`——它**不经过
-  `retireSession`**，`VirtualLauncher` 仍挂着，定时器照常触发。现在自动暗幕的条件是
-  `enabled && sessionActive && attached`（纯函数 `shouldAutoDim`，有单测）：
-  会话开始（`VideoSender.start` 的 onSurfaceReady 里 `attach` 成功后才置位）才排程与
-  把屏幕超时改「永不」，`onEnded` / `retireSession` 与 `detach()` 都必须清零标记
-  （否则下次启动会沿用 true）。手动「假息屏」`enterDimNow` 走 `force` 路径不受限制。
-  **判断标准**：任何「会话期间才该生效」的 UI/系统副作用，都要同时挂在
-  「推流启动成功」与「onEnded」两端——只挂一端必然漏掉车机主动断开这条路径。
-- **手机真息屏（物理面板断电）+ 虚拟屏独立常亮**（2026-10-23，详见
-  `docs/PHONE-SCREEN-OFF.md`）：按电源键会「锁屏 + Doze」（车机黑屏/掉帧），正确做法是
-  让系统逻辑上保持「亮屏且未上锁」，只把物理面板在 SurfaceFlinger 层断电（scrcpy `-S` 同源）：
-  受信屏额外声明 `VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP(1<<11)` +
-  `VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED(1<<12)`，再对物理主屏 token 调
-  `SurfaceControl.setDisplayPowerMode(0)`。**dock 屏虽「不受信」也必须带同一对 flag**
-  （同样的三级降级）——否则它落在默认显示组，物理屏一断电整组跟着灭，车机侧表现为
-  「app 屏正常、dock 栏全黑，解锁后恢复」（2026-10-23 实测；AOSP 只在 `AUTO_MIRROR`
-  时清 `OWN_DISPLAY_GROUP`，dock 没声明 PUBLIC 故 flag 保留）。四条硬约束：① `ALWAYS_UNLOCKED` 需
-  `ADD_ALWAYS_UNLOCKED_DISPLAY`，**部分 ROM 未授予 shell**，带上会 SecurityException
-  打挂整块屏 → `createDisplay` 必须三级降级（组+解锁 → 组 → 基础 flags）；
-  ② **SDK 34+ 删除了 `SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken`**，
-  必须经 `ClassLoaderFactory` + `SYSTEMSERVERCLASSPATH` 加载
-  `com.android.server.display.DisplayControl`，并 `Runtime.loadLibrary0(cls,"android_servers")`，
-  否则 JNI 未注册（scrcpy 同款）；③ 时机：推流成功后 `enterPhoneScreenOff()`，
-  `onEnded` 走 `restorePhoneScreen(sleep=true)`（保持黑、直接 KEYCODE_SLEEP），
-  `retireSession`/手动断开设 false（点亮面板）；④ **必须有三层恢复**（会话结束 /
-  UserService 过期自尽前 / 应用下次启动）——否则应用崩溃会把手机留在黑屏
-  （电源键按两次能救回，但不能依赖它）。**用户开关**：设置 → 显示 →「连接时真息屏」
-  （默认开，`DisplayPrefs.screenOffOnConnect`，键 `screen_off_on_connect`）；关闭后
-  只保留暗幕。会话中切换经 `SessionController.applyScreenOffPreference` **立即收放**
-  （车机屏可操作，不必等下次连接）。「显示」面板已套 ScrollView——车机内容区只有
-  ~200dp 高，4 段内容不滚动会把最后一段裁掉。
-- **上车自动连接（ACL 广播唤醒，2026-10-23，详见 `docs/AUTO-CONNECT.md`）**：
-  `bt/CarBluetoothReceiver` 以**清单静态接收器**监听 `ACTION_ACL_CONNECTED/DISCONNECTED`
-  ——这两个在[隐式广播例外清单](https://developer.android.com/develop/background-work/background-tasks/broadcasts/broadcast-exceptions)
-  里，进程被杀也能冷启动。三条硬事实：① **Android 12+ 的后台 FGS 豁免清单里没有
-  「蓝牙广播」**，本项目能 `startForegroundService` 是因为持有 `SYSTEM_ALERT_WINDOW`
-  （暗幕/触摸探针本来就要，targetSdk 34 只看权限存在）；用户没授悬浮窗时会被
-  `ForegroundServiceStartNotAllowedException` 拦下，接收器只记日志、不崩；
-  ② FGS 必须用 `connectedDevice` 类型（2 参 `startForeground` 会带上 mediaProjection，
-  Android 14 校验 AppOps PROJECT_MEDIA 直接崩）；③ 冷启动进程里必须先
-  `SessionController.ensure(applicationContext)` 再 `startConnection(...)`——BT client /
-  WiFi 连接器都在 `ensureSessionObjects` 里建，跳过会 NullPointer。
-  自动连接**有声音**：靠 `audio/SilentProjectionActivity` 静默领 MediaProjection——
-  `appops set <pkg> PROJECT_MEDIA allow` 让 SystemUI 直接返回 RESULT_OK（Tasker 同款，
-  该 app-op **持久**，不需要时 `appops set … default` 清），再由 shell `am start` 拉起
-  1×1 透明、`exported`、`noHistory` 的跳板（shell 只有 START_ACTIVITIES_FROM_BACKGROUND，
-  没有 START_ANY_ACTIVITY，所以必须 exported）。**Android 14 铁律**：拿到授权后先
-  `upgradeToProjection()` 把 FGS 类型加上 mediaProjection，才能 `getMediaProjection`；
-  且 `onStartCommand` 里重复 `startForeground` 时若 `mediaProjection != null` 必须继续
-  带上该类型（否则类型被摘、投影被停）。**开关**：设置 → 显示 →「上车自动连接」
-  （`AutoConnectPrefs`，默认开；与「连接时真息屏」同一面板）。
-  下车走 `ACTION_AUTO_STOP_SESSION` → `disconnect()`；该 intent 用 `startService` 投递
-  （服务在跑时进程已是前台服务态，不受后台启动限制）。
-- **车机 HID：方向盘媒体键 + iDrive 旋钮**（2026-10-23，详见 `docs/HID-KNOB.md`）：
-  `/info` 的 hidDevices **已遍历全部 uuid 发 hidSetInputMode**——不要改成按 uuid/名称猜设备
-  （奥迪发 `"0"/"1"`、DiPlay 发整数），**描述符才是唯一稳定信号**。Consumer 页(0x0C) →
-  `ConsumerKeys`（Array/Variable 两种语义分开解，混用会一个键都点不出）→
-  `AudioManager.dispatchMediaKeyEvent` 全局媒体键；Generic Desktop 页(0x01) 的
-  Wheel(0x38)/Hat(0x39) → `HidNavigation` → `ICarInput.keyEvent(displayId, DPAD_*)`
-  注入虚拟屏（KeyEvent 也走 `setDisplayId`；失败回退 `input -d`）。**DPAD 不能全局分发**
-  （会落到手机主屏），目标屏取 `VirtualLauncher.activeAppDisplayId()`。焦点高亮 = 网格单元
-  `isFocusable=true` + `foreground=focus_ring`（foreground 不覆盖 background）；
-  **dock 是独立 display，DPAD 不跨屏**。键位校准开关：设置 → 显示 →「HID 原始日志」
-  （`DisplayPrefs.hidRawLog` → `HidNavigation.rawLogEnabled`，日志行 `HID-RAW: uuid=… bytes=…`）。
-- **取消连接必须全程可中断**：`sessionStarting` 互斥标志的复位依赖配对流程线程
-  走到 finally——该线程可能阻塞在不可中断的等待（无超时 connect、mDNS 等待、
-  BT 保活读循环），任何一处卡住都会让取消「无效」（英雄卡永久「正在连接」）。
-  防御三件套（2026-10-15 实战）：disconnect/取消时主动 detach 关 BT 会话 socket
-  （**只在用户终态做，见下条**）、AirPlayClient.cancelled 标志让配对重试循环提前退出、
-  cancelConnecting 强制 `sessionStarting.set(false)`（用户显式取消即强制解锁）。
-  **新增任何长等待点时必须响应 connectCancelled**，且取消路径要实测「发起后立即取消」场景。
-- **连接耗时三大头（奥迪实测，2026-10-18 日志量化）**：从「车机 ctrl 邀请/端点解析」
-  到 RECORD 的 4.9s 里，`/info` ~3.0s 是车机侧会话初始化（返回值与车机第二次 ctrl
-  邀请同一毫秒到达——它在窗口就绪前不应答，catplay 同样要等，**不可优化**）；
-  自家代码可省的两笔已移出关键路径：
-  ① `retireSession` 的 `AppOrientationCompat.resetAll`（6 应用 × 2 次 `am compat`
-     ≈1.6s，原先同步跑在配对前）；
-  ② 虚拟屏 attach 里的 `applyAll`（≈2.0s，原先推迟首帧）。
-  两者改为同一个**单线程执行器**异步执行（`applyAllAsync`/`resetAllAsync`，串行保证
-  「先复原上一会话、后写入本会话」）。**注意异步化的副作用**：`am compat enable`
-  会立即杀目标应用，而桌面图标点击可能在写入完成前发生——`VirtualLauncher.launchApp`
-  必须先 `AppOrientationCompat.awaitPending()` 排空队列，否则应用刚启动就被杀。
-  另一笔大浪费是 WiFi 绑定超时竞态：旧 `latch.await(5s)` 在手动加入热点场景会在
-  onAvailable 到达前 ~116ms 判失败并放弃整轮（真实耗时 20:02:09.352 放弃 →
-  20:02:09.467 成功），用户白等一轮 BT 重连（+13s）。现窗口 15s、分片等待可取消；
-  `WifiCarPlayConnector` 的 5s 看门狗只提示不改判定。
-- **iAP2 接收队列：暂存区与新到帧必须分开**（2026-10-18，日志刷屏活锁根因）：
-  `expectOrNull` 等待期间会把非目标帧放进 `pendingFrames`「待后续消费」，而
-  `recvFrame` 又优先从 `pendingFrames` 取——旧实现两者共用一个优先队列，同一帧被
-  反复取出→打日志→塞回，形成活锁，日志 ~1000 行/秒直到等待超时（触发场景：车机
-  bring-up 时 `0x5000 StartNowPlayingUpdates` 与 `0x5703` 相邻到达；跳过 2s
-  StartHID 空等后它直接落进下一段等待）。修法：`recvFrame`（通用，优先暂存）与
-  `recvNewFrame`（只读新帧）分开，`expectOrNull` 只走后者、并先查暂存区里是否已有
-  目标帧；暂存区加 256 条上限。回归测试 `Iap2SenderSessionTest` 在 mock 时序里插入
-  迟到的 0x5000——去掉修复即超时失败。另外 `pumpIncomingForever` 对同一消息 ID
-  连续到达做了限流（文件日志超 2MB 会被删，刷屏等于丢掉有用上下文）。
-- **连接时序：能力广播先行、邀请驱动、不盲等**（2026-10-18，对照 catplay 连接流程）：
-  catplay 发送端的顺序是「CarPlayCtrlServer 常驻广播 `_carplay-ctrl._tcp`（每 1s
-  force_announce）→ 车机 `GET /ctrl-int/1/connect` 邀请 → 收到邀请立刻建 AirPlay」，
-  全程没有固定 sleep。我们旧流程三处盲等，合计每轮白花 5~13s：
-  1) ctrl 广播要等 0x5703 才发布（车机发现手机天然晚一步）→ 改为 `startConnection`
-     即发布，0x5703/绑网后只做 `ensureForNetwork` 重注册；
-  2) 端点交接后固定睡 1.6s「赌邀请已到」→ 改 `awaitCtrlInvite`（邀请计数事件驱动，
-     2s 未到补一次 force_announce，4s 兜底；已发现 `_airplay._tcp` 也放行）；
-  3) 等 StartHID 2s + 等 0x4301 10s 无条件 → 先读 0x1D01 参数 6（车机声明它可发送的
-     消息清单），没声明就跳过（奥迪只声明 0x5703/0xea03，正是这两个空等的来源），
-     未给清单时才按保守窗口（0x4301 由 10s 收到 3s）。
-  配套：`_airplay._tcp` 发现器常驻（绑网即后台发现，需要时查缓存而非现查重试 3×6s）；
-  端点解析移到邀请之后（车机服务常在受邀后才上线）且不再占用网络回调线程；
-  WiFi 绑定前先确认 SSID 已是车机热点（`bindCurrentWifi` 只按 transport 请求、
-  **不校验 SSID**，切网途中会绑到旧网）；`bindCurrentWifi` 的 release+rebind 会
-  解绑进程网络，故绑过同一热点后走快路径、并用锁串行化两条绑定路径。
-  **注意**：广播提前后首注册可能赶上 Shizuku 未就绪 → TXT id 写成占位 MAC，
-  而车机按该 id 匹配手机（占位 = 永不邀请）。`DeviceIdentity.bluetoothMac(forceRetry)`
-  + `CarPlayCtrlAdvertiser.repairPlaceholderMac`（每 2s 重试、成功即重注册）是必需兜底。
-- **配对/推流期间绝不能断 BT 控制会话**（2026-10-16 定谳，「连上约 3 秒即断」循环根因）：
-  DiPlay 在 WiFi 隧道 iAP2 就绪前（AirPlay 通道从未下发 `disableBluetooth`，
-  `handoffRequested=false`）看到 RFCOMM 断开即判 `wireless bring-up failed` →
-  `closeWirelessStack` 拆掉整轮无线栈（Bonjour/热点/AirPlay 服务），**把已建立甚至
-  正在推流的 AirPlay 会话一起拆掉**（日志：DiPlay 侧 `RFCOMM reader FAILED` →
-  `bring-up failed`；手机侧约 +0.4s 后 `TUNNEL/EVENT 读取结束 - Connection reset`、
-  `推流中止`）。持续关一次就重建栈 30~40s，形成连上→断→重建→再连循环。
-  曾经错在 `retireSession()` 里 detach（每轮配对起步都会执行一次）；现在只在
-  `disconnect()`（用户断开/取消的终态）detach。**改会话退役逻辑时先确认没有新增
-  中途关 RFCOMM 的路径**；`SessionController.kt:876` 的「第二阶段 hack」（配对失败
-  后故意断 BT 重试）对 DiPlay 必然触发一次整栈重建，属已知代价。
-- **蓝牙只配对、不连接**（2026-10-18，用户实测奥迪 MIB3）：手机与车机处于蓝牙
-  **已连接**状态（HFP/A2DP 在线）时，车机**不开放无线 CarPlay 的 iAP2 服务窗口**
-  ——表现为 `BT-C: 连接失败（车机未就绪或不在无线配对窗口）` 每 3s 重试，直到系统
-  空闲自己断开才连上。真 iPhone 的无线 CarPlay 也只用系统级配对 + iAP2 RFCOMM
-  （独立 SDP 服务），声音走 WiFi 的 AirPlay，这些音频/通话配置文件可断。
-  实现（`bt/BtProfiles`）：发 iAP2 连接前查目标地址的配置文件状态，有连接就先断开
-  （配对成功回调里也断两次：立即 + 1.5s 后，车机侧重连常发生在两者之间）。
-  **断开只对「确认提供 iAP2 服务（SDP …caff）或用户选定目标」的设备做**（2026-10-20
-  收窄，`Iap2BluetoothClient.awaitIap2Service`）：自动模式候选=全部已配对设备，
-  耳机/手表没有该服务、连不上还白被断 HFP/A2DP（设备级断开兜底更会波及其它在线
-  设备）。SDP 探测先读系统 uuids 缓存、缺失再 fetchUuidsWithSdp 等 ACTION_UUID
-  （2.5s 窗），结论按地址缓存到客户端停止、start() 时重置。
-  **注意 API 约束**：`BluetoothHeadset/A2dp/LeAudio.disconnect(BluetoothDevice)` 是
-  **@SystemApi**（编译不可见，运行时只要 `BLUETOOTH_CONNECT`），只能反射调用；
-  查询用公开的 `getProfileProxy` + `connectedDevices`（需主 Looper）。**不要**把这段
-  挪进 Shizuku UserService（曾试过，不可行）：UserService 里
-  `BluetoothManager.getAdapter()` 返回 null（无主 Looper 的应用上下文），查询恒为
-  「未连接」，反而掩盖真实状态。诊断日志：`BT-PROFILE: 连接前…的蓝牙配置文件状态=`。
-- **Shell 命令**：参数用 `shellQuote`（单引号转义）；查 WiFi 开关/当前 SSID 用一次
-  `cmd wifi status`（勿用「任意 WiFi 即成功」的盲绑判定——手机连着别的 WiFi 时会误判）。
-  **无互联网热点：默认走应用专属网络，不再系统级入网**（2026-10-18 定谳）：
-  `WifiNetworkSpecifier`（`WifiCarPlayConnector.joinCarPlayNetwork`）加入车机热点——
-  网络只对本进程可见（系统侧 `Ephemeral: true` + `OwnerUid=本应用`），**不进系统已保存
-  网络、不成为默认网络**，其它应用继续走 4G/5G。实测（荣耀 + Redmi K40 + DiPlay）：
-  `cmd wifi list-networks` 无该 SSID（返回 0）、`Active default network` 仍是蜂窝、
-  推流期间 `ping baidu.com` 0 丢包。顺带解决三个老问题：系统 watchdog 不再切回原
-  WiFi；不需要 Shizuku 也能自动加入；不会因「已连接无互联网」被 ROM 连带关掉移动数据。
-  **迁移坑**：旧版本用 `cmd wifi connect-network` 存过热点，只要还在系统配置里系统就
-  会自动全局连接——加入前先 `cmd wifi list-networks` 查同 SSID，**命中则弹窗询问用户
-  是否清除，绝不擅自删除**（保留是正当需求：用户可能就想用系统自动连、或车机热点
-  本身带流量；删除只影响「会不会全局自动连」，与本轮连接无关）。选择保留 → 照常
-  以应用专属网络连接。每个 SSID 每进程只问一次（`forgetPromptHandled`），否则配对
-  重试/端点重入会反复弹窗挡住流程；无人应答按「保留」处理（不做破坏性动作）。
-  解析用 `WifiSavedNetworks.idsOf`（纯函数，有单测：SSID 含空格/非 ASCII/同网多行
-  同 netId/畸形行都覆盖；宁可漏判不误删）。手动兜底（`manualJoinCarWifi`）会把热点
-  存回系统网络，日志与弹窗都明确写出这个代价。
-  **specifier 挂起的兜底节奏必须按「车机窗口」倒排**（2026-10-23 奥迪 3315 毫秒级
-  日志定谳）：车机从 0x4301 起 **~15s 拆 BT、~21s 后 AirPlay 服务窗关闭**（晚到即
-  7000 端口 ECONNREFUSED，BT 再健康也无法激活）——从 0x5703 起算入网预算只有
-  ~9-14s。因此 specifier 首窗只能给 5s（正常入网 0.03~3s；5s 零回调=挂起特征），
-  之后依次：快速探测（系统已自己连上则直接绑定，≤3s）→ **重发 specifier（实测
-  release→重发 1.6s 即入网，是被验证有效的恢复手段，必须紧跟探测）** 20s 窗 →
-  connect-network 深度兜底（本轮窗口必然已过，只为下一轮占位）。曾犯的错：把兜底
-  排在 20s 首窗**之后**——第 1 轮首窗没走完车机就拆链（15.2s），兜底根本轮不到执行；
-  第 2 轮 21.6s 入网时服务窗已关。**connect-network 存系统网络的清理面**：登记必须
-  在命令返回 ok 的**瞬间**（等「切网+bind 成功」才登记的话，取消/超时/bind 失败三条
-  路径都会遗留）；清理挂 disconnect 与推流 onEnded **两端**（车机拆链是最常见的
-  离场方式）；该 SSID 本轮之前已保存（用户选过「保留」）的不登记不删。
-  **bindCurrentWifi 的 onLost 必须转发 onNetworkLost**（兜底入网成主路径后，不转发
-  则熄火后英雄卡停在「已连接」、会话拖到心跳超时才死）。
-  **WEP 无法用 specifier 表达**（无对应 Builder API）→ `JoinResult.Unsupported`，
-  走旧的 `connect-network` 兜底路径（`legacyJoinCarWifi`）。
-  **PR17（BMW 带来的三个命令行坑，与 specifier 主线并存的知识）**：① `cmd wifi
-  connect-network` 的 exit=0 **不代表已连上**（只把连接投给 WifiService）→ 必须轮询
-  `cmd wifi status` 等 SSID 变更（我们的深度兜底已按此实现）；② NSD 注册没有 Network
-  参数，mDNS 广播跟随**进程默认网络**——绑定了车机热点后必须 `bindProcessToNetwork`，
-  否则广播从蜂窝出去车机永远发现不了；③ `cmd wifi set-wifi-watchdog-enabled` 这条命令
-  **不存在**（AOSP 是 `set-wifi-watchdog`，仅 root），别照抄。另见 `docs/WIFI-JOIN.md`。
-  specifier 在 **Android 12/12L 仍需位置权限 + 位置服务**（13+ 由 NEARBY_WIFI_DEVICES
-  接管）：缺权限时 `requestNetwork` 直接失败、现象只是「未能加入车机热点」，很难自查，
-  故在连接前置检查拦截（`ensureWifiLocationReady`）；manifest 里 FINE/COARSE 必须成对
-  声明，否则 lint `CoarseFineLocation` 直接失败。`onLost` 必须处理（热点消失/熄火），
-  否则英雄卡会在「已连接」与失败间静默摇摆（`WifiCarPlayConnector.onNetworkLost`）。
-- **目标车机选择（多台车机场景，2026-10-16）**：用户可能配对多台 CarPlay 车机
-  （真车 Audi + 测试台 DiPlay）。未指定目标时出站客户端逐个尝试全部候选、入站
-  服务端来者不拒——连到哪台取决于谁先应答；选定目标后**出站只连该设备、入站
-  拒绝其它设备**（`TargetDevicePrefs` 存地址+名称快照，地址大小写不敏感比对；
-  `targetProvider` 动态读取，选择立即生效、无需重连）。实测证据：目标=Audi 时
-  日志只出现「连接 Audi_MMI_6318 失败」并且 DiPlay 的周期回连被
-  「忽略非目标设备连入」拒绝；切回「自动」后 DiPlay 立刻恢复连入。
-  注意：选择列表**只列已配对设备**（无线 CarPlay 前置是系统级蓝牙配对，未配对
-  设备无法建 iAP2 会话，故不做蓝牙扫描发现新设备）；目标从系统配对列表消失时
-  UI 提示「需重选」。`btnPickTarget` 在「蓝牙配对」标题右侧（仅已配对>0 时显示；
-  最初放行尾与右侧徽标拥挤，2026-10-16 移入标题行）。
-- **推流中的冗余端点/凭据必须忽略**：接收端控制器（DiPlay 实测）在我们配对推流**之后**
-  才完成它本轮的 RFCOMM 连接并重发一整套 0x5703/0x4301；若照常当新会话处理，
-  `retireSession()` 会把健康会话拆掉（编码器 stop 竞态，日志表现为 `Pending dequeue
-  output buffer request cancelled`），接收端视为 session ended 再重连——形成「连上后
-  自动断开」循环（2026-10-15）。防护在 `SessionController.onCarPlayEndpoint` /
-  `onWifiCredentials`：`videoSender.isRunning` 时直接忽略/只刷新密码缓存；真断连时
-  推流自行终止，下一个端点自然接续。会话中的冗余 0x5703 还会连带触发 WiFi 重绑 +
-  ctrl mDNS force 重注册，都会扰动推流，一并拦下。
-- **0x4301 是活事件，不是「该车机不发」**（2026-10-18，Audi MMI 9310 用户日志定谳）：
-  这台车识别帧明确声明 `车机发送清单=0x4301 0xea03`，但 0x4301 在 Phase 1 结束后
-  **2 分 35 秒**（配对 120s 窗口都已耗尽、mDNS 也始终没发现 `_airplay._tcp`）才到达；
-  车机等到 15 秒无人连入 AirPlay 就自己拆掉 RFCOMM——用户看到的是「连上后自动断开」。
-  旧实现有两处会吞掉它：`pumpIncomingForever` 把所有消息当 keep-alive 只记长度，
-  且同 ID 连续到达会被限流 `continue`。现行三层修复：
-  ① `Iap2SenderSession` 在保活泵里先于限流识别 0x4301 → `parseStartSession`（用缓存的
-  0x5703）→ `onEndpointUpdate` 回调，并由 BT client/server 透传到
-  `SessionController.onLateEndpoint`；② `onLateEndpoint` 按状态分流：推流中忽略（防上面
-  的拆会话循环）/ 配对进行中 → `AirPlayClient.updateEndpoint` 热更新（关旧 socket，下一轮
-  重连新地址）/ 交接尚未建 client → 暂存进 `pendingEndpointUpdate`，建 client 时 `drain`
-  / 上一轮已失败 → 用新端点重走一轮 `onCarPlayEndpoint`；③ `AirPlayClient` 配对循环每轮
-  重试前调用 `endpointRefresher` 再读一次 mDNS 缓存，网关兜底地址连不通时能及时切换。
-  **新增生命周期消息（0x5702/0x6800/0x4301 等）时，先判断「它晚到会怎样」**——保活泵里
-  必须按消息 ID 分流，不能只当日志。另：`resolveEndpointHost` 的等待窗口只有 3s，
-  不能在超时日志里断言车机「不发」（MMI 9310 就是声明会发但晚到）。
-- **0x4301 的地址字段是「定长 + NUL 填充」，解析必须去掉全部尾部 NUL**（2026-10-18，
-  Audi MMI 3315 日志定谳）：车机把 IPv6 填充到 47 字节（`fe80::…` 后跟 **22 个 NUL**）、
-  IPv4 填充到 17 字节（`10.174.189.1` 后跟 **5 个 NUL**）。`asStringOrEmpty()` 原先只
-  `copyOf(size - 1)` 去掉一个，得到 `"10.174.189.1\0\0\0\0\0"`——这个字符串
-  `contains('.')=true`、`contains(':')=false`，能通过所有「是不是 IPv4」的判断，
-  但 Android 的 getaddrinfo 解不了（iOS/桌面 Java 反而容忍，极易误判为「不是这个原因」），
-  日志表现为 `Unable to resolve host "10.174.189.1": No address associated with hostname`。
-  典型症状链：SRP 配对靠 mDNS 刷新后的干净地址**侥幸成功** → 视频数据端口与 keepAlive
-  仍用带 NUL 的旧地址 → 双双失败 → 车机 ~10s 后拆会话（用户看到「连上就断」）。
-  教训：**协议字段里的 NUL 填充一律 `rstrip(0)`**，不要假设只有一个终止符。
-  另外两处配套收口：① `SessionController.appendLog` 把 `\u0000` 换成可见的 `␀` 再写
-  文件——否则导出的日志是二进制文件，用户反馈时打不开（本次日志 216 个 NUL，直接
-  无法读取）；② 视频/音频/keepAlive 的 host 一律取 `client.currentEndpoint`（配对期间
-  mDNS 刷新过的真实连接地址），不要用解析阶段的 `effectiveEndpoint` 旧值。
-  单测 `nulPaddedAddressesAreStrippedCompletely` 用真实填充宽度锁住这一行为。
-- **回退（应用侧 PUBLIC 屏）形态也必须建地图屏**（2026-10-20 华为 Mate30Pro/EMUI12
-  实测）：EMUI 对 shell 侧 `createVirtualDisplay` **静默返回 null**（不抛异常）——受信
-  创建整体失败落回退分支，而回退分支历史上只建 dock/app/appHi 三屏、无地图，仪表盘
-  永远没有地图 tile（日志特征：`三屏创建(回退)` + 每轮 `地图屏未创建`）。修复后回退
-  分支同样建地图屏；**resize 分流**：受信形态走 shell `svc.resizeDisplay`，回退形态
-  必须用应用侧 `VirtualDisplay.resize()`（shell 对他人创建的 display 无 resize 权限，
-  token 属主校验）。诊断约定：受信创建失败要逐屏留痕（哪块屏 -1），不能只留「回退」。
-- **UserService 虚拟屏跨版本残留：三层收口**（2026-10-16 定谳，「重启后检测到残留屏、
-  点清理却释放 0/N」根因）：Shizuku 按「组件+进程名+版本(APK lastUpdateTime)」复用常驻
-  shell 进程——重装 APK 起新进程，旧进程 `am force-stop` 杀不掉（实测）、Shizuku 也不
-  回收；而虚拟屏**只有创建它的进程能释放**（`releaseDisplay` 只查本进程 map，跨进程返回
-  false）。判定进程版本看 `/proc/<pid>/maps` 的 base.apk 路径（`==deleted==` 即旧版本）。
-  三层收口（缺一有洞）：① `CarInputServiceImpl` 自清——周期性比对 lastUpdateTime，
-  过期自尽（重装后 ≤15s 旧进程退出、屏随之释放，实测 5s）；② `CarInputClient.
-  reapStaleUserServices`——绑定成功即枚举 `:car_input` 杀掉非当前绑定 pid（覆盖无自清
-  逻辑的历史旧进程，实测「已回收 1/1」）；③ 启动检测到残留先自动清理一轮，清不掉的
-  才弹窗。**今后任何「进程持有的资源」（虚拟屏等）都必须考虑跨版本残留的释放路径**：
-  进程回收是唯一兜底，`force-stop` 不可依赖。
-- **启动残留清理必须与「强制横屏复原」同条件触发**（2026-10-16）：`AppOrientationCompat.
-  resetAll` 挂在「检测到残留屏」这一条件上（`MainActivity.refreshShellState` 的
-  startupCheck 分支）——残留屏是「会话异常退出」的判据，会话末未执行的复原与它同源。
-  两条约束：① 复原必须在残留清理**之前**执行（清理会让残留清单变空）；② 预绑定
-  UserService（会触发旧进程回收）必须放在残留扫描**之后**，否则回收先让屏消失 →
-  残留清单变空 → 复原被跳过（2026-10-16 差点引入）。测试方式：写
-  `shared_prefs/app_orientation.xml` 造 `force_<pkg>=true`，建会话后 force-stop 应用，
-  重启应见 `ORIENTATION: 残留会话的横屏覆盖已复原 N 个`。
-- **系统侧 compat 覆盖的读法（应用横屏面板）**：事实源是 `dumpsys platform_compat`
-  （该 ROM 无 `cmd platform_compat`；全量 30ms/36KB，`grep` 到两个 ChangeId 后约 3KB，
-  面板打开时查一次、行绑定只做内存查表，绝不可每行一次）。**必须同时解析
-  `packageOverrides` 与 `rawOverrides`**：已卸载应用的覆盖只存在于 rawOverrides——
-  packageOverrides 按「已安装包」解析，包不存在时条目消失（2026-10-16 实测：给未安装
-  包写的覆盖只在 rawOverrides 可见，只读前者会让「列表外残留」横幅永远空着）。
-  rawOverrides 里还有 `force_xxx/组件` 形式的历史脏键（旧版本偏好键格式泄漏），
-  一并按「列表外残留」清理。UI 三层：行内小字（勾选开+系统开=灰字正常；勾选关+系统开=
-  **红色**「系统残留·点击清除」，弹窗提示会重启应用）、面板顶部列表外残留横幅（批量清）、
-  会话期 applyAll/resetAll 常规收口。
-- **`am compat enable/disable` 会立即杀掉目标应用**（兼容覆盖只能在新进程生效；
-  2026-10-15 实测：执行后 pid 当场消失，用户返回时按新配置重启）。给「应用横屏」
-  这类开关做交互时不要再设计「查活/询问是否重启」流程——问出问题时应用已经被
-  系统杀了，pidof 是在与击杀竞态（提示时对时错）。会话建立时的 `applyAll` 批量
-  写入同样会杀掉正在运行的名单内应用（含手机侧实例），属已知代价。
-- **「强制横屏」需要 Android 14+（AOSP 标准 ChangeId，SDK 门槛）**（2026-10-18 定谳，
-  「车机设置→应用横屏」勾选报「写入失败」的根因）：两个 ChangeId
-  （`265451093` OVERRIDE_UNDEFINED_ORIENTATION_TO_NOSENSOR /
-  `265464455` OVERRIDE_ANY_ORIENTATION）**是 AOSP 标准项，自 Android 14 / SDK 34
-  起定义**在 `android.content.pm.ActivityInfo`（`@ChangeId @Disabled @Overridable`），
-  由 `LetterboxUiController` 消费；Android 16 起重构到
-  `AppCompatOrientationOverrides`。**Android 13 及更早的 ActivityInfo 里一个
-  orientation 类 ChangeId 都没有**（实测 A13=0 个、A14=9 个）——这是硬版本门槛。
-  **实测对照（同一操作、同一个包 `com.autonavi.minimap`）**：
-  - 荣耀 Magic7 Pro（Android 17 / SDK 37）：注册 392 个 ChangeId，含这两个 →
-    写入成功，`packageOverrides` 里可见 `com.autonavi.minimap=true`；
-  - 红米 K40（Android 13 / SDK 33）：只注册 173 个，两个都不在表内 → 必失败。
-  **与 Shizuku 无关**（adb shell 与 UserService 同为 uid 2000，结果一致），
-  换 Shizuku 版本或重试都无效。
-  次要因素：即便 ChangeId 已注册，user build 也只允许改 debuggable 应用
-  （`Cannot override a change on a non-debuggable app and user build.`）。
-  另注意「给未安装的包写入会假成功」（只落 rawOverrides、不做 debuggable 校验），
-  所以**用包名试探得出的结论会自相矛盾**，必须以 `dumpsys` 的 name 字段为准。
-  代码侧：`AppOrientationCompat.MIN_SUPPORTED_SDK = 34` 先做零成本版本判定，
-  SDK ≥ 34 再用 `changeIdsRegistered()` 跑一次 dumpsys 复核（约 30ms，进程内缓存，
-  两个 ID 必须**各自**带 `name=`——只注册一个时用整段 `grep name=` 会误判）；
-  `WriteResult.UNSUPPORTED`（永久：偏好**不落盘**，否则下次连接白跑 applyAll
-  且 UI 与系统脱节）vs `FAILED`（Shizuku 临时故障，保留用户意愿待重试）；
-  **写入入队点在配对起步（端点处理）而非 attach**（2026-10-23）：`am compat enable`
-  会杀名单内应用，必须先于任何应用启动完成——配对阶段有几十秒空窗让写入自然排空，
-  attach 只 `awaitPending()` drain（~0ms）。别在 attach 里同步跑 applyAll：屏幕口
-  keepAlive 帧自 attach 返回后才起发，attach 每阻塞 1s 都吃掉「RECORD→首条
-  keepAlive」的 ~10s 拆链预算；`awaitPending` 超时（6s）**必须留日志**——静默失效
-  会让「先写覆盖再拉应用」的保证悄悄作废；
-  `applyAll` 探测失败即整体跳过，不再逐应用空跑 2×4s 的 shell 往返；
-  面板顶部显示黄色横幅并整列置灰。
-  **查证方法教训**：gitiles 的 `?format=TEXT` 单文件抓取失败时会返回空/错误页，
-  grep 不到不代表不存在——要校验字节数，或直接下 `+archive/.../<dir>.tar.gz`
-  整目录再搜（本结论最初就是被一次静默失败的抓取误导成「OEM 定制项」）。
-- **应用先运行、后写入覆盖 → 旧窗口仍 letterbox（需手动重启）**（2026-10-18 真机定谳）：
-  `am compat enable` 确实杀掉进程，但系统恢复任务时 ActivityRecord 可能仍按**旧配置**
-  重建（`displayChangedWithoutRestart=true`），表现为 `overrideOrientation=PORTRAIT`、
-  `isLetterboxRunning=true`、`letterboxReason=FIXED_ORIENTATION`，而
-  `platform_compat` 里该包明明是 `true`。只有 force-stop 后重新 `am start` 才生效
-  （实测重启后同一屏变 `NOSENSOR`、`areBoundsLetterboxed=false`）。
-  **确定性复现（不用跟任务时序碰运气）**：`am compat enable/disable --no-kill ...`
-  写覆盖但不杀进程，此时把应用拉到虚拟屏就是纯净的「旧窗口 + 新覆盖」态。
-  `--no-kill` 走 `setOverridesForTest`，只用于复现/排查，产品路径仍用常规写入。
-  现行处理在 `LetterboxHintController`：事件驱动探测（连接建立/应用启动/地图全屏/重启后）
-  → 解析 `dumpsys activity activities` 的 `bounds=`（内窗）与 `mMaxBounds=`（外框）
-  算黑边 → 黑边够宽才在**左侧**画提示卡（`OverlayCard` 走合成器 2D 纹理层，
-  左侧不够宽退右侧，两侧都放不下就不显示）→ 「强制重启」按钮 force-stop + 原屏重启。
-  **补写自愈**：偏好开着但系统侧覆盖缺失时（会话写入失败/被外部清掉），先补写覆盖
-  并自动把应用拉回原屏（`am compat` 会杀进程，补写后不重启就是把用户打回桌面还不给
-  提示——2026-10-18 头条实测踩到）；重启后仍竖屏才给「仍然竖屏」终态卡。
-  探测必须传 `displayIdHint`（launchApp/地图启动确知的目标屏）：不传时按合成器活动屏
-  推断，而切屏要等目标屏出首帧（最长 2s），探测早于切换完成会看错屏、读空结果。
-- **免责声明（对外分享的启动门）**：`legal/DisclaimerPrefs.CURRENT_VERSION` 用**版本号**
-  而非布尔记录接受状态——**改 `DisclaimerContent` 文案必须同步 +1**，否则老用户不会重新
-  确认；布尔值只能靠卸载重装才会再弹。强制形态三条约束同时成立才放行「接受」：
-  10 秒倒计时、内容需滚动时已滑到底、（由 UI 保证）未点「放弃使用」；三者是**并列**关系，
-  滑到底不能跳过倒计时。「放弃使用」立即可点（拒绝不该被阻拦）并 `finishAndRemoveTask()`。
-  判定「内容是否可滚动」必须等布局完成（`scroll.height > 0`）：布局未完成时
-  `canScrollVertically` 恒为 false，会被误判成「内容不足一屏」从而永久放行（真机踩到）。
-  倒计时存**绝对截止时刻**（`elapsedRealtime`）经 `onSaveInstanceState` 透传，旋转重建
-  后继续剩余时间而不是重新等 10 秒。强制弹窗 `setCancelable(false)` +
-  `setCanceledOnTouchOutside(false)`；底部菜单入口只读（无倒计时/无滚动要求）。
-- **媒体卡片**：元数据切歌是分阶段的（歌名先到、封面/时长滞后），空结果需短退避重试
-  而非固化缓存；播放位置用「锚点 + 速度」外推，UI 每秒自刷新。
-- **日志导出落 `下载/CarDeck/`，不能落应用私有目录**（2026-10-18）：用户要能自己找到
-  并转发给开发者。实现走 `MediaStore.Downloads`（无需存储权限、文件管理器可见、
-  微信/分享面板能直接选到）；`filesDir` 与 `Android/data/<pkg>` 在 Android 11+ 的
-  系统文件管理器里直接被屏蔽，导出等于没导。导出弹窗必须用 `DarkMessageDialog`
-  列出**绝对路径 + 大小**，snack 两秒就消失、用户看不到（本次需求即为此）。
-  **默认只导本次进程启动后的日志**（历史轮次动辄几百 KB、淹没关键行）：
-  `SenderApp.onCreate` 用 `DebugFileLog.markSessionStart` 写一条
-  `SESSION_MARKER` 进文件，导出时 `lastIndexOf` 截取最后一条之后的内容；
-  长按导出按钮走 `Scope.ALL` 取全量。标记**必须写在文件里**而不是只记内存偏移
-  ——2MB 截断会让偏移失效；截断后也要立刻补写一条标记，否则导出退化为全量。
-  无标记（旧版本文件）时回退全文——全量比空好。
-- **荣耀 ROM 打开目录要用显式组件**（2026-10-18 实测）：`ACTION_VIEW` +
-  `vnd.android.document/directory` 走隐式 intent 会被 resolver 乱匹配（实测弹出
-  「网易云音乐」当默认项）；而 `am start` 同样的 intent 却正确落到 DocumentsUI。
-  解法：优先显式 `ComponentName("com.android.documentsui",
-  "com.android.documentsui.files.FilesActivity")` + `document/primary%3ADownload%2FCarDeck`，
-  失败再退隐式/存储根/文字指引。**凡是「唤起系统 UI」的功能都不要只写隐式 intent**。
-- **「音乐在播但卡片显示媒体信息未连接」= 没拿到通知使用权**（2026-10-18 定谳）：
-  `MediaSessionManager.getActiveSessions()` 在**未授权时仍返回会话**——`PlaybackState`
-  正常（`playing=true` 照常翻转），但 `metadata` 恒为 null，于是歌名/歌手全空。
-  这个组合极易误判成 metadata 解析 bug，实际是权限问题（`dumpsys media_session`
-  里能看到完整 `metadata: description=歌名, 歌手`，我们却读到 null，就是判据）。
-  授权要点（`media/NotificationAccess`）：
-  - **不能只在 onCreate 试一次**：那次若 Shizuku 未就绪就永久跳过（手机重启后
-    Shizuku 未运行、或改包名后首次启动尚未授权 Shizuku），用户只会看到空卡片。
-    现在三个时机都补（幂等，已授权直接返回）：App 启动、Shizuku 授权成功、
-    **会话建立后**（`VirtualLauncher.attach`，此时 Shizuku 必然可用）。
-  - **`cmd notification allow_listener` 的 exitCode 不可作判据**，且**立即复核也不可靠**：
-    settings 写入有延迟，实测命令成功（结果=0）后马上读仍是旧值。必须短重试
-    （4 次 × 250ms）确认，否则会误报「未授予」。
-  - 判定「是否已授权」要**按条目精确比对** `enabled_notification_listeners`
-    的 `:` 分隔列表，不能用 `contains(包名)`——旧包名/同前缀应用的条目会造成误判。
-  - 改包名后 Shizuku 侧授权状态需要**重启 Shizuku 服务**才干净（实测：新包反复
-    点「请求授权」无响应，在 Shizuku 里「停止」再「启动」后一次成功）。
-  - 卡片文案要区分三种空：授权缺失（显示「未授予通知使用权」）、有会话但暂停、
-    完全无会话（后两者都是「未在播放」）。
-- **远程调试桥：remote flavor 与外层 cardeck-bridge 仓库**（2026-10-20 落地，设计全文
-  `docs/REMOTE-DEBUG-DESIGN.md`）：bridge 维度 flavor（standard=日常/发布，包名不变；
-  remote=`.rd` 后缀、调试桥代码只在 `app/src/remote/`、依赖走 `remoteDebugImplementation`
-  ——一行不进 standard 产物）。**构建任务名已 flavor 化**（assembleStandardDebug /
-  lintStandardDebug / testStandardDebugUnitTest，pre-commit 钩子已同步）。App 与业务的
-  耦合面仅两处：`DebugFileLog.tap`（main 侧日志序号+钩子）与 `BridgeCommands`（白名单
-  命令，只调 SessionController 公开 API）。服务端在外层独立仓库 `../cardeck-bridge`
-  （MIT，Node/TS，WS+MCP 单进程；`.npmrc` 固定公有源防公司源污染）。硬约定：
-  ① remote 变体的 Shizuku/通知使用权需单独授权（新包名）；② 重装前必须先
-  `SessionController.disconnect` 释放虚拟屏（否则安装确认弹窗落车机侧没人点得到）；
-  ③ 命令白名单扩充走 `BridgeCommands` 单点评审，禁止任意 shell。
-  ④ **差分更新**（2026-10-24 实测省 72%~97% 流量）：块差分协议与三重校验详见
-     `docs/REMOTE-DEBUG-DESIGN.md`；**头部 u64 一律大端**（设备端 readLong 只读
-     大端，LE + 头缓冲写短曾是「差分首跳静默回退全量」的真凶）；设备端任一校验
-     失败无条件回退全量。
-  ⑤ **`.rd` 包必须开悬浮窗权限**：安装确认 Intent 从后台 Receiver 拉起会被荣耀
-     静默拦截（豁免条件=SYSTEM_ALERT_WINDOW），断连提示/复现引导也依赖它；
-     安装确认另有前台 Activity 转发兜底（InstallReceiver → BridgeSetupActivity）。
-  ⑥ remote 变体禁自动暗幕（`ScreenDimmer.autoDimAllowed=false`，排障要看屏幕），
-     常亮与手动假息屏保留。
-- **远程调试桥真机联调五雷**（2026-10-21 全链路打通时逐一定谳，含组件命名/网络/安装三族）：
-  ① **`.rd` 包下自启组件必须写「applicationId/绝对类名」**：`am -n` 只认带斜杠的规范，
-  相对类名按 applicationId 展开成不存在的 `…rd.launcher.DockActivity`、纯类名直接
-  `Bad component name`——两形态都让 dock/grid 启动失败、车机黑屏 0fps（standard 包
-  applicationId==命名空间从不暴露）。组件名一律 `X::class.java.name` 拼接，勿用
-  `context.packageName + 相对路径`。
-  ② **车机会话期间进程网络被绑到车机热点（无互联网）**，调试桥 WS/APK 下载在
-  「加入热点」毫秒级断掉——`InternetRoute`（remote）跟踪蜂窝网络兜底，socket/DNS
-  显式走蜂窝（`Network.socketFactory`/`getAllByName`）；但**默认网络 VALIDATED 时优先
-  默认**（室内 WiFi 环境强走蜂窝反而断流）。
-  ③ **WS 死连接**：蜂窝/NAT 静默断链无 FIN，读线程永久阻塞、重连循环卡死（实测断后
-  4 分钟不重连、桥侧设备假在线）——25s 心跳 ping + 75s soTimeout 必备。
-  ④ **握手协议由设备侧驱动**：先发 hello（含配对码）服务端才回 welcome，等 welcome
-  再发 hello = 互等死锁。
-  ⑤ **桥的 stdin 必须接 FIFO 而非 /dev/null**，否则 MCP（stdio）无法接收指令，
-  notify/cmd 全部不可用；`~/bin/cardeck-debug-up.sh` 已固化该模式。
-- **Honor 推送安装（PackageInstaller）的坑，四条全踩**（2026-10-21）：
-  ① 会话必须 `createSession` 拿 id 再 `openSession`——直接 `openSession(0)` 抛
-  「Caller has no access to session 0」；② 状态接收器在 manifest 里**必须带
-  intent-filter**（自定义 action 无过滤器 = 广播永远投递不到，PENDING_USER_ACTION
-  无人拉起、会话永挂 Active，还会堵死后续安装——App 启动时 `abandonStaleSessions`
-  自愈清理）；③ **相同 versionCode 的推送安装 Honor 直接「假成功」**（显示安装成功
-  但包不动，adb 路径无此行为）——**推送新包必须升 versionCode**（本项目由
-  appVersionName 推导，改版本号即可）；④ `adb install -r` 装的字节相同包在
-  PackageInstaller 眼里也不算数，测试推送闭环时**不要先 adb 装同一个文件**。
-  安装确认/续接询问用 DarkMessageDialog 正规弹窗（悬浮窗会被忽略，用户实测），
-  前台无 Activity 时带参拉起 BridgeSetupActivity 由它弹；调试包 manifest 开
-  `usesCleartextTraffic`（桥可能是纯 HTTP 部署）。
-- **仪表盘分屏拖拽（2026-10-22 落地）的四个跨会话结论**：
-  ① **视觉与触达分层**：中缝视觉宽（`DASH_GAP_PX=24`）与把手触达宽
-  （`DASH_HANDLE_TOUCH_PX=60`）是两个常量——把手/粘性路由域比缝宽、两侧压在
-  卡片上（地图侧溢出段被 tile 盖住**不可见但可触摸**：触摸路由与 GL 合成本就是
-  两层）。一体宽 44px 的首版被用户反馈「中缝太宽」。
-  ② **拖动中只改绘制矩形、松手才 resize**：composer `tileEdgeOverride` 只改 SPLIT
-  目标矩形（纹理整幅 UV 拉伸），commit 才走 `resizeMapDisplay`（真实 resize 触发
-  地图应用配置变更）。**限位钳制必须按比例域换算边界**——按位置域 [边距, 边距+可用]
-  钳等于允许比例 [0,1]，用户实测能拉到 0。
-  ③ **快拖防断流要粘性路由**：把手落后手指时坐标会越出命中域，TouchRouter 按坐标
-  逐帧改判会跨屏重注（掐断拖拽+误触地图）；按下命中把手条即整流固定路由应用屏
-  （`dashHandleHit` + `splitHandlePressed`，同 overlay 卡手势独占模式）。
-  ④ 车机虚拟屏持有焦点时，**`am start` 不带 `--display` 会落到聚焦的虚拟屏**
-  （用户车机画面闪出调试 UI 实测）——会话中启动手机侧 Activity 必须显式
-  `--display 0`；无线 adb 的**流式安装协议会静默挂起**（push 76MB/s 证明传输无碍），
-  大包改走 `adb push + pm install`。
-  几何推导集中在 `VirtualLauncher.dashSplitGeom` 纯函数（`DashSplitMathTest` 钉死
-  四方一致性），改分屏相关代码勿在四处重新裸算。
-- **BT 断链僵尸轮次 + specifier 永久挂起（2026-10-22 奥迪 3315 真机定谳）**：车机 15s
-  AirPlay 看门狗（15.07s 实测，与 sysdiagnose 互证）拆链后**立即回连重发端点**，而我们的
-  「sessionStarting 互斥」只认标志不认轮次存活性——WiFi 加入卡死（120s 窗）的僵尸轮次把
-  车机的新端点堵在门外，全程只剩 keep-alive。三处修复缺一不可：① `onSenderLinkClosed`
-  （保活泵退出回调）：未推流即释放互斥+置取消（卡住的配对线程 ≤200ms 退场），**不停 BT
-  监听**；② 新轮次起步清 `connectCancelled`（用户取消路径会停 BT 组件、被既有守卫拦，
-  走到起步处说明组件在跑）；③ WiFi 加入 20s+20s 分段重发——「系统已保存该 SSID +
-  Android 16」组合下 `WifiNetworkSpecifier` 请求**永久 pending 且零回调**（三条日志路径
-  全静默），120s 干等毫无意义；加入失败且系统已连着目标 SSID 时直接 `bindCurrentWifi`
-  （「保留系统网络」的近路）。另：首连 15s 预算里弹窗 1.7s + MFi 20B 优先白等 6s 是加重
-  因素（记忆生效后仅首次付费）。判读特征：日志出现「已有会话在处理中，忽略本次端点」
-  后再无连接动作、只有 `ff 55 02 00 ee 10` 心跳 = 本病。
-- **真机 iPhone sysdiagnose 对照（2026-10-21，docs/PROTOCOL-NOTES.md §13）**：两车三份
-  抓包（iOS 18，`/usr/bin/log show --archive` 读 unified log）定了四条铁律：
-  ① **奥迪 MMI 3315_5GHz 首连 403 是车机固有状态**——真 iPhone 在 pair-verify 通过后
-  照样被 MFi 段 403 拒，车机 18~20s **自动重邀、第二次即成**；正确恢复 = 保持 BT、
-  原流程退避重试（已落地：`pairingForbidden` 禁断-BT-hack、禁明文降级、403 退避 5s）。
-  ② 探歌类车机**只认 iAP2 配供应链带出的入网**：手动/系统保存过车机热点 = 永远无
-  邀请无 mDNS（同 SSID 清理弹窗对此车是关键）；双频 SSID 必须用 0x5703 指定的那个。
-  ③ 该奥迪成功会话 **iAPChannel 协商 = 0**（真 iPhone 未启 WiFi 隧道）——「MIB3 必须
-  建隧道」结论存疑，动隧道前先真车 A/B。
-  ④ 两车成功路径全是 **IPv6 link-local :7000** + pair-verify + MFi（标准 MODERN 形态，
-  无特殊协议）；SETUP 应答可无 streamID（我们只读 dataPort 天然兼容）。
-- **车机画像（ReceiverProfile）：版本/能力信号统一收口**（2026-10-20）：`iap2/ReceiverProfile`
-  纯函数聚合三处信号——0x1D01 身份+收/发双清单、mDNS features/srcvers——产出
-  era（三时代）/wifiGen（新旧 WiFi 协议）判定，**依据随日志输出**（`PROFILE:` 行，
-  判错可回溯）。两个接线点：`Iap2SenderSession.logIdentification`（BT 侧）与
-  `SessionController.onCarPlayEndpoint` 端点诊断后（mDNS 侧）。硬约束：
-  ① **按能力分支，不按版本号/品牌硬编码**（srcvers 只做先验，清单与实测行为才是
-  分派依据——HID 描述符教训的推广）；② **「清单未声明」不等于「不支持」**：奥迪
-  稀疏清单（2+5 项）不列 0x57xx 但旧协议实测工作——wifiGen=NEW 要求清单完整
-  （合计 ≥10 项，iD9 形态）仍无 0x5703/0x5702，稀疏清单判 UNKNOWN 走旧协议
-  （0x5703 有超时兜底）；③ identityKey 存原文（与 0x1D01 逐字一致），持久化键的
-  清洗由 MfiLengthMemory.receiverKey 负责——后续 Memory 并表共用此键。
-  **链路代际（LinkGeneration，2026-10-23；当日二次定谳后仅存日志意义）**：
-  `linkGenerationOf`——DELPHI 制造 + AUDI 型号 + 双清单合计 1~9 项（三条件同时命中）
-  → CLASSIC_MIB3，否则 EVENT_LINK。**marker 协商已全代际统一**（见 MIB3 条目二次
-  定谳），代际仅用于日志与未来分派。教训：当天下出的「CLASSIC 忽略 marker」分派
-  当晚即被车主日志证伪——单一车辆的现象归因（「协商挂起 UI」）在拿到反例日志前
-  不要固化成分派逻辑。判定与 wifiGen 相互独立（BMW iD9：wifiGen=NEW 跳 0x5702，
-  两维互不干扰；§9h 的 SYN|ACK 修复在 Iap2LinkEngine）。判定纯函数有单测
-  （`ReceiverProfileTest` 五条）。代际缓存随 disconnect 清零。
-- **能力清单只能证明「有」，不能证明「没有」——绝不可当硬门禁**（2026-10-22 奥迪
-  3315 真车定谳，0.1.13 回归的根因）：8b64147 把 WiFi 凭据分派写成「清单没声明
-  0x5702 就跳过旧协议」，而奥迪的可收清单只有 5 项（`0x4e0c 0x4e09 0x4300 0xea00
-  0xea01`）不含 0x5702 → 整轮**一次 0x5702 都没发** → 车机 AirPlay 服务**始终没起来**
-  （45 次连接全部 `ECONNREFUSED`、`_airplay._tcp` 也没广播），4 轮会话每轮 8 秒自拆。
-  同一台车同一热点在旧版本（无脑发 0x5702）下的对照：`0x5702 → 0x5703` 应答
-  **122/136/166/166/198/246/266/368ms**，入网 30ms 后端口 7000 即可连通。
-  两条铁证说明「未声明 ≠ 不支持」：① 同日日志里 0x4e0d/0x4e0b/0x4e0e 三条**不在**
-  清单里，车机逐条 ACK 到位（seq 107→ack=107、110→ack=110、113→ack=113）；
-  ② catplay `catplay_carplay_rx_gadget` 与 xcertplay `Iap2IdentificationClient` 扮演
-  车机时都把 0x5702 列进无线清单（`WIRELESS_PHONE_MESSAGES = [0x4e0d, 0x4e0e, 0x5702]`），
-  说明规范要求声明、但现实车机常漏写。
-  **现行分派**：只认 `ReceiverProfile.wifiGen`——`NEW`（两清单合计 ≥10 项仍无 0x57xx，
-  BMW iD9 形态）才跳过 0x5702；`LEGACY` 与 `UNKNOWN`（稀疏/缺声明）**一律发**。
-  0x5703 等待窗口收到 **1.5s**（奥迪实测有 4 倍余量），超时只降级不拆链。
-  单测 `Iap2SenderSessionTest.sparseDeclarationsStillSendWifiRequest`（奥迪 3315 形态
-  必须发）与 `fullDeclarationsWithoutOldProtocolSkipWifiRequest`（宝马 iD9 形态不发）
-  钉死两个方向，**改这段先看这两条**。推广：任何「按清单能力分支」的地方，都要给出
-  「清单不完整时走保守路径」的分支，不能把缺席当成否证。
-- **无新凭据时不要拆链**（2026-10-22）：`Iap2SenderSession` 在「本轮既没 0x5703、
-  8 秒内也没 0x4301」时，只要 `knownCarSsid()` 能给出已知热点（`boundCarSsid` 或
-  `lastCarWifiSsid`），就合成 `airPlayPort=0` 的端点继续走 mDNS/网关，**不抛异常**。
-  奥迪日志里手机第 2 轮起就在车机热点上，却因「无凭据」每轮 8 秒自杀，把车机侧
-  邀请窗口反复清零——而真 iPhone 实录里车机**入网后约 21 秒**才发 ctrl 邀请
-  （`StartSessionHost`，奥迪 sysdiagnose 2026-10-21 14:23:02 入网 → 14:23:23 邀请），
-  每轮重启等于永远等不到。配套：0x4301 路径现在也写 `lastWifiPsk`/`lastCarWifiSsid`
-  （此前只在 0x5703 路径写，导致手动兜底按钮误报「尚未拿到热点密码」）。
-- **ctrl 广播端口必须固定**（2026-10-22）：Android NSD 没有 JmDNS 的 `reannounce()`，
-  重发公告只能注销+重注册；旧实现连带 `stop()` 一起做，每次 `ServerSocket(0)` 换端口
-  （奥迪日志实测 43857→33383→33125→38151→40697→38015），中间还有最长 1.2s 服务空窗。
-  依赖 ctrl 邀请的车机（xcertplay 车机侧每会话 7 次 ×1.5s 探测）会按缓存端口连到已关闭
-  的 socket。现改为：`unregisterServiceOnly()` 只换 mDNS 注册，socket 与 accept 线程
-  在整个 advertiser 生命周期内复用（`acceptRunning` 独立于 `registered`）。
-- **CarPlay 长连接要显式设 TCP keepalive**（2026-10-22，参照 DiPlay `TcpLiveness`）：
-  内核默认 keepalive 要 **2 小时**才开始探测；车机熄火/手机走出热点时链路常**不发 RST**，
-  控制通道读线程会一直挂在 `read()` 上（画面冻结、看门狗不触发）。`net/TcpLiveness`
-  统一设 idle=10s / interval=3s / count=3 + `TCP_USER_TIMEOUT=20s`（19s 判死刻意大于
-  车机 15s 看门狗），已接控制通道、事件通道、视频数据口三处。**API 坑**：
-  `ParcelFileDescriptor.fromSocket` 在 API 29 前返回 socket 自身 fd 的包装，close 会把
-  原 socket 一起关掉——29+ 才用它取副本，26~28 反射 `Socket.getFileDescriptor$()`。
-- **车型重放回归（录制→重放测试）**（2026-10-20 落地）：防「改 A 车型回归 B 车型」。
-  管线：`tools/extract_car_fixtures.py` 从运行日志提取 `RAW rx/tx`（蓝牙链路）与
-  `IAPLINK rx`（隧道 CSM）成 JSONL fixture（`app/src/test/resources/carplay/fixtures/`，
-  **默认 gitignore**——含真实地址/热点名，入册需逐条评审脱敏）→
-  `replay/BtLinkReplayTest`（真实 Iap2LinkChannel+Iap2SenderSession 全栈重放）与
-  `replay/TunnelReplayTest`（VirtualIap2Link 控制会话重放）断言「录制的应答序列
-  ⊆ 回放序列（有序前缀/子序列）」。**录制即测试**：每次实车排障后跑一遍提取器，
-  fixture 库滚雪球。三条硬教训：① RAW 转储预算按字节计（已提 4096B/方向，旧日志
-  512B 连识别帧都盖不住）；② **帧长完整 ≠ 字节完好**——预算截断会把不同 read 的
-  尾巴拼成「长度恰好完整」的伪帧，载荷校验和不过、引擎静默丢弃，提取器必须按引擎
-  同款校验（帧头 9B 求和=0、载荷+尾校验求和=0）逐帧验证后再裁剪；③ 断言分级
-  （`rxHasIdent`）：识别帧幸存才做全量断言，否则只断言链路层（SYN/采纳/0x1D00），
-  隧道层用有序子序列（放行有意新增如 MIB3 突发，捕捉少答/乱序）。
-- **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
-  32B/20B、0x4301 有无、ctrl 邀请死锁等），细节见 `docs/PROTOCOL-NOTES.md` §9，
-  改协议代码前先对照。**0x5702 的外部佐证**在 §5b（catplay / xcertplay /
-  amineross-showcase / wiomoc-iap2 四个独立车机实现全部声明它）、**0.1.13 奥迪回归的
-  完整证据链与判读要点**在 §9j。
-- **老车机（CarPlay 210.81 / 奥迪 4xxx 固件）必须按 catplay 的「三时代」分类处理**
-  （2026-10-19 定谳，`docs/PROTOCOL-NOTES.md` §9f）：该代是 **pre-HomeKit** 接收端
-  （`_airplay._tcp` features 无 bit38 `HK_PAIRING_AND_ENCRYPT`），只接受
-  `et=NONE` 明文控制会话 + **AES-128-CTR 零密钥**屏幕流，`pair-setup` 必然失败。
-  六处硬约束：① bplist **根对象必须在字节 8**（210.81 不读 trailer 的 topObject，
-  我们的编码器默认根在末尾——已统一 `makeRootFirst`）；② 初始 SETUP 用相对 URI
-  `/setup`；③ 未配对会话显式带 `et=1`，事件通道明文；④ 屏幕帧未配对走 AES-128-CTR
-  （密钥流**跨帧连续**，每帧新建实例 = 第二帧起全乱码）；⑤ 控制密文帧 MTU 1440 →
-  单帧明文上限 **1422**（旧 0x4000 会被判 PayloadTooBig）；⑥ **不要用
-  `contains('.')` 判「有没有地址」**——奥迪 4xxx 常只发 IPv6 link-local，判成无地址
-  就会退到「网关:7000」兜底并永远连不上（统一走 `net/EndpointHosts`，IPv4 → 全局
-  IPv6 → 链路本地 IPv6，且视频/音频/事件通道复用配对真正连通的 `activeHost`）。
-  TXT features 缺失一律按「未知」保持旧路径，不能误判成「不支持配对」。
-- **屏幕流 VideoConfig 帧头必须带「加密标志 + 画布宽高」**（2026-10-19 奥迪 4851
-  实车定谳，`docs/PROTOCOL-NOTES.md` §9g）：车友反馈「app 显示已连接、车机没反应」，
-  日志里会话/触摸/心跳全健康、零错误。根因是我们只写了 `body_size`+`opcode`，而
-  catplay `ScreenFrame::config` 还写：`small_param[1] |= ScreenFlag::Encrypted(0x04)`
-  （**偏移 6**，声明后续帧是密文）、`params[1]`（**偏移 16**）= 宽高两个 **f32 LE**、
-  `params[0]`（偏移 8..16）留 0。Audi/DELPHI 按这些头字段建解码器，缺了就**整屏黑但
-  会话照旧、触摸照常**；DiPlay/WinPlay 只读 body 与 avcC，**测试台永远发现不了**。
-  因此凡是「车机屏黑但 app 显示已连接」都先核 `VIDEO: ✓ VideoConfig … flags=` 这行
-  日志（会同时打印头部前 24 字节 hex）。新增屏幕流头字段时同理：先用 catplay
-  `screen_frame_ext.rs` 对照，别只对着测试台验证。
-- **iAP2 协商：SYN|ACK 必须用新序号，且每条 SYN 都要回**（2026-10-19 BMW 87866
-  实车定谳，`docs/PROTOCOL-NOTES.md` §9h）：14 轮会话全部卡在链路层（`iap2 link
-  ready` 0 次），车机发 133 条 SYN、回 0 条 ACK。两个根因：① `sentSequence` 只在
-  发数据帧时自增，导致 SYN 与 SYN|ACK 同为 seq=99，对端按 `peerSeq+1` 校验后判重复
-  丢弃（catplay 用 `take_own_seq()`）；② 只有首次采纳时回显，而 BMW **每轮重试都用
-  新序号重开协商**，其余 SYN 只拿到裸 ACK 永远等不到回显。现状：每条**纯 SYN**
-  （`control and ACK == 0`）都回一帧 SYN|ACK，同一 SYN 的重发字节级幂等（不推进
-  序号）。两条踩坑：**裸 ACK 会与 SYN|ACK 撞号**（故主机路径只回 SYN|ACK，Audi
-  帧序随之从「裸 ACK+SYN|ACK」变为单帧，需复测）；**不能对所有带 SYN 位的帧都回**
-  （会与对端的 SYN|ACK 形成无限乒乓，单测曾因此空转 55 秒，只有 `jstack` 能看出）。
-- **车机如何识别我们的字段，一律不许"照 catplay 抄"**（2026-10-19 奥迪 0.1.7 回归
-  定谳，`docs/PROTOCOL-NOTES.md` §9i）：把 ctrl TXT 的 `srcvers` 从 `950.7.1` 改成
-  catplay 的 `566.25.21`、实例名 `sender` → `iPhone` 之后，同一台 Audi MMI 3315
-  从「0x4300 后 0.65s 下发 0x4301」变成**连 `GET /ctrl-int/1/connect` 都不发**，
-  `_airplay._tcp` 与 0x4301 双零、网关 `:7000` 空转 54s（`ECONNREFUSED`）。
-  iAP2 全通、车机还在发 0xAE00，极易误判成网络问题。已回退并加测试
-  `CarPlayCtrlAdvertiserTest` 钉死。**同一类字段**：`sourceVersion`、`deviceID`、
-  服务名、`model`、TXT `id`——改前必须真车 A/B 验证，且日志必须能直接看到取值。
-  配套：`_device-info._tcp` 已移除（Android `NsdServiceInfo` 不接受 port=0，
-  每次都报 `The port is missing`，属未验证收益的噪音）。
-- **0x4300/0x4E0E 的蓝牙标识必须在会话启动时就拿到真实 MAC**（2026-10-19 奥迪
-  0.1.7 日志）：整轮都是占位 `02:00:00:00:00:00`。根因是 `DeviceIdentity` 的 10 秒
-  静默窗口撞上「BT 会话在 Shizuku 刚就绪的同一毫秒构造」——首次失败后 10 秒内全返回
-  占位值。`BtSession` 现改为 `forceRetry = true` 并打印解析结果。奥迪会用它与 RFCOMM
-  对端核对，占位值导致静默丢弃。排查时**先看 `设备状态问候 … mac=` 这行**。
-- **AirPlay 会话级 SETUP 的 `deviceID` 必须是本机真实蓝牙 MAC**（2026-10-19
-  WinPlay 实测）：接收端可以按「用户选中的 iPhone 蓝牙地址」过滤会话，对不上即回
-  **403**，状态行是它特有的 `403 OK`（WinPlay 的 STATUS_TEXT 表没有 403，回退成
-  OK——看到这个组合优先怀疑设备过滤）。此前用 catplay 的写死假值
-  `ff:ee:dd:cc:bb:aa`——Audi/DiPlay 不校验，WinPlay 必拒；表象是「连上后约 45s
-  自动断开」（接收端等视频超时后自己拆链）。现统一走 `DeviceIdentity`（与
-  0x4300/0x4E0E 同源），占位值 `02:00:00:00:00:00` 只作 Shizuku 未就绪兜底，
-  403 日志会打印该值供用户到接收端对照。**SETUP 非 200 要主动 close 控制通道**，
-  别静默等接收端拆链——否则用户只看到「自动断开」，排查从零开始。
-- **会话存活靠三条相互独立的心跳，缺一整轮 10 秒后被车机拆**（2026-10-19 奥迪
-  MMI 3315 两轮实测，时序逐毫秒重合）：
-  ① UDP keepAlive 4B ping → keepAlivePort；**间隔必须远小于车机看门狗**——catplay
-  取的 10s 与看门狗等长，`Thread.sleep` 抖动让心跳晚到 1ms 即超时（现取 5s）；
-  ② RTSP `POST /feedback` 空体，1s；
-  ③ **屏幕数据口内的 keepAlive 帧**（128B 明文头，opcode=2；`/info` 的
-  `keepAliveSendStatsAsBody=true` 时 opcode=5 带 bplist 统计体），1s，**视频持续
-  推流时也照发**——它不是视频流量的备份。只有 ①② 时现象是「推流正常、RECORD 后
-  10.2s 整轮 reset」，日志里视频/feedback/事件通道全都健康，极易误判为网络问题。
-  **纠偏（2026-10-19 晚）**：三条心跳齐发时 MMI 3315 **仍**在 ~10s 被拆——该车的
-  10s 拆链另有主因（缺 WiFi 隧道，见下条）；心跳是必要条件，不是充分条件。
-  keepAlive 帧不加密（catplay 只加密 opcode=VideoFrame），不消耗 ChaCha 帧 nonce。
-- **MIB3 需要第二条 iAP2 链路（WiFi 隧道），只回 ACK 会被 ~10s 拆链**（2026-10-19
-  定谳，当晚日志 + AADisplay Frida 对照；**2026-10-23 二次定谳：本条成立**——当天
-  早些时候「CLASSIC_MIB3 忽略 marker 永不协商」的修正被车主 0.1.17 日志证伪：marker
-  是车机在等会话表，1Hz 无限重发，不回应则 RECORD 后 ~10s 拆链（0.1.9=10.17s、
-  0.1.17=10.18s），「0.1.9 忽略 marker 照常进入」系误传。marker 升级协商已全代际
-  统一。当年「协商挂起车机 UI」的真因见下条 modesChanged）：AirPlay 会话建立后，手机必须在屏幕流
-  SETUP 成功后**主动经控制通道** POST /command（iAPSendMessage 信封）发一次 DETECT，
-  车机回 SYN（事件通道）→ 手机 SYN|ACK（控制通道）→ 链路 NORMAL 后重跑控制会话
-  （0x1D00→0x1D01→0x1D02+0xAA00→0xAA06→0xAA02 挑战【长度按车机记忆，隧道独立键，
-  冷启动 20B 优先；同车蓝牙/隧道偏好可能不同——3315 蓝牙认 32B 而 Frida 隧道 20B】
-  →0xAA03→0xAA05→突发
-  0x4E0C/0xA100/0x4E0A/0x4E0B/0x4E09/0xFFFA/0xFFF0→应答订阅 0x5000/0x4157/0x4154/
-  0x4170，0xFFFB 只链路 ACK）。实现：`airplay/VirtualIap2Link.kt`（三形态合一：
-  DiPlay 隧道/MIB3/旧回显），协议细节与 Frida 逐字节常量见 `docs/PROTOCOL-NOTES.md`
-  §12。硬约束：① 手机→车机链路帧**只能**走控制通道 POST（事件通道出站 MIB3 不读）；
-  ② DETECT 必须在屏幕 SETUP 之后发一次（早发被冲掉，之后车机 marker 一律忽略）；
-  ③ 回显 LSP 声明自己的 maxOutgoing=0x7F（原样回显对端表=自己限死在小窗口，突发
-  积压）；④ 0xFFFA/0xFFF0/0x4158/0x5001 用逐字节常量，**勿重新编码**；⑤ 参考仓库
-  `reference/AADisplay` 是 GPL-3.0：只看协议事实，代码不抄。
-- **MIB3 切屏靠 modesChanged 资源重申，不是协商本身**（2026-10-23 双代理对照
-  AADisplay 定谳）：082446（0.1.14）协商/MFi/突发/订阅全部成功、会话健康 35s+，
-  车机却不切 CarPlay 画面——第二控制会话把车机资源仲裁重置，会话早期那份
-  modesChanged 已失效。AADisplay r17 长播验证时序：auth+burst 后 **+1.5s 首发、
-  +4/+12/+30s 重申**；声明落在 0xAA00/0xAA05 进行中会与 iAP POST 抢控制通道、
-  奥迪 ~12s 死。实现：`VirtualIap2Link.onControlSessionComplete` →
-  `SessionController.scheduleModesReclaim`。0.1.12「出画面 3 秒断」= 协商砸进
-  刚起步的 HMI，同源不同症。配套两课：**拆链归因守卫**——MIB3 布防了但控制会话
-  没完成就被拆 = 链路看门狗形态，严禁记音频档位不兼容（否则 media 通路被误拉黑、
-  永远没声）；**sendRawCsmLocked 日志取消息号在 frame[4..5]**（[2..3] 是长度——
-  曾把 0xFFFA 打成 0x32 误导排查一整轮）。
-- **MFi 挑战长度按车机持久化，不要全局写死某一档**（2026-10-19 奥迪 MMI 3315 实测）：
-  20B 挑战在该车静默 **6.0 秒**无应答，32B 才在 0.64 秒回签名——只靠「真车都 20B
-  优先」的基线，每次连接都白等 6 秒。而各接收端偏好相反：DiPlay 只认 32B（长度不符
-  直接断链）、MMI 6318 认 20B（32B 曾 0.4s 拆链）、MMI 3315 认 32B。
-  `MfiLengthMemory` 按 0x1D01 的 name+model+manufacturer 生成稳定 key，持久化
-  成功/静默/被拒三种结局；`orderAttempts`（纯函数）把**上次成功的长度排第一**，静默
-  与被拒只降级、不丢弃（固件可能变，全被拒时照常全试，防永久卡死）；已知静默过的
-  档位重试窗口压到 1.5s。**记忆是跨进程的**——旧实现只在进程内记，App 重启即丢。
-- **音频通道（车机侧声音）三条硬约束**（2026-10-17 奥迪联网实测打通，此前从无声音）：
-  ① **会话建立顺序必须是 屏幕SETUP → 连数据端口 → RECORD → 视频起流 → 音频SETUP →
-  补发RECORD**：车机对「屏幕流 SETUP 后约 2s 内未激活」有看门狗，而音频 SETUP 本身
-  要 2.0~2.7s（车机侧音频通路初始化），排在 RECORD 前必然把激活拖过看门狗——日志特征
-  是 `音频 SETUP 往返 20xxms` 与 `EVENT 读取结束 - Connection reset` 同一毫秒、5 次
-  实测全复现。音频流在 RECORD 之后加入时必须**补发一次 RECORD**才纳入会话。
-  ② **audioType 必须用 `media`**（媒体音频专用通路）：车机 /info 的 audioFormats 里
-  type=100 分档声明（奥迪有 compatibility/alert/default/media/telephony/speechRecognition
-  六档，**每档位图不同**）；往 compatibility 推媒体流时车机接受 SETUP、给 dataPort、
-  照收 UDP 包，**但不接入播放通路**（表现：手机静音成功、采集非零、包持续发送、无声）。
-  必须**全量解析 audioFormats 逐档选**，不能只看前两档（旧日志 take(200) 截断曾导致
-  误判「只有 compatibility」）。具体选择交给 `AirPlayClient.negotiateAudio()`：优先
-  media 档 + PCM48k 立体声（bit15），退 44.1k（bit11），延迟取该档 audioLatencies 的
-  outputLatencyMicros，无 /info 时回退协议基线（media/48k/250ms）。
-  ③ **RTP 参数按 catplay 真车值**：SSRC=**0**（随机 SSRC 会被当未知流）、每包 **352**
-  样本帧（AirPlay 标准 SPF）、timestamp 按帧递增、PT=100、大端 s16、AAD=头 4..12、
-  尾 8B 小端 nonce。改这些值等于改线上格式，必须对照 catplay `rtp_recorder.rs` /
-  `rtp_cipher_chacha.rs`。
-  诊断三件套（无声时按序看）：`AUDIO: 采集样本 非零X% 峰值=N`（0%=没采到：应用禁止
-  捕获或音频走了蓝牙）、`音频协商 → audioType=?`（选错通路）、车机 `/feedback` 里该
-  connId 的 sampleTime 是否推进。
-- **音乐卡「无法读取播放信息」= 通知监听器「有授权、无绑定」**（2026-10-19 实测）：
-  `settings get secure enabled_notification_listeners` 里能看到本组件、
-  `MediaListenerService.onListenerConnected` 却从未被调用——此时 `dumpsys notification`
-  的 **Live notification listeners** 段里没有本组件，`getActiveSessions()` 仍返回会话
-  （播放状态可见）但 `metadata` 恒为 null，卡片就显示「无法读取播放信息」。
-  **授权列表 ≠ 已绑定**：重装 APK 后列表项还在，绑定可能丢失。实测对照——App 进程
-  不运行时静置 10s 不会自愈；启动 App 后 1s 内恢复，说明必须由我们主动重绑。
-  自愈实现见 `NotificationAccess.rebindIfNotConnected`：仅当本进程尚未确认连上
-  （`serviceConnected` 为 false，由 onListenerConnected 置位）时读一次
-  `dumpsys notification --noredact`，**只认 Live 段**，缺失则 `disallow_listener`
-  + `allow_listener` 触发系统重新绑定并短轮询确认。别用「在 enabled 列表里」当已授权
-  判据——那正是这个 bug 的误判来源。
-  另：监听器断开/销毁时必须 `MediaSessionsState.publish(null)`，否则卡片会保留旧歌名，
-  出现「正在播放 + 未在播放」这类自相矛盾的残留状态（布局静态小标题也不能写死
-  「正在播放」，已改为中性的「媒体」）。
-- **RTSP 控制通道必须异步读**（2026-10-17）：一条连接一把锁 + 同步读响应的实现，
-  会让任何慢请求（奥迪音频 SETUP 2s+）期间 feedback 心跳停摆；车机对 feedback 有
-  ~3s 看门狗，断供即拆会话。现为独立读线程收包解密 + 按 CSeq 投递，写侧只串行化
-  「分配 CSeq + 加密写」；`soTimeout=0`（超时由待响应表的 poll 控制）。重连时旧 socket
-  必须关（防两个读线程抢包），cipher 由空转非空的瞬间要丢弃明文残渣（否则密文帧
-  边界错位、后续应答全解不出）。
-- **HID 设备的能力一律按「设备描述符」判定，不按车机型号/uuid/报文长度写死**
-  （2026-10-17：车机媒体键「收到但不切歌」+ 触摸多车机兼容的教训）：
-  ① **媒体键（Consumer Control）**走 `hidSendReport`，1 字节报告、**字节值是 Usage
-  数组下标**（HID Array 语义，`LogicalMax` = 数组长度-1），**不是 Usage ID**。
-  奥迪按下「下一首」实测收 0x05 → usages[5]=0xB5；早期把 0x05 直接当 Usage ID →
-  无对应键（表现为「有反应但不切歌」）。映射由 `ConsumerKeys.parseDescriptor()`
-  解析描述符的 Usage 顺序得到，再按 `[KEYCODE_MEDIA_PLAY/PAUSE/NEXT/PREVIOUS/...]`
-  派发（`AudioManager.dispatchMediaKeyEvent`，与桌面音乐卡同一路径）。
-  ② **触摸**同样按描述符判格式：Digitizer(0x0D) 页 + X/Y 16bit 才是触摸设备；
-  单指 Collection（奥迪 5 字节 `[tip][X u16LE][Y u16LE]`）vs 多槽（DiPlay 12 字节
-  `[槽][down][X][Y]×2`）按「Contact Identifier(0x09 0x22) 出现次数」区分。
-  **不能用报文长度或 uuid 判**：DiPlay 的 knob(4B)/telephony(1B) 与媒体键长度重叠，
-  只靠长度会把 telephony 的 usage 0xB3 当成「快进」误发。描述符缺失时才回退长度判据。
-  ③ 判定实现均有单测钉死语义（`ConsumerKeysTest` / `TouchReportsTest`，含奥迪与
-  DiPlay 两套真实描述符），改这些解析器先看测试。
-- **风格**：Kotlin，中文注释（注释写「为什么/实测依据」而非复述代码）；UI 文案中文。
-  `reference/` 下是 GPL 参考仓库（gitignore，勿复制代码入本项目、勿外传）。
+### Coordinate systems
 
-## 知识沉淀约定
+- Head-unit touch: advertised view coordinates (e.g. 1160x540). Stream/virtual display: scaled size (e.g. 1450x674). `TouchRouter.setCoordinateScale` maps between them at session setup; do not break this mapping. Map display coordinates equal its current (resized) content.
+- `DualDisplayComposer` vertices and clip rects use **GL coordinates (origin bottom, y up)**; touch/stream use top origin. The rounded clip rect (`uClipRect`) must be passed in the same system as the vertices. A flip bug stayed hidden because full-height tiles are symmetric; half-height tiles (portrait) were discarded entirely (invisible map card, 2026-10-14). If a region is partly invisible, check vertex/clip coordinate consistency first.
+- Stream dimensions must be even (H.264 4:2:0). An odd height put the encoder into an error state on the first frame and was silently swallowed. Aligned in `SessionController` with a fallback in `VideoSender`.
 
-- **随时补录**：工作中遇到值得记录的点——性能实测结论、踩坑、设计决策、已知问题与
-  放弃方向——应随手补录到本文件对应章节，后续根据实际情况再调整组织结构。
-- **取舍**：一次性的调试细节留在代码注释里；**跨会话仍有价值的**（会改变后续做法的
-  结论、复发即踩的坑）才沉淀到本文件。判断标准：未来会话在不了解它的情况下大概率
-  重犯或重查一遍。
+## 4. General engineering rules
+
+### Threads
+
+- Short one-off tasks: `Bg.run("name") { }` (`util/Bg.kt`, cached pool). Long-lived loops (GL composer, link reader/pacer, accept loops, watchdogs) keep dedicated named `Thread`s with interrupt and lifecycle ownership.
+- Main thread: no I/O, no decoding (cover art uses a dedicated executor), no cold app scans. 2026-11-02 ANR: `GridActivity.reload` called `loadLabel/loadIcon` on the main thread for 10 s+. Cold paths through `cachedApps` on the main thread are blocked by a check. Cached icons are capped at 144 px.
+- **Never call `Shell.exec` or Shizuku on the UI thread.** Each call is `newProcess` + wait (~100 ms, timeouts up to several seconds). Two real ANRs came from `VirtualLauncher.detach` (6 calls) and `AppOrientationCompat.setEnabled` (2 calls with 4 s timeouts). Runtime guard: `Shell.exec` counts `mainThreadViolations` and logs a main-thread shell warning with the command (wired in `SessionController.ensure`). That log line means new code is on the UI thread; move it to `Bg.run`. `AppOrientationCompat.setEnabledAsync` is the UI entry (serial executor keeps tap order).
+- `BtProfiles.proxy()` uses `getProfileProxy`, whose callback is posted to the main Handler. Calling it on the main thread always waits the full 1.2 s timeout and returns null (explicit guard + warning). Any API that blocks waiting for a main-thread callback is background-only.
+- Shell, task-close commands, APK icon and label loading always run in the background.
+
+### Shell commands
+
+- Quote arguments with `shellQuote`.
+- **Read back every shell write.** `cmd window set-ignore-orientation-request` accepts only `true|1|false|0`; `reset` prints an error to stderr only and `Shell.exec` does not read stderr, so the orientation policy silently never applied for a long time. Strict commands like `cmd window` are the main risk.
+- Android ICU rejects unescaped `}` in task-parsing regexes, which broke map, media and background-task operations. Use explicit hex escapes. A query or parse error must never block launching an app.
+
+### Session lifecycle hooks
+
+- Any side effect that should exist only during a session must be attached to both "stream started successfully" and `VideoSender.onEnded`. A car-initiated disconnect goes through `onEnded`, not `retireSession`; hooking only one end always leaks.
+- `VideoSender.onEnded(byPeer)`: local `stop()` (round change, disconnect) also reaches `onEnded`; `byPeer` distinguishes them.
+- Pattern for system writes (settings/cmd): apply in attach, reset in `retireSession`/`onEnded`, plus a startup cleanup for crashes.
+- Anything owned by a process (virtual displays, etc.) needs a cross-version release path: process reaping is the only reliable fallback; `force-stop` cannot be relied on.
+- New AIDL methods go at the end of the interface, keeping old transaction numbers, so an old Shizuku service during an update does not misinterpret touch calls.
+
+## 5. iAP2 and Bluetooth
+
+### Link layer
+
+- SYN|ACK must use a **new own sequence number** and **every pure SYN** (`control and ACK == 0`) gets a SYN|ACK. Root cause of BMW 87866 never reaching `iap2 link ready` (14 sessions, 133 SYNs, 0 ACKs, 2026-10-19): `sentSequence` advanced only on data frames, so SYN and SYN|ACK both used seq 99 and the peer dropped it as duplicate; and only the first adoption was echoed while BMW reopens negotiation with new numbers on each retry. Retransmission of the same SYN is byte-identical (no sequence advance).
+- Do not send a bare ACK on the host path (it collides with SYN|ACK numbers). Do not reply to every frame with the SYN bit (infinite ping-pong with the peer's SYN|ACK; a unit test spun 55 s, only `jstack` revealed it).
+- Bluetooth head-unit links (`Iap2LinkChannel(carLink = true)`) use a random initial sequence (`Iap2LinkEngine.randomInitialSequence()`): Ford SYNC+ 2.0 ignores SYN with fixed 99 and answers immediately with another value (upstream #25). Unit tests and replay keep 99; adapters and the Wi-Fi tunnel are not randomized. (unverified on a real car)
+- Consecutive markers after NORMAL = peer asks for renegotiation (`renegotiateOnPeerMarker`, Bluetooth head-unit links only): two markers within 3 s -> reply marker + SYN with new sequence, echo the peer's new SYN within a 5 s window. Closed loop on Cadillac CT5 (upstream #27), but that car still returns SETUP 500: necessary, not sufficient.
+
+### Receive queue
+
+- `expectOrNull` parks non-target frames in `pendingFrames`. `recvFrame` (generic, prefers pending) and `recvNewFrame` (new frames only) are separate; `expectOrNull` uses only the latter and first checks pending for the target. Pending is capped at 256. Sharing one queue caused a livelock (same frame taken, logged, put back, ~1000 log lines/s) when 0x5000 and 0x5703 arrived together. Regression test in `Iap2SenderSessionTest` inserts a late 0x5000.
+- `pumpIncomingForever` rate-limits consecutive identical message IDs in the log (log over 2 MB is deleted).
+- Lifecycle messages arriving in the keep-alive pump must be dispatched by message ID, not just logged. Ask "what happens if it arrives late" for every new lifecycle message (0x5702, 0x6800, 0x4301, ...).
+
+### Session messages
+
+- **0x4301 is a live event.** Audi MMI 9310 declared `0x4301 0xea03` in its send list, but 0x4301 arrived 2 min 35 s after Phase 1; the car tore down RFCOMM 15 s after no AirPlay connection. Current handling: `Iap2SenderSession` recognizes 0x4301 in the keep-alive pump before rate limiting -> `parseStartSession` (using cached 0x5703) -> `onEndpointUpdate` -> `SessionController.onLateEndpoint`, which: ignores while streaming; hot-updates `AirPlayClient.updateEndpoint` during pairing; parks in `pendingEndpointUpdate` (drained when the client is created) if handoff has not created a client; restarts `onCarPlayEndpoint` if the previous round failed. `AirPlayClient` calls `endpointRefresher` before each pairing retry. `resolveEndpointHost` waits only 3 s; never log that the car "does not send" it.
+- **0x4301 address fields are fixed-width NUL-padded**: IPv6 padded to 47 bytes, IPv4 to 17 bytes (Audi MMI 3315). Strip **all** trailing NULs (`rstrip(0)`). A single-NUL strip left `"10.174.189.1\0\0\0\0\0"`, which passes `contains('.')` checks but Android `getaddrinfo` rejects it (`No address associated with hostname`); pairing succeeded via a clean mDNS address while video/keepAlive used the padded one and the car tore down after ~10 s. Test `nulPaddedAddressesAreStrippedCompletely`.
+- **0x5702 (old Wi-Fi request)**: capability lists prove presence, never absence. Audi 3315 receive list has 5 entries (`0x4e0c 0x4e09 0x4300 0xea00 0xea01`) without 0x5702, yet requires it: commit 8b64147 skipped it and AirPlay never came up (45 `ECONNREFUSED`, release 0.1.13 regression). With 0x5702 the car answers 0x5703 in 122-368 ms and port 7000 opens 30 ms after join. 0x4e0d/0x4e0b/0x4e0e are also undeclared yet ACKed. Current dispatch uses only `ReceiverProfile.wifiGen`: `NEW` (both lists total >= 10 entries and no 0x57xx, BMW iD9 form) skips 0x5702; `LEGACY` and `UNKNOWN` always send. 0x5703 wait window 1.5 s (4x margin), timeout only degrades. Tests `sparseDeclarationsStillSendWifiRequest` and `fullDeclarationsWithoutOldProtocolSkipWifiRequest` pin both directions. External evidence in `docs/PROTOCOL-NOTES.md` §5b, the regression in §9j.
+- Skip StartHID (2 s) and 0x4301 (10 s) waits when 0x1D01 parameter 6 (head-unit send list) does not declare them. Without a list, use conservative windows (0x4301 3 s).
+- No new credentials is not a reason to tear down: if neither 0x5703 nor 0x4301 arrived within 8 s and `knownCarSsid()` (`boundCarSsid` or `lastCarWifiSsid`) is known, synthesize an endpoint with `airPlayPort=0` and continue via mDNS/gateway. A real iPhone trace shows Audi sends the ctrl invite ~21 s after Wi-Fi join; restarting every 8 s resets that window forever. The 0x4301 path also writes `lastWifiPsk`/`lastCarWifiSsid`.
+- 0x4300/0x4E0E Bluetooth identifier must be the real MAC at session start: `BtSession` uses `DeviceIdentity.bluetoothMac(forceRetry = true)` and logs it. A 10 s quiet window in `DeviceIdentity` once returned the placeholder `02:00:00:00:00:00` for a whole session; Audi compares it with the RFCOMM peer and silently drops mismatches. Check the device-status greeting `mac=` log line first.
+- 0x4E0E keeps "MAC + UDID" format; upstream #25 proposals "u8 type + MAC" for 0x4E0E and "sparse list means NEW" were rejected (they conflict with adapters/real iPhone and with Audi 3315 needing 0x5702).
+- Redundant endpoints/credentials during streaming are ignored (`onCarPlayEndpoint`, `onWifiCredentials`: if `videoSender.isRunning`, ignore or only refresh the PSK cache). DiPlay resends 0x5703/0x4301 after we start streaming; treating it as a new session made `retireSession` kill a healthy session (`Pending dequeue output buffer request cancelled`). These would also trigger Wi-Fi rebind and ctrl mDNS re-registration.
+- **Now playing (0x5000/0x5001/0x5002)** for the cluster / media widget: `media/CarNowPlaying` keeps one subscription per link (Bluetooth control session in `pumpIncomingForever`, MIB3 tunnel in `VirtualIap2Link`), replies to 0x5000 at once, then pushes 0x5001 on track/metadata/play-state/app changes and on seeks (>2 s off the extrapolated position; debounce 300 ms). Field layout is decoded from the captured iPhone frame (`iap2/NowPlayingUpdate`); with nothing playing it encodes to `MIB3_NOW_PLAYING_UPDATE_IDLE` byte for byte (test `emptyStateMatchesCapturedIphoneFrameByteForByte`). Bluetooth sends only the attributes the car requested; the tunnel keeps the captured set. Genre/composer are empty and artwork is not transferred (needs iAP2 file transfer). Log prefix `MEDIA-CAR:`. (unverified on a real car)
+- Now-playing **artwork** goes over the iAP2 file-transfer link session (kind 1; ours and WinPlay's table: id 12): 0x5001 attribute 26 names the transfer (0x80 = none, then 0x81..0xFF rotating), then `[id][0x04 Setup][size u64][type u16 0x0002]` -> car `[id][0x01 Start]` -> data `0xC0` single / `0x80`,`0x00`..,`0x40` -> car `[id][0x05 Success]` (`iap2/ArtworkTransfer`, 320 px JPEG ~20 KB, 4 KB pieces). `Iap2LinkEngine.sendFileTransfer` / `onFileTransferData` share the link sequence space; the handler runs inside the engine parse with the link lock held, so answers are posted to the feed thread. WinPlay answers Success (2026-11-21). WinPlay subscribes to 0x5000 on the Wi-Fi tunnel (its Bluetooth is released after RECORD), so non-MIB3 tunnels answer subscriptions too.
+- **Route guidance (0x5200/0x5201/0x5202/0x5203)** for the cluster / HUD: `nav/CarRouteGuidance` (per-link subscriptions, components from 0x5200 param 0 echoed as param 0), encoder `iap2/RouteGuidanceUpdate` (field IDs/types from WaylandAce/mib2q-carplay-rgi; distances in meters + display string + unit; ETA UTC epoch s; unknown maneuver type is left out, never guessed). Sources: Google Maps ongoing notification (`nav/MapsNotificationSource`, via `MediaListenerService`), Waze and Amap on-screen text via `nav/NavAccessibilityService` (user enables it in system Accessibility; limited to those two packages; reads only while a car is subscribed; windows from all displays because maps run on CarPlayMap). Waze has stable view IDs (`navBarDistance`, `navBarStreetLine`, `lblArrivalTime`, `lblTimeToDestination`, `lblDistanceToDestination`) but its turn arrow is an image (type unknown). Amap's notification says only "navigating". Text parsing (EN + zh) in `nav/NavText`. On MIB3 the 0x5200 subscription gets no initial "no route" reply (bring-up was captured without one). Map a new layout with `am broadcast -a io.github.ezn24.cardeck.neo.DUMP_NAV_UI -p io.github.ezn24.cardeck.neo` (writes `NAV-DUMP:` lines; contains on-screen road names, so it is adb-only). `uiautomator dump` is killed on the S24 and cannot read virtual displays. `am force-stop` (our install routine) removes the service from `enabled_accessibility_services` on the S24 (2026-11-21): so it is granted through Shizuku (`nav/NavAccessibilityAccess`, opt-in setting `nav_cluster`, default off; the phone home page has its Quick settings switch) and re-checked at every session attach next to notification access. Only our own entry in the `:`-joined `enabled_accessibility_services` list is added or removed. Turn type when the app draws it only as a picture (Amap, Waze; Google Maps when the wording does not say): `nav/ManeuverIcon` classifies the arrow geometrically (head = chamfer-distance maximum, heading = stem ring behind the head -> angle bands; enclosed hole = roundabout, JunctionType param 9 = 1). Pixels for arrows and lanes (`NavAccessibilityService.capture`): on the car's map display only the needed rectangle (union of arrow, lane cells or Google strip + card point) is read from `DualDisplayComposer.requestMapRegion` (off-screen FBO draw of the map texture + `glReadPixels` before the swap, max 300k px, >= 300 ms apart; replaced whole-display `takeScreenshot` there: 3.5 MB copy, system limit ~1/s); a map on the phone screen falls back to `AccessibilityService.takeScreenshot` (config `canTakeScreenshot`, >= 1.1 s apart). A sampled fingerprint of the region skips re-classifying an unchanged arrow / lane row. Polling is 4 s while the next maneuver is > 1 km away, else 2 s. The map texture only refreshes while the map is drawn, so with the map hidden readings repeat the last frame. Arrow = `ImageView` nearest the distance label; cached per maneuver, refreshed every 4 s. The active dashboard map is the guidance source when selected. The head unit draws its own icons from the ManeuverType, JunctionType and directional exit angle. Text can identify roundabouts, ramps, highway transitions and ferries. The maneuver crop is used for turn recognition when the app provides no spoken or accessible instruction. Amap lane guidance detects the row by its narrow separators and reads each arrowhead from the same capture as the maneuver icon. Separate directions are encoded in 0x5204, and 0x5201 fields 0x10-0x12 activate or hide the row. Rows with unrecognized cells are omitted. Waze and Google Maps lane layouts still need source samples; Apple-style road badges are separate. NAV-DUMP also saves arrow crops for 10 min to `Android/data/<pkg>/files/nav-icons/` (file name = type/angle) for threshold tuning. Google Maps (Android 16 promoted ongoing, ProgressStyle): distance to the maneuver is `android.shortCriticalText` (the title omits it on "head toward X" legs), Samsung adds `android.ongoingActivityNoti.secondaryInfo` (exit / road after) and `progressMax - progress` = remaining route meters; its lane hint exists only as title text ("走左側 2 條車道"). A notification source is exempt from the 10 s staleness (`publish(untilRemoved = true)`): Maps posts only on change. Waze: its map is a SurfaceView and its card raised no accessibility events in a 10 min drive, so the service polls every 2 s from the moment a car subscribes (`onRouteGuidanceWanted`); lanes are the ImageViews inside `laneGuidanceView` (read by `LaneIcon`, verified on a real Waze crop: [0,-90] / [0,90] preferred 90) and replace the arrow near junctions, so the turn type comes from the single preferred lane direction; current road = text tagged `INSIGHT_TITLE`. A Waze junction-hop capture (2026-11-21, 28 dumps, 9 distinct rows incl. two recommended lanes and small combined left+right icons) read every lane correctly with the unchanged `LaneIcon`; only Waze's fade-in animation frames read as nothing, which withholds that row. Amap pitfalls seen on WinPlay's cluster view (2026-11-21): the tunnel-entrance double arch was read as a U-turn, so a left-right symmetric shape (mirror IoU >= 0.88, checked before the head search, no hole) is straight; a bus-lane sign cell was read as a left turn, so `LaneIcon` requires a stem (any vertical run whose lower end lies in the bottom 40% and that reaches 35% of the cell; every run per column counts, because a bus drawn under the stem is its own short run below it, and checking only the lowest run sent bus lanes as unread grey straights; the straight-head check likewise looks for stem 0.55 of the cell below the tip, not 0.62, because the bus shortens the arrow; regression over 99 unique saved real crops: only 4 bus cells changed, all from unread to correct) and an unreadable cell is dropped alone instead of the whole row. Combined lane icons read correctly (left + U-turn = [-90, -180], test `leftPlusUTurnKeepsBothArrows`); WinPlay draws all angles of a lane from one stem, so a left arrow disappears under the U-turn's hook there: a receiver drawing limit, not a reading error; collection mode now saves every lane cell crop (`*_lane_dirs..._pref....png`) and retries a full frame rejected for interval (error 3) after 1.2 s. Google Maps lanes (2026-11-21): the row is one custom `View` `com.google.android.apps.maps:id/lane_guidance_list` under `step_instruction_container`, no children, no description, so it is read from pixels (see capture above): the strip counts only if its median color matches the turn card (else the map shows through and gets sliced into fake lanes), `LaneIcon.splitStrip` cuts lanes by column (separators <= 2 px and the rounded ends ignored, runs within 6 px = one lane with a shared stem), each cell is cropped to its arrow rows (`glyphRows`; LaneIcon proportions were tuned on Amap cells the arrows fill) and read by `LaneIcon`; lanes join the notification source via `CarRouteGuidance.updateLanes` (6 s TTL). On 8 real strips 6 were exact incl. combined arrows; diagonal axes (-45/+45, step lengths scaled by 1/sqrt 2, tip in the upper 55%, ignored next to an existing head and when opposite a full turn in the same lane) bring it to 7 of 8; the curved "bear left" icon with a hooked stem is still unread, so that row is withheld rather than sent wrong. The same screen also exposes `distance_text`, `top_cue_text`, maneuver words in `step_instruction_container`'s description, remaining distance/ETA and the speed limit (description "速限 每小時 50 公里"). Capturing samples: trigger NAV-DUMP every 3 s from adb (each saves a frame) while a mock drive hops to junctions. iAP2 route guidance has no speed-limit field (0x5201 params 0-26 per CPRouteGuidance; the car shows its own sign recognition). Mock drives for testing: `cmd location providers add-test-provider gps|network` + `set-test-provider-location` (shell needs `appops set com.android.shell android:mock_location allow`, reset to `default` after); the S24 drops test providers after a few minutes, so a driver script must re-add them. Log prefix `NAV-CAR:`. (unverified on a real car)
+
+### ReceiverProfile
+
+- `iap2/ReceiverProfile` is a pure function aggregating 0x1D01 identity + receive/send lists and mDNS features/srcvers into `era` (three eras), `wifiGen` and `LinkGeneration`. Reasons are logged on `PROFILE:` lines. Wired in `Iap2SenderSession.logIdentification` and after endpoint diagnostics in `SessionController.onCarPlayEndpoint`.
+- Branch on capability, not version number or brand. srcvers is only a prior.
+- `identityKey` keeps raw text; `MfiLengthMemory.receiverKey` sanitizes for persistence.
+- `linkGenerationOf`: DELPHI manufacturer + AUDI model + total 1-9 list entries -> `CLASSIC_MIB3`, else `EVENT_LINK`. Now log-only: marker negotiation is unified across generations (an evening-of decision to ignore markers on CLASSIC was disproved by owner logs; do not freeze single-car observations into dispatch logic). Cache cleared on disconnect. Tests `ReceiverProfileTest`.
+
+### MFi challenge length
+
+- Persisted per head unit by `MfiLengthMemory` (key from 0x1D01 name+model+manufacturer): success / silent / rejected. `orderAttempts` (pure) puts the last successful length first; silent/rejected only demote (all rejected -> try all again). Known-silent lengths get a 1.5 s window.
+- Preferences differ: DiPlay 32 B only (disconnects on mismatch); MMI 6318 20 B (32 B dropped the link in 0.4 s); MMI 3315 32 B over Bluetooth (20 B silent for 6.0 s) but 20 B over the tunnel (Frida). Tunnel has its own key.
+
+### Bluetooth connection policy
+
+- **Pair only, do not stay connected.** With HFP/A2DP connected, Audi MIB3 does not open the wireless CarPlay iAP2 window (`BT-C` connection failures every 3 s). `bt/BtProfiles` disconnects profiles to the target before iAP2 connect and twice after pairing (immediately and +1.5 s).
+- Only disconnect devices that advertise iAP2 (SDP `...caff`) or are the user-selected target (`Iap2BluetoothClient.awaitIap2Service`): read cached uuids, else `fetchUuidsWithSdp` with a 2.5 s window; cache per address until client stop. Earphones/watches must not be disconnected.
+- `BluetoothHeadset/A2dp/LeAudio.disconnect(BluetoothDevice)` is `@SystemApi`: call by reflection (needs only `BLUETOOTH_CONNECT`). Queries use public `getProfileProxy` + `connectedDevices` (main Looper). Do not move this into the Shizuku UserService: `BluetoothManager.getAdapter()` returns null there. Diagnostic: `BT-PROFILE:` line.
+- **Never drop the BT control session during pairing/streaming.** DiPlay treats RFCOMM loss before tunnel iAP2 is up (no `disableBluetooth`) as `wireless bring-up failed` and tears down the whole wireless stack, including a streaming AirPlay session (connect -> drop after ~3 s loop, 2026-10-16). Detach only in `disconnect()` (user terminal state), never in `retireSession()`. The "phase two hack" in `SessionController` (drop BT after pairing failure) costs one stack rebuild on DiPlay; it is disabled when `pairingForbidden`.
+- **Zombie round after BT drop** (Audi 3315, 2026-10-22): the car's 15 s AirPlay watchdog drops the link and immediately reconnects with a new endpoint, but a stuck round (Wi-Fi join) kept `sessionStarting` and blocked it. Fixes: `onSenderLinkClosed` releases the mutex and cancels the round if not streaming (stuck thread exits <= 200 ms) without stopping BT listening; a new round clears `connectCancelled`; Wi-Fi join uses segmented re-requests. Signature: log "a session is already in progress, ignoring this endpoint" followed only by `ff 55 02 00 ee 10` heartbeats.
+- During streaming, ignore head-unit ACL disconnect: receivers release Bluetooth after Wi-Fi handoff (WinPlay ~3 s after RECORD). Auto-connect's `ACL_DISCONNECTED` used to kill healthy sessions. Real departure is handled by Wi-Fi `onLost` / `onEnded`. While still connecting, ACL loss has a 60 s grace (`CarPlayService.AUTO_STOP_GRACE_MILLIS`).
+
+### Target head-unit selection
+
+- `TargetDevicePrefs` stores address + name snapshot (case-insensitive). With a target: outbound connects only to it, inbound rejects others ("ignoring non-target device"). "Auto": outbound tries all bonded candidates, inbound accepts anyone. `targetProvider` reads dynamically (no reconnect needed).
+- Only bonded devices are listed (no scanning). If the target disappears from bonded list, UI asks to reselect. `btnPickTarget` sits in the "Bluetooth pairing" title row, shown only when bonded > 0.
+
+### Auto-connect on ACL (details in `docs/AUTO-CONNECT.md`)
+
+- `bt/CarBluetoothReceiver` is a manifest receiver for `ACTION_ACL_CONNECTED/DISCONNECTED` (implicit broadcast exceptions; cold-starts a killed process).
+- Android 12+ background FGS start works only because the app holds `SYSTEM_ALERT_WINDOW`; without it `ForegroundServiceStartNotAllowedException` is logged, not crashed.
+- FGS type `connectedDevice` (the 2-argument `startForeground` adds mediaProjection and Android 14 crashes on the PROJECT_MEDIA appop check).
+- In a cold process call `SessionController.ensure(applicationContext)` before `startConnection(...)` (BT client and Wi-Fi connector are created in `ensureSessionObjects`).
+- Audio without a dialog: `audio/SilentProjectionActivity`. `appops set <pkg> PROJECT_MEDIA allow` (persistent; clear with `appops set ... default`) makes SystemUI return RESULT_OK; shell launches the 1x1 transparent, exported, `noHistory` trampoline (shell has START_ACTIVITIES_FROM_BACKGROUND, not START_ANY_ACTIVITY). Android 14: call `upgradeToProjection()` to add the mediaProjection FGS type before `getMediaProjection`, and keep that type on repeated `startForeground` while `mediaProjection != null`.
+- Toggle: Settings > Display > auto-connect (`AutoConnectPrefs`, default on). Departure via `ACTION_AUTO_STOP_SESSION` -> `disconnect()`, delivered with `startService`.
+- Permission prompts when Shizuku is not ready: record audio then projection, sequentially (two simultaneous system dialogs push each other around). With Shizuku: `SilentProjectionActivity`.
+- "Car audio" switch (`DisplayPrefs.carAudio`, default on) replaced the pre-connection audio dialog; auto-connect obeys it.
+
+## 6. Wireless CarPlay adapters (smartBox / Carlinkit)
+
+Ported from `zz85/cardeck` be86bb9 / a03afde (tested on smartBox-136F) by cherry-pick. The Bigme ROM fix in a03afde (no `OWN_DISPLAY_GROUP`) was intentionally not merged. (unverified on our devices)
+
+- Gate `bt/AdapterMode.active`: set by `startConnection` when the target name looks like an adapter (smartBox, CarLink, Carlinkit, AutoKit, CPC200); with target "Auto" set by `Iap2BluetoothServer` when the box dials in on `...cafe` (must happen before `Iap2LinkChannel` is constructed). When false, nothing changes for head units.
+- Differences from head units: the box is the RFCOMM client and sends SYN first (we echo its parameters); the Wi-Fi tunnel waits for the box to send first (`AdapterIapLink`); send `disableBluetooth` after RECORD; if the mDNS SRV host is `(none).local.` use DHCP server / inviter / gateway; H.264 Baseline always; resend VideoConfig + IDR on requestUI/forceKeyFrame (`RePrimeGate`); a box that already knows the phone sends only the Wi-Fi invite, which opens the session directly.
+
+## 7. Wi-Fi joining (details in `docs/WIFI-JOIN.md`)
+
+- Default: app-scoped network via `WifiNetworkSpecifier` (`WifiCarPlayConnector.joinCarPlayNetwork`). Visible only to this process (`Ephemeral: true`, `OwnerUid` = app), not saved, not the default network; other apps keep cellular. Verified on Honor + Redmi K40 + DiPlay: `cmd wifi list-networks` shows no SSID, default network stays cellular, `ping` works during streaming. No Shizuku needed, no system watchdog flipping back, ROM does not kill mobile data.
+- Android 12/12L need location permission and location services for specifiers (13+ use NEARBY_WIFI_DEVICES); missing permission only shows as "failed to join". Pre-check in `ensureWifiLocationReady`. Manifest must declare FINE and COARSE together (lint `CoarseFineLocation`).
+- `onLost` must be handled (`WifiCarPlayConnector.onNetworkLost`). `bindCurrentWifi`'s onLost must forward to `onNetworkLost` too, otherwise the hero card stays "connected" after ignition off.
+- Existing saved network with the same SSID (old versions used `cmd wifi connect-network`): check `cmd wifi list-networks` first; if found, **ask the user** whether to forget it, never delete silently (keeping is legitimate). Asked once per SSID per process (`forgetPromptHandled`); no answer = keep. Parsing via pure `WifiSavedNetworks.idsOf` (tests cover spaces, non-ASCII, duplicate rows, malformed rows; prefer missing over wrong deletion).
+- Fallback timing is budgeted backward from the head-unit window (Audi 3315, 2026-10-23): from 0x4301 the car drops BT after ~15 s and the AirPlay window closes after ~21 s (late = `ECONNREFUSED` on 7000); from 0x5703 there are only ~9-14 s. Sequence: specifier first window 5 s (normal join 0.03-3 s; 5 s with zero callbacks = stuck) -> quick probe (system already connected -> bind, <= 3 s) -> **re-issue specifier** (release + re-request joined in 1.6 s; must follow the probe immediately), 20 s window -> `connect-network` deep fallback (only to prepare the next round). Putting the fallback after a 20 s first window meant it never ran.
+- "System already saved the SSID + Android 16" can make the specifier request pending forever with zero callbacks. If join fails while the system is already on the target SSID, `bindCurrentWifi` directly.
+- `bindCurrentWifi` requests by transport and **does not check SSID**: confirm the SSID is the car hotspot before binding. Its release + rebind unbinds the process network, so a fast path is used after binding the same hotspot, and a lock serializes both binding paths.
+- `connect-network` fallback cleanup: record the SSID in prefs `wifi/appSavedSsids` the instant the command returns ok (not after bind, or cancel/timeout/bind failure leak it); clean up on both `disconnect` and `onEnded`; do not record SSIDs that existed before this round (user chose to keep). `cmd wifi forget-network` accepts only netId, never SSID.
+- `cmd wifi connect-network` always with `-d` (`WifiConnectCommand.AUTOJOIN_DISABLED`): the command overwrites a same-name saved network and without `-d` re-enables auto-join every time (WinPlay). Car hotspots have no internet.
+- `connect-network` exit 0 does not mean connected: poll `cmd wifi status` for the SSID.
+- WEP cannot be expressed as a specifier -> `JoinResult.Unsupported` -> `legacyJoinCarWifi`.
+- NSD has no Network parameter; mDNS follows the process default network, so after binding the car hotspot call `bindProcessToNetwork`, or advertisements leave via cellular.
+- Head-unit sockets (control, event, /info probe, iAP tunnel, video, audio RTP/sync, timing, mic) are additionally pinned with `Network.bindSocket` via `net/CarNetwork` (chengshl T47). A VPN app makes unpinned sockets follow the VPN, so car traffic went into the tunnel and out over cellular. A VPN without `allowBypass` (the default) rejects the pin with EPERM and Android offers no way around it: `NET: could not pin` is logged once per session plus the `hint_vpn_blocks_car` UI hint (exclude CarDeck in the VPN app or bypass LAN). New car sockets must call `CarNetwork.bind` before `connect`. (unverified with a VPN on a real car)
+- `cmd wifi set-wifi-watchdog-enabled` does not exist (AOSP has `set-wifi-watchdog`, root only).
+- Use one `cmd wifi status` to read Wi-Fi state and SSID. "Any Wi-Fi = success" misjudges when the phone is on another network.
+- `manualJoinCarWifi` saves the hotspot to the system; the log and dialog state that cost.
+- Bind timeout: 15 s, sliced and cancellable. A 5 s latch gave up 116 ms before `onAvailable` and cost a full BT reconnect (+13 s). The 5 s watchdog in `WifiCarPlayConnector` only warns.
+- Explorer/Tango-style cars (and Audi) only accept Wi-Fi joined through the iAP2 credential flow; a manually/system-saved car hotspot gets no invite and no mDNS. With dual-band SSIDs use the one 0x5703 specifies.
+
+## 8. Connection sequencing, mDNS and cancellation
+
+- Order (from catplay): ctrl advertisement first, invite-driven, no blind waits.
+  1. `_carplay-ctrl._tcp` is published at `startConnection`; after 0x5703/bind only `ensureForNetwork` re-registers.
+  2. After endpoint handoff wait for the invite with `awaitCtrlInvite` (invite counter event; force-announce at 2 s if absent; 4 s fallback; a discovered `_airplay._tcp` also releases it).
+  3. `_airplay._tcp` discoverer runs permanently once bound; lookups read its cache.
+  4. Endpoint resolution happens after the invite and not on the network callback thread.
+- Early advertising may register before Shizuku is ready, writing a placeholder MAC into TXT `id` (car never invites). `DeviceIdentity.bluetoothMac(forceRetry)` + `CarPlayCtrlAdvertiser.repairPlaceholderMac` (retry every 2 s, re-register on success) is required.
+- **ctrl port is fixed for the advertiser lifetime.** Android NSD has no `reannounce()`; re-announce = unregister + register via `unregisterServiceOnly()`, keeping the socket and accept thread (`acceptRunning` independent of `registered`). Previously `ServerSocket(0)` changed the port on every re-announce with up to 1.2 s gaps.
+- **Do not copy identity fields from catplay.** Changing ctrl TXT `srcvers` from `950.7.1` to `566.25.21` and instance name `sender` to `iPhone` made Audi MMI 3315 stop sending `GET /ctrl-int/1/connect` entirely (release 0.1.7). Reverted, pinned by `CarPlayCtrlAdvertiserTest`. Same class of fields: `sourceVersion`, `deviceID`, service name, `model`, TXT `id`: A/B on a real car first and make the value visible in logs.
+- `_device-info._tcp` removed (NSD rejects port 0: `The port is missing`).
+- Connection time budget (Audi, 2026-10-18): of 4.9 s from invite to RECORD, `/info` takes ~3.0 s because the car does not answer until its window is ready (not optimizable). `AppOrientationCompat.resetAll` (~1.6 s) and `applyAll` (~2.0 s) were moved off the critical path onto one serial executor (`resetAllAsync`, `applyAllAsync`).
+- **Cancellation must be interruptible everywhere.** `sessionStarting` is reset only when the pairing thread reaches `finally`; any uninterruptible wait leaves the hero card in "connecting" forever. Defenses: detach the BT session socket on disconnect/cancel (terminal states only), `AirPlayClient.cancelled` ends pairing retries, `cancelConnecting` forces `sessionStarting.set(false)`. Every new long wait must respect `connectCancelled`; test "start then cancel immediately".
+- Shizuku not ready must hard-block connecting, in both `ensureShizukuReady` (CTA precheck, before Bluetooth) and at the top of `startConnectionNow` (delayed paths). Otherwise the result is "BT connected, car screen black, touch lost". `ShizukuGate.guidanceOf` gives three distinct actions: not installed (explanation only), not running (open Shizuku), not authorized (request and auto-continue via `pendingShizukuThenConnect`). The readiness checklist counts Shizuku as item 1 (`readyCount` x/4). Unregister `Shizuku.OnRequestPermissionResultListener` on Activity destroy.
+
+## 9. AirPlay session
+
+### Eras and pairing
+
+- Classify receivers by catplay's three eras (`docs/PROTOCOL-NOTES.md` §9f). Old head units (CarPlay 210.81, Audi 4xxx) are pre-HomeKit (`_airplay._tcp` features without bit 38 `HK_PAIRING_AND_ENCRYPT`): plaintext control (`et=NONE`), AES-128-CTR zero-key screen stream, `pair-setup` always fails. Rules:
+  1. bplist root object must be at byte 8 (210.81 ignores trailer `topObject`); encoder uses `makeRootFirst` everywhere.
+  2. Initial SETUP uses relative URI `/setup`.
+  3. Unpaired sessions send `et=1` explicitly; event channel in plaintext.
+  4. Unpaired screen frames use AES-128-CTR with a keystream continuous across frames (one instance per stream).
+  5. Control ciphertext MTU 1440 -> max 1422 plaintext bytes per frame (0x4000 was rejected as PayloadTooBig).
+  6. Never test "has address" with `contains('.')`: Audi 4xxx often sends only IPv6 link-local. `net/EndpointHosts` orders IPv4 -> global IPv6 -> link-local IPv6; video, audio and event channels reuse the pairing's `activeHost`.
+- Missing TXT features = unknown: keep the old path, do not assume "no pairing".
+- Real iPhone sysdiagnose comparison (`docs/PROTOCOL-NOTES.md` §13, iOS 18, read with `log show --archive`):
+  - Audi MMI 3315_5GHz rejects the first MFi step with 403 even for a real iPhone after pair-verify, then re-invites after 18-20 s and succeeds. Correct recovery: keep BT and retry with backoff (`pairingForbidden` disables the BT-drop hack and plaintext downgrade; 403 backoff 5 s).
+  - That Audi's successful session negotiates iAPChannel = 0 (real iPhone did not open a Wi-Fi tunnel). Treat "MIB3 must have a tunnel" as uncertain and A/B before changing the tunnel.
+  - Successful paths on both cars: IPv6 link-local :7000, pair-verify + MFi (standard modern form). SETUP responses may lack streamID (we read only dataPort).
+- Session-level SETUP `deviceID` must be the phone's real Bluetooth MAC from `DeviceIdentity` (same source as 0x4300/0x4E0E). WinPlay filters by selected iPhone address and answers `403 OK` (its status table has no 403 text; that combination means device filter). The old fake `ff:ee:dd:cc:bb:aa` caused "disconnects after ~45 s". The 403 log prints the value sent. On non-200 SETUP, close the control channel actively.
+- `SetupInfo.hevc` requires both an empty `hevcInfo` dict in `/info` and `"hevc"` in the SETUP response `enabledFeatures` (see Video).
+- Video/audio/keepAlive hosts always use `client.currentEndpoint` (the address pairing actually reached, refreshed via mDNS), not the stale `effectiveEndpoint`.
+
+### Stream setup order
+
+- Screen SETUP -> connect data port -> RECORD -> start video -> audio SETUP -> **RECORD again**. The car has a ~2 s activation watchdog after screen SETUP and audio SETUP takes 2.0-2.7 s; putting it before RECORD always triggered `EVENT read ended - Connection reset` in the same millisecond (5/5). An audio stream added after RECORD needs a second RECORD.
+- If the data port cannot be connected (`openDataPortWithRetry`: one retry after 300 ms, only when the first attempt failed within 1.5 s, i.e. refused rather than timed out), the round ends without RECORD (`failDataPort`: TEARDOWN + close, BT kept). Previously RECORD went out anyway and the car showed black until its ~10 s watchdog fired (chengshl ec70bb80).
+
+### RTSP control channel
+
+- Asynchronous reads: a dedicated reader thread decrypts and dispatches by CSeq; writers only serialize "allocate CSeq + encrypt + write". `soTimeout=0`; timeouts via the pending-response poll. A synchronous per-connection lock stalled feedback during slow requests (Audi audio SETUP 2 s+) and the car's ~3 s feedback watchdog killed the session.
+- On reconnect close the old socket (two readers would race). When the cipher switches from null to active, discard plaintext leftovers or frame boundaries misalign.
+- Session end sends a bounded RTSP `TEARDOWN` first (`AirPlayClient.teardownSession`, 800 ms, chengshl T42), only if a session-level SETUP succeeded on that connection; `retireSession` runs it in the background from the main thread and inline on pairing threads (old connection closed before the next round connects). (unverified on a real car)
+
+### Heartbeats (three independent ones, all required)
+
+1. UDP keepAlive 4-byte ping to keepAlivePort, every 5 s (catplay's 10 s equals the watchdog; sleep jitter of 1 ms times out).
+2. RTSP `POST /feedback` with empty body, every 1 s.
+3. Keep-alive frame inside the screen data port (128-byte plaintext header, opcode 2; opcode 5 with a bplist stats body when `/info` has `keepAliveSendStatsAsBody=true`), every 1 s, **also while video flows**. Not encrypted (only VideoFrame opcode is encrypted), does not consume a ChaCha nonce.
+- With only 1 and 2 the session dies 10.2 s after RECORD with all channels looking healthy. All three are necessary but not sufficient: MMI 3315's 10 s teardown was finally the missing Wi-Fi tunnel (below).
+
+### TCP liveness
+
+- `net/TcpLiveness`: keepalive idle 10 s, interval 3 s, count 3, `TCP_USER_TIMEOUT` 20 s (19 s death detection, deliberately above the car's 15 s watchdog). Applied to control, event and video data sockets. Default kernel keepalive starts after 2 h; cars that power off send no RST and readers hang in `read()`.
+- `ParcelFileDescriptor.fromSocket` before API 29 wraps the socket's own fd (closing it closes the socket): use it only on 29+, use reflection on `Socket.getFileDescriptor$()` on 26-28.
+
+### Wi-Fi tunnel (second iAP2 link) and MIB3
+
+- MIB3 needs a second iAP2 link through AirPlay; answering only with ACKs gets the session dropped ~10 s after RECORD (0.1.9 = 10.17 s, 0.1.17 = 10.18 s). Head-unit markers repeat at 1 Hz until the session table is answered. Implementation: `airplay/VirtualIap2Link.kt` (DiPlay tunnel, MIB3, legacy echo). Byte-level constants and Frida traces in `docs/PROTOCOL-NOTES.md` §12.
+- Sequence: after screen SETUP succeeds, send DETECT once through control channel `POST /command` (iAPSendMessage envelope) -> car SYN (event channel) -> phone SYN|ACK (control channel) -> NORMAL -> control session: 0x1D00 -> 0x1D01 -> 0x1D02 + 0xAA00 -> 0xAA06 -> 0xAA02 challenge (length from memory, tunnel key, cold start 20 B first) -> 0xAA03 -> 0xAA05 -> burst 0x4E0C/0xA100/0x4E0A/0x4E0B/0x4E09/0xFFFA/0xFFF0 -> answer subscriptions 0x5000/0x4157/0x4154/0x4170; 0xFFFB gets only a link ACK.
+- Constraints: phone-to-car link frames only via control channel POST (MIB3 does not read event-channel outbound); DETECT exactly once after screen SETUP (earlier is flushed); our echoed LSP declares our own maxOutgoing 0x7F (echoing the peer's table throttles us); 0xFFFA/0xFFF0/0x4158 are byte constants, never re-encode (0x5001 is encoded, but pinned to its capture by a test); `reference/AADisplay` is GPL-3.0: facts only.
+- **Screen switch requires modesChanged re-assertion** (2026-10-23, compared with AADisplay): the second control session resets the car's resource arbitration, invalidating the earlier modesChanged. `VirtualIap2Link.onControlSessionComplete` -> `SessionController.scheduleModesReclaim`: first at +1.5 s after auth + burst, re-assert at +4/+12/+30 s. Sending during 0xAA00/0xAA05 competes with iAP POSTs and Audi dies at ~12 s. "Picture for 3 s then disconnect" (0.1.12) had the same cause.
+- Teardown attribution guard: if MIB3 was armed but the control session never completed, it is the link watchdog; never record it as an audio-tier incompatibility (that blacklists the media path and leaves the session silent).
+- `sendRawCsmLocked` logs the message ID from `frame[4..5]`; `[2..3]` is the length.
+
+## 10. Video encoding and composition
+
+### Frame format
+
+- VideoConfig header must carry the encrypted flag and canvas size (Audi 4851, 2026-10-19, `docs/PROTOCOL-NOTES.md` §9g): `small_param[1] |= 0x04` (Encrypted) at offset 6; `params[1]` at offset 16 = width and height as two f32 LE; `params[0]` (8..16) zero. Audi/DELPHI build the decoder from these; without them the screen is black while session and touch work. DiPlay/WinPlay ignore them, so the bench cannot catch it. For "app connected, car black", check the `VIDEO: VideoConfig ... flags=` log line (prints the first 24 header bytes). Compare new header fields with catplay `screen_frame_ext.rs`.
+- `annexBToLengthPrefixed` scans once into a fixed-size array (unit tested against the old byte-wise implementation); AES in place; socket wrapped in `BufferedOutputStream`, header and body sent together.
+- HEVC (experimental, Settings > Display "HEVC encoding", default off; facts from CarPlayStation, GPL-3.0, read only): VideoConfig body `[u32 BE box length]["hvcC"][HEVCDecoderConfigurationRecord]`, header offset 6 adds 0x08; frames remain 4-byte length-prefixed; do not apply the H.264 SPS level patch (`annexBToLengthPrefixed(patchH264Level=false)`). Assembly in `video/HevcConfig`. WinPlay has no `hevcInfo`. CarPlayStation accepts self-signed P-256 MFi (we skip 0xAA03 verification). (unverified on a real car)
+
+### Rate control and quality (upstream #26, VW MIB3 blurrier than native) (unverified on a real car)
+
+- Bitrate `encoderBitrate()`: pixels x 8, clamped 4-12 Mbps, 60 fps x 1.5, total cap 12 Mbps; HEVC uses 65%. At 16.6 Mbps moving maps peaked at 19-20 Mbps and WinPlay backpressured.
+- CBR when the encoder supports it (Qualcomm VBR 10 s average overshot the target by 75-80%; stability preferred).
+- QP floors I 20 / P 22 (`KEY_VIDEO_QP_*_MIN`): without them Qualcomm spends the whole budget; map location-dot animation went from 16-30 KB per frame to 1-3 KB.
+- Settings > Display "Clarity first" (`DisplayPrefs.clarityFirst`, default off) requests High profile: High + L4 -> L4 -> auto fallback. Adapters always Baseline. Some encoders silently ignore `KEY_PROFILE` (like `KEY_LEVEL`); the SPS is authoritative. Actual profile in the VideoConfig log line (66/77/100); one-line `VIDEO:` quality summary; keepAlive lines show actual bitrate.
+- Video socket `sendBufferSize=256KB` and encoder low-latency hints (`KEY_PRIORITY`, `KEY_LATENCY`, `KEY_OPERATING_RATE`).
+
+### Frame pacing and keyframes
+
+- Composer loop is event driven: new input frames, overlays and layout animations call `wake()`; no fixed sleep polling. Reuse `posBuf/texBuf`; no direct buffer allocation in draw.
+- New frames throttle to `1000/targetFps`. A "new frame" counts only inputs that are drawn into the output (dock + active app display + map when its tile is visible).
+- Idle downshift (`composeIntervalMs`, replaced the old 33 ms idle heartbeat): within 1 s of the last change still 33 ms, afterwards 1 fps. The 1 fps floor guards against the historic "no frames -> receiver freezes". Based on WinPlay `diagnostics.json` (`%APPDATA%/winplay/data/`, a "video runtime stats" entry every 10 s) showing a real iPhone at 0-0.4 fps and ~0 Mbps when static, peaks ~13 Mbps. (unverified on a real car)
+- Periodic I-frame 30 s (`VideoSender.KEYFRAME_INTERVAL_S`; was 3 s). I-frames ~550 KB vs P 5-20 KB. Head-unit keyframe requests go through `forceKeyFrame` -> `requestKeyFrame` immediately.
+- Do not log per frame or per I-frame.
+
+## 11. Audio and microphone
+
+### Downlink audio
+
+- `audioType` must be `media`. `/info` `audioFormats` lists type=100 tiers (Audi: compatibility, alert, default, media, telephony, speechRecognition), each with a different bitmap. Media into compatibility is accepted (SETUP ok, dataPort, packets received) but not routed to playback. Parse all tiers (an old `take(200)` log truncation caused a wrong conclusion). `AirPlayClient.negotiateAudio()`: media tier + PCM 48 kHz stereo (bit 15), else 44.1 kHz (bit 11); latency from that tier's `outputLatencyMicros`; without `/info` fall back to media/48k/250 ms.
+- RTP per catplay real-car values (`rtp_recorder.rs`, `rtp_cipher_chacha.rs`): SSRC 0, 352 frames per packet, timestamp increments by frames, PT 100, big-endian s16, AAD = header bytes 4..12, trailing 8-byte little-endian nonce. These are wire format.
+- Capture limited to REMOTE_SUBMIX output; never the microphone for downlink. Output pipeline, AudioRecord and media session are released together.
+- SETUP 200 plus steady UDP does not mean audio works: check PCM non-zero ratio. 2026-11-02 Samsung/Spotify: both captures were all zero initially; after skipping track, shell REMOTE_SUBMIX probe got 97,989/114,688 non-zero samples (peak 8,628) while playback capture stayed zero. WinPlay end-to-end with the new source still pending.
+- No-sound triage: `AUDIO:` capture non-zero % and peak (0% = not captured: app forbids capture or audio routed to Bluetooth) -> `audio negotiation -> audioType=` -> the connId sampleTime in car `/feedback` advancing.
+
+### Microphone uplink (v1, details in `docs/MIC-RESEARCH.md`) (unverified on a real car; WinPlay end-to-end verified 2026-11-17)
+
+- Phone sends SETUP `type=100 audioType=speechRecognition input=true` with `dataPort` = the phone's own UDP port. Car packets mirror our downlink format; key label `DataStream-Input-Encryption-Key`; PCM is big-endian.
+- Injection via shell `MODIFY_AUDIO_ROUTING` AudioPolicy record injection (`startMicInjection`). While injecting, the phone's own mic is unavailable to all apps, so it exists only during a voice interaction. Hotword (HOTWORD/SoundTrigger) cannot be injected.
+- Trigger: any app recording during the session (UserService `activeMicApps`, AppOps watch) switches automatically; head-unit voice key `requestSiri` also launches the assistant.
+- Both session retirement and `onEnded` must call `CarMicController.detach`.
+- WinPlay pitfalls: injected track needs `setContext(shell)`; tags must start with `addr=`; downlink (silence) must be sent during mic streaming or the receiver does not open the mic; do not validate the RTP version bits of mic packets (WinPlay header bug).
+
+### Phone calls (2026-11-21)
+
+- Car call card (unverified): `call/CallState` reads call notifications in `MediaListenerService` (CallStyle extras `android.callType` 1 incoming / 2 ongoing / 3 screening, `android.answerIntent`, `android.declineIntent`, `android.hangUpIntent`, `android.callPerson`; a plain `CATEGORY_CALL` notification also counts). `GridActivity` swaps the dashboard music card for a call card (caller, app, duration from the notification chronometer; ringing: decline / answer, connected: mute / hang up), and a new ringing call calls `VirtualLauncher.showDashboardForCall` (closes the media pane player, leaves fullscreen map or app). `call/CallControl` fires the notification's own PendingIntents (background-activity start allowed on API 34+), falling back to `ICarInput.callControl` (ITelecomService `acceptRingingCall` / `endCall` as shell). Mute uses `AudioManager.isMicrophoneMute`, read back and undone when the call ends. Logs never contain the caller (`CALL:` lines carry app, phase and avatar icon type only). Telegram (2026-11-21) rings with CallStyle but shows the connected call as a plain ongoing foreground-service notification (no category, one "end call" action): `CallState.adoptOngoing` takes an ongoing FGS notification of an app that rang within 20 s (or is still ringing) as its connected call, single action = hang up, caller/photo carried over. Tapping the card outside its buttons during a call opens the notification's content intent on the media display (`VirtualLauncher.openCallAppInMediaPane`, moved over from the phone if the system reused the phone task); the pane closes when the call ends. WhatsApp's call photo is its generic avatar when it has none for the contact. WeChat (measured 2026-11-21): ringing = `CATEGORY_CALL` notification on its voip ringtone channel with a full-screen intent and a custom view but no actions; connected = ongoing foreground-service notification on `reminder_channel_id` without actions (adopted like Telegram); audio = it sets `MODE_IN_COMMUNICATION` itself (not Telecom), plays `USAGE_VOICE_COMMUNICATION`, records `VOICE_COMMUNICATION`. Outgoing WeChat / Telegram calls never ring, so `CarMicController`'s 400 ms recorder poll feeds `CallState.onRecorders`: an app recording while `AudioManager.mode` is IN_COMMUNICATION / IN_CALL is in a call, its ongoing foreground notification is adopted, a removed / re-posted adopted notification (WeChat flickered ACTIVE/none) keeps the card while the app stays in the call, and leaving call mode drops it. WeChat also rings with no call notification at all while its call screen is up or the app is in the foreground (capture 2026-11-22: `plugin.voip.ui.VideoActivity` resumed + a `USAGE_NOTIFICATION_RINGTONE` player, no `category=call` notification; 3 of 6 calls), so the same poll asks the Shizuku service `ringingApps()` (app uids playing a ringtone; shell holds MODIFY_AUDIO_ROUTING so client uids are real) and `CallState.onRingers` shows a ringing card without caller details for an app with no call of its own (`fromRingtone`, key `ringtone:<pkg>`); its buttons move the app's tasks from the phone to the media display (`openCallAppInMediaPane` with no intent, `via=moved`), and a real call notification replaces it. Caller photo and name of WeChat come from its custom ringing view (`call/CallAvatar`, inflated with the application context: an AppCompat Activity inflater makes `AppCompatImageView`, on which RemoteViews refuses `setImageBitmap` and the apply fails; name = largest text, used when the title is empty or the app label; the log records only `photo=` / `name from view=` presence). Card buttons for a call without the matching action open the app's own call screen (full-screen intent, else content intent) in the media pane so the driver presses the app's button; Telecom remains the last fallback.
+
+- Call voice to the car (VoIP, unverified): while `CallState` is ACTIVE, `CarMicController.callAudioLoop` asks the Shizuku service for `startCallCapture` (AudioPolicy loopback mix, `RULE_MATCH_ATTRIBUTE_USAGE` VOICE_COMMUNICATION + `voiceCommunicationCaptureAllowed`, record sink built by hand with `setInternalCapturePreset(REMOTE_SUBMIX)` + `addr=` tag + `setContext(shell)`), and the mic stream's downlink sends that voice (byte-swapped to s16be, 200 ms buffer cap) instead of silence. The mic stream still announces `audioType=speechRecognition`; switching to `telephony` + `modesChanged` phoneCall is open. A WhatsApp call already used the car mic for the uplink (2130 packets in 42 s, 2026-11-21).
+- Today: 0x4154/0x4157 get a fixed "no call" reply (MIB3 tunnel, adapters), call audio stays on the phone, and HFP to the car is disconnected on purpose (section 5), so the car cannot take the call over Bluetooth either.
+- Receiver side (WinPlay source, mirrors CarPlay): call audio = the type-100 bidirectional main audio stream with `audioType=telephony` (PCM mono / Opus), i.e. the same path as the speechRecognition mic uplink; "in a call" = `modesChanged` appStates `appStateID 2` with `entity 1`; steering-wheel answer/hang-up = telephony-page HID reports (Hook Switch index 1, Drop index 3) that our HID parser currently ignores.
+- S24 (SM-S9280, SDK 37): shell holds `CALL_AUDIO_INTERCEPTION`, `CAPTURE_AUDIO_OUTPUT`, `CAPTURE_VOICE_COMMUNICATION_OUTPUT`, `MODIFY_AUDIO_ROUTING`, `MODIFY_PHONE_STATE`, `ANSWER_PHONE_CALLS`; the audio policy lists `AUDIO_DEVICE_OUT_TELEPHONY_TX` and `AUDIO_DEVICE_IN_TELEPHONY_RX` as available devices, the prerequisite for Android 12+ PSTN call audio interception (`AudioPolicy.createAudioRecordSink` / `createAudioTrackSource` on those devices). Not yet tried with a real call.
+- VoIP apps, measured on a WhatsApp call (dumpsys audio / media.audio_policy, 2026-11-21): audio mode `MODE_IN_COMMUNICATION` owned by Telecom (self-managed call); far-end voice = OpenSL ES player `USAGE_VOICE_COMMUNICATION`, flags 0x0 (no `FLAG_NO_SYSTEM_CAPTURE`), on the phone speaker; near-end = recording `src:VOICE_COMMUNICATION`. Uplink: `MIC_INJECT_PRESETS` already includes VOICE_COMMUNICATION (7), so the existing injection should cover it. Downlink: app-side playback capture covers only media, game, unknown, navigation, sonification and the app lacks `CAPTURE_VOICE_COMMUNICATION_OUTPUT`; the shell capture reads REMOTE_SUBMIX. Planned route: a shell-side AudioPolicy loopback mix matching `USAGE_VOICE_COMMUNICATION` (shell holds the permission), which also takes the voice off the phone speaker. Unverified.
+
+## 12. Virtual displays and launcher
+
+### Display creation flags (`CarInputServiceImpl.createDisplay`)
+
+- Trusted displays add `VIRTUAL_DISPLAY_FLAG_PUBLIC`. Private displays (owner shell uid) reject third-party IME windows: `WMS.addWindow` -> `Display.hasAccess` returns `ADD_INVALID_DISPLAY(-9)`, `SoftInputWindow.show()` enters `REJECTED_AT_LEAST_ONCE` and never retries. With `OWN_CONTENT_ONLY` set, PUBLIC does not auto-mirror. The dock display stays private.
+- IME policy must be set to LOCAL after creating each trusted display: shell reflection `IWindowManager.setDisplayImePolicy(id, LOCAL)`. The default for virtual displays is `DISPLAY_IME_POLICY_FALLBACK_DISPLAY` (`mShouldShowIme=null` in `dumpsys window displays`), which routes the keyboard to the phone. Read `WindowManager.DISPLAY_IME_POLICY_LOCAL` reflectively (ROMs may change enum values; fall back to 0 and log). Get the proxy via `ServiceManager.getService("window")` + `IWindowManager$Stub.asInterface` (`WindowManagerGlobal.getWindowManagerService` kills the process on this ROM). Needs `INTERNAL_SYSTEM_WINDOW` (shell has it). Policy is per display instance, so reapply on every create (idempotent); trusted displays only. Both fixes are required (policy alone: `imeDisplayId` moves but `mImeWindow=null`; PUBLIC alone: keyboard on phone). Diagnostic tool: `/data/local/tmp/const.jar ImeConst <ids...>`; compare `mViewsCreated` with `mImeWindow` in dumpsys.
+- `VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED` (1<<12, @hide) together with `VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP` (1<<11) on trusted displays **and the dock**: keyguard no longer sends sleep tokens (even with PIN lock), and the displays leave the default display group so a powered-off physical panel does not blank them. Without the group flag the system strips ALWAYS_UNLOCKED silently. Without the pair on the dock, the dock went black during panel-off. Requires `ADD_ALWAYS_UNLOCKED_DISPLAY` / `ADD_TRUSTED_DISPLAY` (shell has them on Honor). Some ROMs throw SecurityException: three-level fallback (group + unlocked -> group -> base flags). Read back `display.flags` and log in `/data/local/tmp/carinput_svc.log`.
+- `DESTROY_CONTENT_ON_REMOVAL` (1<<8) only finishes activities; tasks stay in Recents. On detach first `am stack remove` car-display tasks (also removes Recents), then release displays, sequentially in one background task (detach may be on the main thread).
+- Car task IDs are persisted in prefs. Disconnect removes other car tasks and preserves the active map's package and task ID. The active map stays on its virtual display with its surface detached, so disconnect does not bring the map to the phone foreground. Residual cleanup skips that display. Reconnect moves the exact task to the new car display before releasing the parked display. The map's orientation overrides use non-killing writes at disconnect and reconnect to preserve in-progress navigation.
+
+### Fallback form (app-side PUBLIC displays)
+
+- EMUI 12 (Huawei Mate30 Pro, 2026-10-20) returns null silently from shell `createVirtualDisplay`. The fallback branch must also create the map display. Resize: trusted form via shell `svc.resizeDisplay`; fallback form via app-side `VirtualDisplay.resize()` (shell cannot resize displays it does not own). Log which display failed (-1) individually.
+
+### Resize and orientation
+
+- After `VirtualDisplay.resize` call `SurfaceTexture.setDefaultBufferSize(newSize)`, otherwise content is drawn into the old buffer's top-left. Resizes run in the background.
+- Displays must ignore app orientation requests: on attach, for app / appHi / map / media, `cmd window set-ignore-orientation-request -d <id> true`, read back (`failed to make app displays ignore orientation requests` warning). On detach set false **before** releasing (else it persists by uniqueId). Without it, portrait apps (Toutiao) rotate the whole display (`rotation 0->3`, `2251x1152 -> 1152x2251`), breaking aspect, touch mapping and the desktop.
+- Fixed-portrait maps need the orientation compat override in place before launch; `session_maps` persists packages to revert; restore on disconnect; do not touch the user's own force-landscape prefs.
+
+### App force-landscape (`AppOrientationCompat`)
+
+- Requires Android 14+ (SDK 34). ChangeIds `265451093` (OVERRIDE_UNDEFINED_ORIENTATION_TO_NOSENSOR) and `265464455` (OVERRIDE_ANY_ORIENTATION) are standard AOSP from Android 14 (`ActivityInfo`, consumed by `LetterboxUiController`; moved to `AppCompatOrientationOverrides` in Android 16). Android 13 has none (Honor A17/SDK 37: 392 IDs including both; Redmi K40 A13/SDK 33: 173 IDs, neither). Not Shizuku related.
+- User builds only allow overrides on debuggable apps unless the ID is registered; writing to an uninstalled package falsely succeeds (only `rawOverrides`). Verify with dumpsys `name=` fields.
+- Code: `MIN_SUPPORTED_SDK = 34`, then `changeIdsRegistered()` (one dumpsys, ~30 ms, cached; each ID needs its own `name=`). `WriteResult.UNSUPPORTED` (permanent: pref not saved) vs `FAILED` (temporary: keep intent). `applyAll` skips entirely if the probe fails. Panel shows a yellow banner and greys out.
+- `am compat enable/disable` kills the target app immediately (pid gone). Do not design "is it running / restart?" prompts. `applyAll` also kills running listed apps, including on the phone.
+- Writes are queued at pairing start (endpoint handling), not attach; attach only `awaitPending()` (~0 ms). Blocking attach delays the first screen keep-alive frame and eats the ~10 s RECORD budget. `awaitPending` timeout (6 s) must log. `VirtualLauncher.launchApp` calls `awaitPending()` first.
+- State source: `dumpsys platform_compat` (no `cmd platform_compat`; full 30 ms/36 KB, grep to ~3 KB), read once when the panel opens. Parse both `packageOverrides` and `rawOverrides` (uninstalled packages only in raw; legacy dirty keys like `force_xxx/component`). UI: grey "normal" text, red "system leftover, tap to clear" (warns it restarts the app), a top banner for out-of-list leftovers.
+- Startup leftover handling: `resetAll` is tied to "leftover displays detected" (`MainActivity.refreshShellState` startupCheck). Restore before cleanup; pre-binding the UserService (reaps old process) after the leftover scan. Test: write `force_<pkg>=true` into `shared_prefs/app_orientation.xml`, force-stop, restart, expect the "ORIENTATION: restored N landscape override(s)" log.
+- Override written while the app runs: the restored task may keep the old config (`displayChangedWithoutRestart=true`, `overrideOrientation=PORTRAIT`, `letterboxReason=FIXED_ORIENTATION`). Only force-stop + `am start` fixes it. Repro with `am compat enable --no-kill` (test only). `LetterboxHintController`: event-driven probe (connect, app launch, map fullscreen, restart) parses `bounds=` and `mMaxBounds=` from `dumpsys activity activities`; shows an `OverlayCard` (composer 2D texture layer) on the left, else right, else nothing, with a "force restart" button. Self-heal: if the pref is on but the system override is missing, rewrite it and relaunch the app on its display; if still portrait, show a final card. Probes must pass `displayIdHint`.
+
+### Leftover displays across versions
+
+- Shizuku reuses the shell process per component + process name + version (APK `lastUpdateTime`). After reinstall the old process survives (`am force-stop` does not kill it), and only the creating process can release its displays. Old process detection: `/proc/<pid>/maps` base.apk marked deleted. Three layers: `CarInputServiceImpl` self-exits when `lastUpdateTime` changes (<= 15 s, measured 5 s); `CarInputClient.reapStaleUserServices` kills other `:car_input` pids after binding; startup cleanup runs automatically, dialog only if it fails.
+
+### Dashboard layout
+
+- Order: dashboard (page 0) -> app pages (1+). Dashboard only left-swipes forward; the first app page right-swipes back via the native pager. Boundary interception and forced `onPageSelected` returns were removed (release 0.1.35, supersedes earlier one-direction and both-direction rules). `dashboardUserDragging` distinguishes user drags from animations; user drags must never block MOVE/UP injection. GL previews during drag; mode is committed at IDLE; cancel keeps the mode.
+- Left swipe = finger-following fakeDrag: `DashboardSwipeGesture` withholds injection until classified. Left drag -> `beginDashboardDragOut` + pager `fakeDragBy` (GL map layer follows `onPageScrolled`); tap -> replay down+up at origin; vertical/right -> replay down then inject normally. The media card and music app never see paging gestures (prevents accidental taps).
+- Mode is driven by the Dock; ViewPager2 selection must not write mode or hide the map early. Non-Home position sync must not rewrite the GL layer; IDLE finalization only applies when `dashboardPageAnimating` and uses current `mapFullscreen`/`dashboardMode`. No adapter reload during the transition.
+- New connection: set split view as home first, then start Dock and launcher; the default map launches in the background; returning to split keeps the switched map.
+- Layout (`DashLayout`): `dockAtBottom` and `splitVertical` are separate. SIDE_BY_SIDE, MUSIC_BOTTOM (dock left, map top, music strip bottom), DOCK_BOTTOM (Android Auto style, dock thickness x0.72), PORTRAIT. Preference in Settings > Display > dashboard layout (next connection). Layout preference only applies to narrow landscape (aspect < 1.9); wide is always side by side; narrow defaults to dock at bottom unless "side by side" is explicit (old "auto"/"music bottom" values map to default). Decide whether new geometry code needs dock position or split direction; settings "narrow" uses `isPortraitCanvas()`.
+- Music strip layout does not embed media apps (`launchMediaApp` -> normal `launchApp`); card `view_dashboard_strip.xml` with the same IDs as the vertical card. `PaneBounds` vertical-split branch starts x at dockWidth (0 for portrait cars).
+- Dock-bottom landscape uses the supersampled app display: TouchRouter dockAtBottom branch uses `activeAppDisplayId()` + `activeAppScale()`.
+- Split ratio from pane shape (`VirtualLauncher.dashSplitFractionFor`, test `DashSplitAdaptiveTest`): media card width/height ~0.62 (portrait height/width ~0.45), map takes the rest, clamped 0.55-0.8. 1920x720 -> 0.75; 1280x720 -> ~0.60. Log `LAUNCHER: dashboard layout canvas=... scale=... map ratio=...`. The old fixed 3:1 and `dashSplitFraction` drag preference are no longer read; do not re-enable the drag handle. (History: drag split 2026-10-22 used visual gap vs touch width constants, draw-only during drag, sticky routing; `VirtualLauncher.dashSplitGeom` and `DashSplitMathTest` remain the geometry source.)
+- Stream pixel constants (`CARD_MARGIN_PX`, `DASH_GAP_PX`, `DASH_HANDLE_TOUCH_PX`, `TILE_CORNER_RADIUS`) scale with `DashMetrics.scale` (stream short side / 720); identical at 1920x720. `DashMetrics.configure` must run before any geometry in attach. Multiply new stream pixel sizes by scale.
+- Map and media display density = 200 x `DashMetrics.scale` (min 120) (`MAP_DISPLAY_DPI`). Fixed 200 dpi at 800x480 left Google Maps a sliver (~534x271 dp). Card content in `GridActivity` uses dp (app display density already scales with height, ~432 dp tall).
+- `PaneBounds` is the single geometry source for display creation, GL and touch; swapping positions only translates. Media apps use `mediaAppBounds` = full `mediaPaneBounds`; the back control is a GL floating button (no reserved top row, release 0.1.32).
+- The CarPlayMedia display is supersampled `VirtualLauncher.mediaSupersample` (chosen at attach so the pane is >= 320 dp wide in the phone density, 2..4x pixels and density; S24 600 dpi = 3x; compositor input and `TouchRouter` media coordinates scale with it): normal apps keep their dp size, while WeChat, which lays out with the phone's density on any display, had its call screen blown up and cut off in the 427x688 pane (2026-11-22). The factor must be set before `composer.start`: its media input buffer is sized from the argument, while the display is created later in `onSurfacesReady`; deciding it inside the callback gave a 2x buffer for a 3x display and only the top-left of the pane showed (Spotify cut off, WeChat call screen shifted). (unverified on the bench after the change)
+- Media apps run on the separate CarPlayMedia display; never call plain `launchApp` that exits the dashboard. Release, old-display cleanup, orientation policy and GL input include the media display. A singleTask app already on the media display relaunched from the launcher returns to the dashboard media pane.
+- Map touch: map card taps in the front `PaneBounds` hit test own the event; tile taps only expand (no injection into the background map), no static coordinates during transition. Later legacy routing only handles `mapFullscreen`. Split-map direct control: map display resized to `mapPaneBounds`, touch only translated; gestures starting inside the card must not start the dashboard swipe. Media press gestures crossing into the map stay owned by media and finish correctly.
+- GL animates rects/corners for 320 ms.
+- `activeMapComponent` records the session's foreground map; returning to the dashboard does not force the default. Switching maps reuses the same-display task; do not kill the old navigation process.
+- Default map: any installed launchable app; manual picks go through map-display routing. `DefaultMapPrefs.resolve()` uses pure `resolveDefaultMap()` (explicit -> priority scan), tests `DefaultMapPrefsTest`. A former cycle (`resolve` -> `VirtualLauncher.defaultMapComponent` -> `resolve`) overflowed the stack when prefs were empty (after reinstall), swallowed by `Bg.run`. `VirtualLauncher.defaultMapComponent` may only forward one way.
+- Background apps: entered only from the Dock (long-press Dock Home also opens it; the apps page has a fixed entry). List = apps successfully launched this connection (including the auto-launched default map), cleared on disconnect. Tap switches, close one or all, back to apps page. Closing removes car windows only (no force-stop; music services may keep playing); task IDs re-read before closing and verified after; failures show a retry message. Task parsing handles Samsung `Display #N` and Honor `Display: mDisplayId=N`; exclude phone display, Dock, all CarDeck affinities. Do not treat in-memory `runningApps` as truth.
+- "Switch current map" and "choose another installed app" share a searchable picker with icons. Switching the current map does not write the default preference.
+- Build/interaction notes for the dashboard: `docs/DASHBOARD-UX.md`.
+
+### Dock and launcher grid
+
+- Dock dimensions scale with canvas resolution. Design base (`design/launcher-proto.html`, 1160x540 @ 420 dpi, dock 48 dp = 126 px, clock 22 px). `SessionController` sets dock density `420 x min(streamW, streamH)/540` (cap 1680); Audi base = 1.0, 2320x1080 bench = 840 dpi. Rules: dock layouts (`activity_dock_sidebar/bar.xml`) only dp (design px / 2.625); `DockActivity` sets font sizes in PX as design px x designScale (`densityDpi/420`), not sp; blur radii and `fitClockText` steps also x designScale. Dock and desktop keep their fixed dark design.
+- Portrait grid rows adapt (`GridActivity.computeCellMetrics()`): rows = `usableH / (cellW x 1.25)` clamped 3-6. Landscape still 3; portrait 648x1241 -> 6 rows (~154x193 cells). Page capacity = `COLUMNS x rows` (runtime field). Verify with "Show layout bounds" screenshots.
+- Grid cells are `isFocusable=true` with `foreground=focus_ring` for DPAD.
+
+### Voice assistant (Gemini)
+
+- Gemini overlay is a normal Activity (`googlequicksearchbox/...FloatyActivity`, `ty=BASE_APPLICATION`) opened on the focused display. "Hey Google" usually lands on the phone; `am display move-stack <task> <gridDisplay>` moves it to the car (native, touchable). Mirror cropping was tried and dropped.
+- Mic detection only via AppOps: Google app `RECORD_AUDIO` / `RECORD_AUDIO_HOTWORD` (UserService `isAssistantListening`, shell has WATCH_APPOPS). `AudioRecordingCallback` and shell `getActiveRecordingConfigurations` do not see `src:HOTWORD` (S24).
+- Close with `am stack remove`, not BACK (BACK collapses it back to the phone with stale text). Tapping blank space on its display lets Gemini end normally.
+- Dashboard / fullscreen map: move the overlay onto the map display (map stays visible, overlay receives taps); otherwise onto the active app display. `tilesSuppressed` (hiding the map tile) was rejected by the user and is only a fallback when moving fails.
+- Gemini may show a portrait screenshot of the phone as screen context; that is Gemini behavior.
+- During a session, `getRealMetrics` for display 0 may return the virtual display size (S24: 2628x1080); use `wm size` for the real phone size.
+
+### Chat mode and density quirks
+
+- React Native apps (Discord) measure text with phone density and draw with display density, clipping text when they differ. `ChatMode.matchPhone` logically enlarges the app display via `wm size` so dp stays the same at phone density; `activeAppScale()` uses the same factor. The launcher is on the AppHi display; do not change that.
+- Chat mode excludes WeChat and Discord (runtime density change breaks them: duplicated titles, garbled glyphs).
+- Tablet layouts: ChatGPT and YouTube switch at 188 dpi. WeChat is single-column at any density (150 dpi sw768, logical 2920x1200@240 with cold start: identical); it cannot be forced into two-pane externally.
+
+### Notification banners
+
+- Default off, at most one held, drawing and other-APK resource loading in the background; system prompt cards have priority; cleared on disconnect; notification content is never logged.
+- Banner animation only moves the `OverlayCard`; the composer re-uploads textures based on bitmap identity.
+
+## 13. Touch and HID input
+
+- Touch injection must be ASYNC (mode 0). The old mode 2 (WAIT_FOR_FINISH) waited for each MOVE; Google Maps queued events ("cannot drag, map keeps spinning after release").
+- HID capability is decided by the descriptor only, never by model, uuid or report length (`docs/HID-KNOB.md`). `/info` `hidDevices`: send `hidSetInputMode` to every uuid (Audi uses "0"/"1", DiPlay integers).
+- Consumer page (0x0C) via `hidSendReport`: the 1-byte value is an **index into the Usage array** (HID Array, LogicalMax = length-1), not a Usage ID. Audi "next" sends 0x05 -> usages[5] = 0xB5. `ConsumerKeys.parseDescriptor()` builds the mapping; Array and Variable semantics are decoded separately. Dispatch via `AudioManager.dispatchMediaKeyEvent` (same path as the music card).
+- Touch: Digitizer page (0x0D) with 16-bit X/Y. Single finger (Audi 5 bytes `[tip][X u16LE][Y u16LE]`) vs multi-slot (DiPlay 12 bytes `[slot][down][X][Y] x2`) decided by the count of Contact Identifier (0x09 0x22). DiPlay knob (4 B) and telephony (1 B) overlap media key lengths; telephony usage 0xB3 would be misread as fast-forward. Length heuristics only when the descriptor is missing. Tests `ConsumerKeysTest`, `TouchReportsTest`.
+- Generic Desktop (0x01) Wheel (0x38) / Hat (0x39) -> `HidNavigation` -> `ICarInput.keyEvent(displayId, DPAD_*)` on `VirtualLauncher.activeAppDisplayId()` (KeyEvent `setDisplayId`; fallback `input -d`). Never dispatch DPAD globally (lands on the phone). The dock is a separate display; DPAD does not cross displays.
+- Raw HID logging: Settings > Display "HID raw log" (`DisplayPrefs.hidRawLog` -> `HidNavigation.rawLogEnabled`, lines `HID-RAW: uuid=... bytes=...`).
+- During an overlay card or handle gesture, routing is sticky for the whole stream (do not re-route per frame by coordinates).
+
+## 14. Head-unit compatibility notes
+
+Protocol differences are authoritative only from logs; see `docs/PROTOCOL-NOTES.md` §9 before changing protocol code.
+
+- **Audi MIB3 (DELPHI)**
+  - MMI 3315: needs 0x5702 despite a sparse list; MFi 32 B over BT, 20 B tunnel; first-connection 403 is normal (re-invite in 18-20 s); NUL-padded 0x4301 addresses; BT drop at ~15 s, AirPlay window ~21 s after 0x4301; needs the Wi-Fi tunnel and modesChanged re-assertion; sensitive to ctrl `srcvers`/instance name.
+  - MMI 6318: MFi 20 B.
+  - MMI 9310: very late 0x4301 (2 min 35 s).
+  - 4xxx / CarPlay 210.81: pre-HomeKit era, plaintext + AES-CTR, IPv6 link-local only. 4851: needs VideoConfig flags and canvas size.
+  - Pair only; profiles connected block the iAP2 window.
+- **BMW**: 87866 needs fresh-sequence SYN|ACK for every SYN. iD9: `wifiGen=NEW` (full lists without 0x57xx), skips 0x5702. BMW also produced the `connect-network` / NSD / watchdog command-line findings.
+- **GM (Buick, Cadillac)**: Cadillac CT5 sends consecutive markers to renegotiate (handled) but SETUP still returns 500 (open). GM 0x4300 format adjustments landed with commit 3993d4d. (unverified on a real car)
+- **VW MIB3**: blurrier than native; addressed by bitrate/CBR/QP/High profile changes. (unverified on a real car)
+- **Ford SYNC+ 2.0 / Lincoln**: no answer to SYN with sequence 99; random initial sequence. (unverified on a real car)
+- **WinPlay (Windows bench)**: the cluster dashboard used for route guidance is our own test build (`F:/.codex/2026-11-01/x20-f-dev-cardeck/outputs/WinPlay-Cluster-Test-r2`, unpacked JS); lane arrows are drawn by `arrow()`/`laneShape()` in `resources/app/src/ui/cluster.js` (combined lanes stagger branches: turns leave mid-stem when the lane also goes straight, a U-turn becomes a low hook; reopen the dashboard window to load changes). Filters by `deviceID` (403 OK); releases BT ~3 s after RECORD; reads only body/avcC (misses header bugs); no `hevcInfo`; `diagnostics.json` is the reference for real iPhone bitrate behavior; mic quirks in section 11; overwrites auto-join via `connect-network` without `-d`.
+- **DiPlay (Redmi K40 bench)**: MFi 32 B only; tears down the whole wireless stack on early RFCOMM loss; resends 0x5703/0x4301 after streaming starts; 12-byte multi-slot touch; ignores VideoConfig header fields.
+- **CarPlayStation (Windows, GPL-3.0, reference only)**: source of HEVC facts; accepts self-signed P-256 MFi.
+- **Wireless adapters**: see section 6.
+- **Huawei EMUI 12**: shell virtual display creation returns null; fallback form.
+- **Samsung S24 / Spotify**: playback capture zero, REMOTE_SUBMIX works; Gemini HOTWORD invisible to recording callbacks.
+- **Bigme ROM**: zz85's fix (no `OWN_DISPLAY_GROUP`) not merged.
+
+## 15. Phone UI and settings
+
+- Colors: `m3_*` tokens in `values/` (light) and `values-night/` (dark) take system Material You palettes (`system_accent*/neutral*`, minSdk 31); four surface tones in `res/color(-night)/` with `android:lStar`. Edit the `colors_gen` table. Car settings (`SettingsActivity`, forwarded `PhoneSettings`/`SettingsContent`) follow phone dark/light too (user request). Dock and desktop stay fixed dark.
+- Settings panel colors via theme attrs `panel*` (`attrs.xml`): Launcher theme = legacy iOS dark values; App and Settings themes = m3 tokens. Never hard-code hex colors in panel layouts/drawables/code; use `?attr/panel...` or `SettingsRows.color()`.
+- Wallpapers: dark/light slots (`WallpaperStore.Slot`) follow phone theme (`attach` listens for config changes; `markChanged` only if slots differ); light defaults to "same as dark". Built-in patterns `WallpaperPresets` are code-drawn gradients (original).
+- `MainActivity` declares `configChanges` `orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden` (stateful console), so `layout-land/` never applies. `applyContentLayout(landscape)` moves the hero card out of the ScrollView into `contentArea` on landscape (right column `mainScroll` uses left padding) and back to `contentRow` on portrait; rebuild layoutParams on parent change (LinearLayout vs FrameLayout); landscape height `WRAP_CONTENT`; also call in `onCreate`. Landscape budget ~284 dp of ~300 dp; hub plate 44 dp, CARPLAY label hidden; `SignalWavesView` scales by min(width ratio, height ratio); `hubPlate`/`hubCaption` centered by gravity. Hero card width = screen width minus page padding, not `contentArea.width` (stale during rotation).
+- Dialogs: size via `ui/PanelWindow` (92% width, optional height ratio; weak list of showing windows, `resizeShowing(this)` in `onConfigurationChanged`). Prompts via `ui/DarkMessageDialog` (plain `AlertDialog` is light under `Theme.AppCompat.DayNight`): 1-2 actions horizontal right-aligned, 3+ vertical equal width with pill backgrounds on secondary buttons; `Emphasis` primary/text/danger; `dismissOnClick=false` keeps the dialog for retry.
+- Disclaimer gate: `legal/DisclaimerPrefs.CURRENT_VERSION` is a version number; bump it whenever `DisclaimerContent` changes. Accept requires all of: 10 s countdown, scrolled to bottom if scrollable, not declined. "Decline" is immediately available and calls `finishAndRemoveTask()`. Decide scrollability only after layout (`scroll.height > 0`). Countdown stores an absolute `elapsedRealtime` deadline through `onSaveInstanceState`. Dialog `setCancelable(false)` + `setCanceledOnTouchOutside(false)`; the menu entry is read-only.
+- Connection page "wait for reconnect after car disconnect" (`DisplayPrefs.waitForReconnect`, default off): when off, only peer-initiated ends trigger full `disconnect`.
+- Settings > Display panel is wrapped in a ScrollView (car content area ~200 dp).
+
+### Music card and notification access
+
+- "Music plays but card shows nothing" = no notification listener access: `getActiveSessions()` still returns sessions with valid `PlaybackState` but `metadata` null (`dumpsys media_session` shows metadata).
+- `media/NotificationAccess` grants via Shizuku at app start, after Shizuku authorization and after session attach (`VirtualLauncher.attach`), idempotently. Do not trust `cmd notification allow_listener` exit codes, and verify with 4 x 250 ms retries (settings writes lag). Compare entries of `enabled_notification_listeners` exactly (split by `:`), not `contains(package)`.
+- Granted but not bound: after reinstall the entry exists but `onListenerConnected` never fires and `dumpsys notification` "Live notification listeners" lacks the component. `NotificationAccess.rebindIfNotConnected`: if `serviceConnected` is false, read `dumpsys notification --noredact`, trust only the Live section, and if missing run `disallow_listener` + `allow_listener` and poll.
+- After a package rename, restart the Shizuku service if authorization requests do nothing.
+- On listener disconnect/destroy publish `MediaSessionsState.publish(null)`. Static card subtitle is neutral ("Media").
+- Card states: no access, session paused, no session (last two both "not playing"). Metadata arrives in stages (title first, art/duration later): empty results retry with short backoff instead of caching. Position = anchor + speed extrapolation, UI refresh every second.
+- `MediaListenerService` polls `getActiveSessions` every second only during a session; outside it relies on callbacks.
+
+## 16. Power, screen off and dimming
+
+Details in `docs/PHONE-SCREEN-OFF.md`.
+
+- Two sleep paths blank virtual displays when the phone locks: keyguard sleep tokens (fixed by ALWAYS_UNLOCKED + OWN_DISPLAY_GROUP, section 12) and display-off tokens (PUBLIC virtual displays lack `FLAG_NEVER_BLANK` and follow the default panel power state). A display created while the screen is off is born asleep; product creation happens while the user operates the phone.
+- Pressing the power button = real sleep: window surfaces are stripped and re-attachment is unreliable on this ROM (activity RESUMED but `mHasSurface=false`). Users should tap the dim overlay, not press power.
+- Fake screen-off: `ICarInput.setScreenPower(on)` in the UserService reflects `SurfaceControl.setDisplayPowerMode(token, POWER_MODE_OFF/NORMAL)` (needs ACCESS_SURFACE_FLINGER; shell has it). The system stays interactive (`dumpsys power` wakefulness Awake); verify with the `powerMode=` header of `dumpsys SurfaceFlinger`. Token lookup: `SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken` (Android 11-14; removed SDK 34+) -> `com.android.server.display.DisplayControl` loaded via `ClassLoaderFactory` + `SYSTEMSERVERCLASSPATH` with `Runtime.loadLibrary0(cls, "android_servers")` (scrcpy approach) -> `SurfaceControl.getInternalDisplayToken` (the only one working on Honor A17). All fail -> returns false and the dimmer stays an overlay.
+- "Real screen off while connected" (Settings > Display, `DisplayPrefs.screenOffOnConnect`, key `screen_off_on_connect`) is **default off** (user request; supersedes the earlier default-on note). Power-off is carried by the dim overlay (`enterDimNow`); the Honor touch IC keeps working with the panel off, so tapping wakes it. `SessionController.applyScreenOffPreference` applies changes mid-session.
+- Timing: `enterPhoneScreenOff()` after streaming starts; `onEnded` -> `restorePhoneScreen(sleep=true)` (stay dark, KEYCODE_SLEEP); `retireSession`/manual disconnect -> `restorePhoneScreen(false)`. Three recovery layers are mandatory: session end, UserService self-exit, next app start (otherwise a crash leaves the phone black).
+- SCREEN_OFF broadcast (real sleep) must clear `panelOffByUs`, remove the dim overlay and stop the timer, otherwise the overlay sits over the lock screen. USER_PRESENT reschedules the timer (fingerprint/face unlock produces no touch events).
+- Auto-dim is session driven, not app-start driven: `shouldAutoDim` (pure, tested) = `enabled && sessionActive && attached`. The flag is set only after `attach` succeeds in `VideoSender.start`'s onSurfaceReady and cleared in `onEnded`, `retireSession` and `detach()`. Manual `enterDimNow` uses the `force` path. The dim overlay is also the pocket touch shield while the panel is off.
+- The phone home screen is usually invisible during sessions but its Activity is foreground: every looping animation or timed refresh must pause on `ScreenDimmer.isCovering()` / `addCoverListener` and onPause (`MainActivity.syncPhoneUiActivity`). The ripple animation made RenderThread the top CPU thread (~7%).
+
+## 17. Remote debug bridge
+
+Design in `docs/REMOTE-DEBUG-DESIGN.md`. Server lives in the sibling repo `../cardeck-bridge` (MIT, Node/TS, WebSocket + MCP in one process; `.npmrc` pins the public registry).
+
+- App coupling is limited to `DebugFileLog.tap` (log sequence + hook) and `BridgeCommands` (whitelisted commands calling public `SessionController` APIs). Extend the whitelist only in `BridgeCommands` with review; never arbitrary shell.
+- The `.rd` package needs its own Shizuku and notification grants, and the overlay permission (Honor silently blocks install-confirm intents from background receivers unless SYSTEM_ALERT_WINDOW; foreground fallback InstallReceiver -> BridgeSetupActivity).
+- Call `SessionController.disconnect` before reinstalling (frees virtual displays).
+- Remote variant disables auto-dim (`ScreenDimmer.autoDimAllowed=false`); keep-awake and manual dim remain. Manifest enables `usesCleartextTraffic`.
+- Delta updates (72-97% traffic saved): all header u64 values are big-endian (device `readLong`; LE plus a short header buffer caused silent fallback to full); any device-side check failure falls back to the full APK.
+- Pitfalls (2026-10-21):
+  1. Self-launched components must be `applicationId/absoluteClassName`; relative names expand against the applicationId and do not exist in `.rd` builds (black car screen, 0 fps).
+  2. During a session the process network is bound to the car hotspot (no internet). `InternetRoute` (remote) tracks cellular and opens sockets/DNS on it (`Network.socketFactory`, `getAllByName`), but prefers the default network when it is VALIDATED.
+  3. Dead WebSocket connections without FIN: 25 s ping + 75 s soTimeout.
+  4. Handshake is device-driven: device sends hello (with pairing code) first, server answers welcome.
+  5. The bridge's stdin must be a FIFO, not `/dev/null`, or MCP over stdio receives nothing (`~/bin/cardeck-debug-up.sh`).
+- Honor PackageInstaller: `createSession` then `openSession` (session 0 throws); status receiver needs an intent-filter in the manifest (else broadcasts never arrive, sessions stay Active; `abandonStaleSessions` at startup); same versionCode installs report success without changing anything, so pushes must bump the version; a byte-identical APK installed via `adb install -r` also does not count. Use `DarkMessageDialog` for confirmations (overlays are ignored).
+- During a session, `am start` without `--display 0` lands on the focused virtual display; launch phone-side activities with `--display 0`.
+
+## 18. Performance rules
+
+- Pause phone-UI animations while covered (section 16).
+- Periodic I-frame 30 s; keyframes on demand.
+- Logging is asynchronous (`DebugFileLog`, single writer thread + queue). No synchronous file I/O on video, touch or audio threads; no per-frame logs.
+- Composer is event driven, reuses buffers, idles at 1 fps after 1 s.
+- Video packing is single pass, in-place encryption, buffered socket writes.
+- Media polling only during sessions.
+- Shell calls never on the main thread; cold app scans in the background; icon cache 144 px.
+
+## 19. Known open issues
+
+- Cadillac CT5: SETUP returns 500 after successful link renegotiation.
+- Real-car verification pending: random initial sequence (Ford), renegotiation, bitrate/CBR/QP/High profile (VW), HEVC, idle 1 fps downshift and 30 s I-frames, microphone uplink, wireless adapter mode, GM 0x4300 format, Audi MIB3 Bluetooth SYN|ACK frame order change (single SYN|ACK instead of ACK + SYN|ACK).
+- Samsung audio: new REMOTE_SUBMIX source needs WinPlay end-to-end verification.
+- Real sleep (power button) can still freeze the car picture; physical-touch wake with the panel off is verified only on Honor.
+- Whether MIB3 strictly requires the Wi-Fi tunnel is uncertain (real iPhone negotiated iAPChannel = 0 on Audi 3315).
+- First connection pays a dialog (~1.7 s) and a possible MFi 20 B silent wait (6 s) until the length memory exists.
+
+## 20. Documentation conventions
+
+- Record findings in this file as they happen: measured performance results, pitfalls, design decisions, known issues, abandoned approaches. Place them in the matching topic section, not as a dated log.
+- Keep one-off debugging details in code comments. Put here only what a future session would otherwise re-discover or break again.
+- When a rule replaces an older one, update the existing bullet and note briefly what it replaced.
+- Protocol deep dives belong in `docs/PROTOCOL-NOTES.md`; feature docs: `docs/AUTO-CONNECT.md`, `docs/WIFI-JOIN.md`, `docs/PHONE-SCREEN-OFF.md`, `docs/HID-KNOB.md`, `docs/MIC-RESEARCH.md`, `docs/DASHBOARD-UX.md`, `docs/REMOTE-DEBUG-DESIGN.md`.
+- Docs must match the code. Build instructions that were not actually run must not be described as verified.

@@ -2,7 +2,7 @@ package io.github.ezn24.cardeck.neo.input
 
 import io.github.ezn24.cardeck.neo.input.TouchReports.Contact
 
-/** 空槽和清零的抬手报文相同，以该槽是否有有效按下区分。 */
+/** An empty slot and a zeroed release report look identical; tell them apart by whether the slot has a valid press. */
 internal class TouchReleaseTracker {
     private val active = mutableMapOf<Int, Contact>()
 

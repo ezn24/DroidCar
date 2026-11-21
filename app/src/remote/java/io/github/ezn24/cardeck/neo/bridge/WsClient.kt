@@ -13,22 +13,22 @@ import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLSocketFactory
 
 /**
- * 最小 RFC6455 WebSocket 客户端（只为配对的调试桥服务，不追求通用）：
- * 文本帧收发、掩码、ping/pong、close、服务端分片合并。
+ * Minimal RFC6455 WebSocket client (serves only the paired debug bridge, not meant to be general):
+ * text-frame send/receive, masking, ping/pong, close, server fragment reassembly.
  *
- * 不引 okhttp/ws 依赖的原因：调试桥代码只进 remote 变体，但依赖仍会拖进构建；
- * 自家的服务端（ws 库）与已知的消息形态让 ~200 行的手写实现足够可靠。
- * wss:// 走系统默认 SSLSocketFactory（内网穿透服务如 Cloudflare Tunnel 提供有效
- * 证书）；自签/裸 IP 场景用 ws://（局域网或 http 隧道）。
+ * Why no okhttp/ws dependency: the bridge code only enters the remote variant, but dependencies would still be pulled into the build;
+ * with our own server (ws library) and known message shapes a ~200-line hand-written implementation is reliable enough.
+ * wss:// uses the system default SSLSocketFactory (tunnel services such as Cloudflare Tunnel provide valid
+ * certificates); for self-signed/bare-IP cases use ws:// (LAN or http tunnel).
  *
- * 线程模型：每个连接一根读线程（内部），发送在任意线程串行化；连接生命周期由
- * [BridgeClient] 管理（重连退避在那里）。
+ * Threading model: one internal read thread per connection, sends are serialized on any thread; connection lifecycle is
+ * managed by [BridgeClient] (reconnect backoff lives there).
  */
 class WsClient(
     private val url: String,
     private val listener: Listener,
-    /** 显式联网通道（蜂窝）。车机会话期间进程默认路由被绑到无互联网的车机热点，
-     *  必须从该网络建 socket + 解析 DNS 才能保持调试桥在线（见 [InternetRoute]）。 */
+    /** Explicit networking channel (cellular). During a car session the process default route is bound to the internet-less head unit hotspot,
+     *  so sockets must be created from this network + DNS resolved through it to keep the debug bridge online (see [InternetRoute]). */
     private val network: android.net.Network? = null,
 ) {
     interface Listener {
@@ -52,7 +52,7 @@ class WsClient(
 
     private val random = SecureRandom()
 
-    /** 阻塞式连接（在调用线程完成握手；失败抛 IOException）。 */
+    /** Blocking connect (handshake completes on the calling thread; failure throws IOException). */
     fun connect() {
         val secure = url.startsWith("wss://", ignoreCase = true)
         val rest = url.substring(if (secure) 6 else 5)
@@ -66,10 +66,11 @@ class WsClient(
         val host = hostPortPath.first.substringBefore(':')
         val port =
             hostPortPath.first.substringAfter(':', if (secure) "443" else "80").toIntOrNull()
-                ?: throw IOException("端口解析失败：$url")
+                ?: throw IOException("port resolution failed: $url")
         val path = hostPortPath.second.ifBlank { "/" }
 
-        // 指定了网络时，DNS 也必须走该网络——系统默认 DNS 会落在车机热点上，解析公网域名失败
+        // When a network is specified DNS must also go through it: the system default DNS would land on the head unit hotspot and fail to
+        // resolve public domains
         val address =
             network?.let { n -> runCatching { n.getAllByName(host).firstOrNull() }.getOrNull() }
                 ?: InetAddress.getByName(host)
@@ -89,7 +90,7 @@ class WsClient(
                 }
         val raw =
             if (secure && network != null) {
-                // 已连接的明文 socket 上叠 TLS（host 用于 SNI；autoClose 关明文层）
+                // Layer TLS over the already-connected plaintext socket (host is used for SNI; autoClose closes the plaintext layer)
                 (SSLSocketFactory.getDefault() as SSLSocketFactory)
                     .createSocket(plain, host, port, true)
             } else {
@@ -113,15 +114,17 @@ class WsClient(
         out.write(handshake.toByteArray(Charsets.US_ASCII))
         out.flush()
 
-        val head = readUntilHeaderEnd(input) ?: throw IOException("握手应答不完整")
+        val head = readUntilHeaderEnd(input) ?: throw IOException("incomplete handshake response")
         if (!head.startsWith("HTTP/1.1 101") && !head.startsWith("HTTP/1.0 101")) {
-            throw IOException("握手被拒：${head.lineSequence().first()}")
+            throw IOException("handshake rejected: ${head.lineSequence().first()}")
         }
         alive = true
         listener.onOpen()
-        // 死连接检测：25s 心跳 + 75s 读超时。蜂窝/NAT 静默断链（无 FIN）时 read
-        // 永远阻塞、重连循环跟着卡死——2026-10-21 实测断后 4 分钟不重连，桥侧
-        // 设备长期「离线」。心跳周期远小于读超时，健康连接不会误杀。
+        // Dead-connection detection: 25s heartbeat + 75s read timeout. When cellular/NAT silently drops the link (no FIN) read
+        // blocks forever and the reconnect loop gets stuck with it; observed 2026-10-21: no reconnect for 4 minutes after the drop, the
+        // bridge-side
+        // device stayed "offline" long. The heartbeat period is far below the read timeout, so a healthy connection is never killed by
+        // mistake.
         socket?.soTimeout = 75_000
         val heartbeat =
             HEARTBEAT.scheduleAtFixedRate(
@@ -165,7 +168,7 @@ class WsClient(
                 when (frame.opcode) {
                     OPCODE_TEXT, OPCODE_BINARY -> {
                         if (fragmentBuffer != null) {
-                            // 收到新数据帧却挂着未完成分片：丢弃旧分片重新开始
+                            // New data frame received while an incomplete fragment is pending: discard the old fragment and start over
                             fragmentBuffer = null
                             fragmentOpcode = -1
                         }
@@ -198,14 +201,14 @@ class WsClient(
                                 .drop(2)
                                 .toByteArray()
                                 .toString(Charsets.UTF_8)
-                        listener.onClosed("对端关闭：$reason")
+                        listener.onClosed("peer closed: $reason")
                         return
                     }
                 }
             }
-            listener.onClosed("读循环结束")
+            listener.onClosed("read loop ended")
         } catch (error: IOException) {
-            listener.onClosed("IO：${error.message}")
+            listener.onClosed("IO: ${error.message}")
         } finally {
             alive = false
             runCatching { socket?.close() }
@@ -250,12 +253,12 @@ class WsClient(
         var offset = 0
         while (offset < target.size) {
             val count = input.read(target, offset, target.size - offset)
-            if (count < 0) throw IOException("连接中断（读载荷）")
+            if (count < 0) throw IOException("connection interrupted (reading payload)")
             offset += count
         }
     }
 
-    /** 发送文本帧（连接断开时返回 false，由上层走重连）。 */
+    /** Send a text frame (returns false when the connection is down; the upper layer reconnects). */
     fun sendText(text: String): Boolean = sendFrame(OPCODE_TEXT, text.toByteArray(Charsets.UTF_8), mask = true)
 
     private fun sendFrame(
@@ -327,7 +330,7 @@ class WsClient(
         const val OPCODE_PING = 0x9
         const val OPCODE_PONG = 0xA
 
-        /** 心跳调度器（单线程守护：连接数量级=1，不值得按连接建线程）。 */
+        /** Heartbeat scheduler (single-thread daemon: connection count is on the order of 1, not worth a thread per connection). */
         val HEARTBEAT =
             Executors.newSingleThreadScheduledExecutor { r ->
                 Thread(r, "ws-heartbeat").apply { isDaemon = true }

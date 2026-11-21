@@ -16,10 +16,11 @@ import android.widget.TextView
 import io.github.ezn24.cardeck.neo.util.DebugFileLog
 
 /**
- * 可拖动的调试提示悬浮窗（TYPE_APPLICATION_OVERLAY，权限与暗幕共用）。
+ * Draggable debug hint overlay (TYPE_APPLICATION_OVERLAY, permission shared with the dim overlay).
  *
- * 主线程操作（Handler(main)）；文字 + 可选按钮（如「安装」/「继续调试」）；
- * 默认数秒自动消失，携带按钮时保持常驻直到点击。拖动即改 WindowManager 坐标。
+ * Operates on the main thread (Handler(main)); text + optional buttons (e.g. "Install" / "Continue debugging");
+ * auto-dismisses after a few seconds by default, stays until tapped when it carries a button. Dragging changes the WindowManager
+ * coordinates.
  */
 object BridgeOverlay {
     private val main = Handler(Looper.getMainLooper())
@@ -35,7 +36,7 @@ object BridgeOverlay {
         val ctx = context?.applicationContext ?: return
         main.post {
             if (!android.provider.Settings.canDrawOverlays(ctx)) {
-                DebugFileLog.append(ctx, "BRIDGE: 无悬浮窗权限，提示丢弃：$text")
+                DebugFileLog.append(ctx, "BRIDGE: no overlay permission, hint dropped: $text")
                 return@post
             }
             hideLocked()

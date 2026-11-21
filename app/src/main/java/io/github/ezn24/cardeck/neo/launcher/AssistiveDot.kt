@@ -16,12 +16,14 @@ import io.github.ezn24.cardeck.neo.ui.WallpaperStore
 import io.github.ezn24.cardeck.neo.util.Bg
 
 /**
- * 车机「辅助小白点」（2026-11-18 用户要求，iOS AssistiveTouch 式）：合成器最上层的一颗小圆点，
- * 默认贴在画面顶部，可拖动；点开成一条胶囊，提供 返回 / 主页 / 后台 三键（Android 导航那套）。
+ * Head-unit "assistive dot" (requested by the user 2026-11-18, iOS AssistiveTouch style): a small dot on the top layer of the compositor,
+ * docked at the top of the picture by default and draggable; tapping it opens a capsule with Back / Home / Recents (the Android navigation
+ * trio).
  *
- * 画在合成器里（[DualDisplayComposer.assistiveDot]，独立纹理槽），不进任何 App 画面、
- * 不占虚拟屏；坐标是输出画面坐标（顶部原点），触摸命中直接复用。深浅色跟随手机。
- * 触摸由 TouchRouter 最先询问 [onContact]：命中即整段手势归小白点，不注入 App。
+ * Drawn inside the compositor ([DualDisplayComposer.assistiveDot], its own texture slot), never into any app picture
+ * and never occupying a virtual display; coordinates are output-picture coordinates (origin at top), so touch hit-testing reuses them
+ * directly. Light/dark follows the phone.
+ * TouchRouter asks [onContact] first: a hit assigns the whole gesture to the dot and nothing is injected into the app.
  */
 object AssistiveDot {
     private const val PREFS = "settings"
@@ -30,35 +32,35 @@ object AssistiveDot {
     private const val KEY_Y = "assistiveDotY"
     private const val KEY_SIZE = "assistiveDotSize"
 
-    /** 大小百分比范围（设置滑杆）。 */
+    /** Size percentage range (settings slider). */
     const val SIZE_MIN = 60
     const val SIZE_MAX = 180
 
     @Volatile private var sizePercent = 100
 
-    /** 拖动判定阈值（流像素 × scale）。 */
+    /** Drag-detection threshold (stream pixels x scale). */
     private const val DRAG_SLOP = 12f
 
-    /** 展开后无操作自动收起。 */
+    /** Auto-collapse after the expanded dot sees no interaction. */
     private const val AUTO_COLLAPSE_MS = 5_000L
 
-    /** 收起状态的透明度（不抢画面）。 */
+    /** Opacity when collapsed (so it does not steal attention from the picture). */
     private const val IDLE_ALPHA = 0.72f
 
     private val handler = Handler(Looper.getMainLooper())
 
     @Volatile private var context: Context? = null
 
-    /** 圆点中心（输出画面坐标）。 */
+    /** Dot center (output-picture coordinates). */
     private var centerX = -1f
     private var centerY = -1f
     private var expanded = false
     private var card: OverlayCard? = null
 
-    /** 展开态三个按钮的命中区。 */
+    /** Hit areas of the three buttons in the expanded state. */
     private val buttons = arrayOfNulls<RectF>(3)
 
-    // 一段手势的状态
+    // State of the current gesture
     private var tracking = false
     private var dragging = false
     private var downX = 0f
@@ -88,7 +90,7 @@ object AssistiveDot {
     fun sizePercent(context: Context): Int =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_SIZE, 100).coerceIn(SIZE_MIN, SIZE_MAX)
 
-    /** 设置滑杆拖动时实时生效：只重画一张小位图，不重连、不增加常驻开销。 */
+    /** Takes effect live while the settings slider is dragged: redraws one small bitmap, no reconnect, no extra standing cost. */
     fun setSizePercent(
         context: Context,
         percent: Int,
@@ -105,7 +107,7 @@ object AssistiveDot {
         }
     }
 
-    /** 会话画面就绪后调用（主线程或任意线程皆可）。 */
+    /** Called once the session picture is ready (any thread, main or otherwise). */
     fun attach(ctx: Context) {
         sizePercent = sizePercent(ctx)
         context = ctx.applicationContext
@@ -122,7 +124,7 @@ object AssistiveDot {
         }
     }
 
-    /** 深浅色变更时重画。 */
+    /** Redraws when the light/dark scheme changes. */
     fun refresh() {
         handler.post { if (card != null) publish() }
     }
@@ -162,7 +164,7 @@ object AssistiveDot {
         publish()
     }
 
-    /** 按当前状态画位图并交给合成器。 */
+    /** Draws the bitmap for the current state and hands it to the compositor. */
     private fun publish() {
         val ctx = context ?: return
         val night = WallpaperStore.isNight(ctx)
@@ -170,7 +172,7 @@ object AssistiveDot {
         val bitmap = bitmapFor(night, s)
         val w = bitmap.width.toFloat()
         val h = bitmap.height.toFloat()
-        // 以圆点中心为锚，整张夹在画面内
+        // Anchored on the dot center; the whole bitmap is clamped inside the picture
         val left = (centerX - w / 2f).coerceIn(0f, (VirtualLauncher.streamWidthPx - w).coerceAtLeast(0f))
         val top = (centerY - dotSize() / 2f).coerceIn(0f, (VirtualLauncher.streamHeightPx - h).coerceAtLeast(0f))
         if (expanded) {
@@ -205,7 +207,7 @@ object AssistiveDot {
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         val c = px / 2f
-        // 圆角方底 + 三层同心圆（AssistiveTouch 式，原创绘制）
+        // Rounded square base + three concentric circles (AssistiveTouch style, original drawing)
         paint.color = if (night) 0xE61C1C1E.toInt() else 0xE6F2F2F7.toInt()
         canvas.drawRoundRect(RectF(0f, 0f, px.toFloat(), px.toFloat()), px * 0.3f, px * 0.3f, paint)
         val ring = if (night) 0xFFFFFFFF.toInt() else 0xFF3A3A3C.toInt()
@@ -241,7 +243,7 @@ object AssistiveDot {
         val cy = h / 2f
 
         fun cx(i: Int) = pad + button * i + button / 2f
-        // 返回：左指三角
+        // Back: left-pointing triangle
         canvas.drawPath(
             Path().apply {
                 moveTo(cx(0) + icon * 0.75f, cy - icon)
@@ -251,16 +253,16 @@ object AssistiveDot {
             },
             paint,
         )
-        // 主页：圆
+        // Home: circle
         canvas.drawCircle(cx(1), cy, icon, paint)
-        // 后台：圆角方
+        // Recents: rounded square
         canvas.drawRoundRect(RectF(cx(2) - icon * 0.9f, cy - icon * 0.9f, cx(2) + icon * 0.9f, cy + icon * 0.9f), 3f * s, 3f * s, paint)
         return bitmap
     }
 
     /**
-     * 触摸入口（触摸线程）。返回 true = 这段手势归小白点。
-     * [appGestureActive]：已有手指在 App 上按着（多指），此时不抢。
+     * Touch entry point (touch thread). Returns true = this gesture belongs to the dot.
+     * [appGestureActive]: a finger is already down on an app (multi-touch); the dot does not steal it then.
      */
     fun onContact(
         down: Boolean,
@@ -282,7 +284,7 @@ object AssistiveDot {
                 handler.removeCallbacks(collapse)
                 return true
             }
-            // 展开时点外面 = 收起，这一下不传给 App
+            // Tapping outside while expanded = collapse; this tap is not forwarded to the app
             if (expanded && !appGestureActive) {
                 tracking = true
                 dragging = false
@@ -307,7 +309,7 @@ object AssistiveDot {
             }
             return true
         }
-        // 抬起
+        // Lift
         tracking = false
         val wasDrag = dragging
         dragging = false
@@ -348,8 +350,8 @@ object AssistiveDot {
     }
 
     /**
-     * 返回键发给哪块屏：全屏地图 → 地图屏；仪表盘 → 最后操作的地图 / 音乐 App（默认地图）；
-     * 其它 → 活动应用屏。
+     * Which display receives Back: fullscreen map -> map display; dashboard -> the last-operated map / music app (default map);
+     * otherwise -> the active app display.
      */
     private fun backTarget(): Int {
         val launcher = VirtualLauncher
@@ -362,7 +364,7 @@ object AssistiveDot {
         return launcher.activeAppDisplayId()
     }
 
-    /** 返回键：发给当前前台屏（见 [backTarget]）。 */
+    /** Back key: sent to the current foreground display (see [backTarget]). */
     private fun back() {
         val display = backTarget()
         if (display < 0) return
@@ -370,7 +372,7 @@ object AssistiveDot {
             if (!CarInputClient.keyEvent(display, KeyEvent.KEYCODE_BACK)) {
                 Shell.exec("input -d $display keyevent ${KeyEvent.KEYCODE_BACK}", timeoutMs = 3_000L)
             }
-            // 地图 / 音乐 App 在根页面按返回会离开该屏：把它带回来，仪表盘不留空白
+            // Back at the root page of a map / music app leaves that display: bring it back so the dashboard is not left blank
             VirtualLauncher.restorePaneAfterBack(display)
         }
     }

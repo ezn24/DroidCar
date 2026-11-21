@@ -17,37 +17,40 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 手机侧（iPhone 角色）**主动连接车机**的无线 iAP2 RFCOMM 客户端 —— 真车阶段新增。
+ * Wireless iAP2 RFCOMM client where the phone (iPhone role) **actively connects to the head unit**; added in the real-car stage.
  *
- * 真无线 CarPlay 建链方向（对照 carplay-wifi-extractor client 模式，已在真车验证）：
- * 手机与车机完成系统级蓝牙配对后，由**手机主动连入**车机 SDP 广播的配件端服务
- * （UUID 00000000-deca-fade-deca-deafdecacaff，奥迪 MIB3 SDP 实测存在）；
- * 车机从不主动回连手机（测试台 DiPlay 会回连，那是接收端的测试行为）。
+ * Real wireless CarPlay link direction (follows carplay-wifi-extractor client mode, verified on a real car):
+ * after the phone and head unit complete system-level Bluetooth pairing, the **phone connects in** to the accessory-side service
+ * advertised in the head unit SDP (UUID 00000000-deca-fade-deca-deafdecacaff, measured present in the Audi MIB3 SDP);
+ * the head unit never connects back to the phone (the DiPlay test bench does, but that is receiver test behavior).
  *
- * 连上后复用与测试台完全相同的发送端 bring-up（[Iap2SenderSession]），
- * 成功时回调 [onEndpoint] 交出热点凭据与 AirPlay 端点。
+ * Once connected it reuses exactly the same sender bring-up as the test bench ([Iap2SenderSession]),
+ * and on success calls [onEndpoint] to hand over the hotspot credentials and the AirPlay endpoint.
  */
 class Iap2BluetoothClient(
     private val context: Context,
     private val log: (String) -> Unit,
     private val onEndpoint: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
-    /** 0x5703 一到即触发（绑 WiFi + 广播 _carplay-ctrl），真车 0x4301 的前置条件。 */
+    /** Fires as soon as 0x5703 arrives (bind WiFi + advertise _carplay-ctrl), the precondition of 0x4301 on real cars. */
     private val onWifiCredentials: (Iap2SenderSession.WifiConfiguration) -> Unit = {},
-    /** Phase 1 之后车机补发 0x4301（CarPlay 窗口晚开）时交给主控热更新端点。 */
+    /** Hands the endpoint to the controller for a hot update when the head unit sends 0x4301 after Phase 1 (CarPlay window opened late). */
     private val onEndpointUpdate: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
-    /** 发送端链路断开（保活泵退出）时通知主控（释放僵尸轮次，见 SessionController.onSenderLinkClosed）。 */
+    /**
+     * Notifies the controller when the sender link drops (keep-alive pump exited) so it releases the zombie round (see
+     * SessionController.onSenderLinkClosed).
+     */
     private val onLinkClosed: () -> Unit = {},
-    /** 本进程已知的车机热点 SSID（本轮无新凭据时沿用，避免每轮 8 秒拆链）。 */
+    /** Car hotspot SSID known to this process (reused when this round has no new credentials, avoids an 8s link teardown every round). */
     private val knownCarSsid: () -> String? = { null },
-    /** 0x1D01 画像判定的链路代际（Phase 1 完成后回调，AirPlay 阶段分派用）。 */
+    /** Link generation decided from the 0x1D01 profile (called back after Phase 1, used for dispatch in the AirPlay stage). */
     private val onGeneration: (ReceiverProfile.LinkGeneration) -> Unit = {},
-    /** 目标车机（动态读取：选择后无需重启链路，下一轮尝试即生效）。 */
+    /** Target head unit (read dynamically: no link restart needed after selection, it takes effect on the next attempt). */
     private val targetProvider: () -> TargetDevicePrefs.Target? = { null },
 ) {
     companion object {
         /**
-         * 配件端（车机）无线 iAP2 服务 UUID。
-         * 手机端 UUID 是 …cafe（xcertplay IAP2_IPHONE_UUID），配件端是 …caff。
+         * Accessory-side (head unit) wireless iAP2 service UUID.
+         * The phone-side UUID is ...cafe (xcertplay IAP2_IPHONE_UUID), the accessory side is ...caff.
          */
         val ACCESSORY_IAP2_UUID: UUID = UUID.fromString("00000000-deca-fade-deca-deafdecacaff")
 
@@ -55,10 +58,10 @@ class Iap2BluetoothClient(
         private const val RETRY_DELAY_MILLIS = 3_000L
         private const val FAILURE_LOG_THROTTLE_MILLIS = 15_000L
 
-        /** 「蓝牙已连接→已断开」日志节流（车机可能反复自动重连，避免刷屏）。 */
+        /** Throttle for the "Bluetooth connected -> disconnected" log (the head unit may auto-reconnect repeatedly, avoids log spam). */
         private const val PROFILE_LOG_THROTTLE_MILLIS = 15_000L
 
-        /** SDP 服务探测等待窗（fetchUuidsWithSdp → ACTION_UUID 广播）。 */
+        /** Wait window for the SDP service probe (fetchUuidsWithSdp -> ACTION_UUID broadcast). */
         private const val SDP_PROBE_TIMEOUT_MILLIS = 2_500L
     }
 
@@ -66,10 +69,10 @@ class Iap2BluetoothClient(
     private val currentSocket = AtomicReference<BluetoothSocket?>(null)
 
     /**
-     * 客户端线程世代号：start()/stop() 都会递增。卡在阻塞 connect() 里的线程被
-     * stop() 解除阻塞后（关闭 connecting socket），会因世代不符直接退出——
-     * 防止「stop 后线程残活、用户再次启动时新旧两代并发连车机」
-     * （2026-10-11 实测：多个僵尸线程并发 RFCOMM 会让车机频繁拆链）。
+     * Client thread generation: both start() and stop() increment it. A thread stuck in a blocking connect()
+     * that stop() unblocks (by closing the connecting socket) exits at once on generation mismatch,
+     * preventing "a thread survives stop and the old and new generations both connect to the head unit on the next start"
+     * (measured 2026-10-11: several zombie threads doing RFCOMM concurrently make the head unit tear the link down repeatedly).
      */
     private val generation =
         java.util.concurrent.atomic
@@ -81,21 +84,21 @@ class Iap2BluetoothClient(
     @Volatile
     private var running = false
 
-    /** 目标设备不在已配对列表的提示节流（避免每 3 秒刷屏）。 */
+    /** Throttle for the "target device not in the paired list" notice (avoids log spam every 3 seconds). */
     private var lastTargetMissingLogAt = 0L
 
-    /** 「无 iAP2 服务→跳过」日志去重（每地址一次即可，重复轮询不刷屏）。 */
+    /** Dedup for the "no iAP2 service -> skip" log (once per address is enough, repeated polling does not spam). */
     private val skippedNoService = java.util.Collections.synchronizedSet(HashSet<String>())
 
-    /** 「是否提供 iAP2 服务」结论缓存（地址→结论）：SDP 查询不便宜，勿每 3s 重查。 */
+    /** Cache of the "provides an iAP2 service" verdict (address -> verdict): SDP queries are not cheap, do not redo every 3s. */
     private val iap2ServiceCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
 
     /**
-     * 设备是否提供配件端 iAP2 服务（…caff）：先读系统 uuids 缓存，缺失再
-     * `fetchUuidsWithSdp` 触发一次 SDP 查询并等 `ACTION_UUID` 广播（超时按无服务）。
-     * 结论缓存到客户端停止——车机固件升级换 UUID 的场景由重启 App 覆盖。
-     * 权限：start() 已校验 BLUETOOTH_CONNECT；uuids/fetchUuidsWithSdp 的
-     * SecurityException 由 runCatching 吸收（探测失败按无服务处理，不断音频）。
+     * Whether the device provides the accessory-side iAP2 service (...caff): read the system uuids cache first, and if missing
+     * trigger one SDP query via `fetchUuidsWithSdp` and wait for the `ACTION_UUID` broadcast (timeout counts as no service).
+     * The verdict is cached until the client stops; a head unit firmware upgrade changing the UUID is covered by restarting the app.
+     * Permission: start() already checked BLUETOOTH_CONNECT; a SecurityException from uuids/fetchUuidsWithSdp
+     * is absorbed by runCatching (a failed probe counts as no service, so audio is not cut).
      */
     @SuppressLint("MissingPermission")
     private fun awaitIap2Service(device: BluetoothDevice): Boolean {
@@ -145,7 +148,7 @@ class Iap2BluetoothClient(
         return has
     }
 
-    /** 「蓝牙已连接→已断开」日志节流时间戳。 */
+    /** Timestamp for the "Bluetooth connected -> disconnected" log throttle. */
     private var lastProfileLogAt = 0L
 
     val isRunning: Boolean get() = running
@@ -157,7 +160,7 @@ class Iap2BluetoothClient(
     fun start(): Boolean {
         if (running) return true
         if (!hasPermission()) {
-            log("BT-C: 缺少 BLUETOOTH_CONNECT 权限")
+            log("BT-C: missing BLUETOOTH_CONNECT permission")
             return false
         }
         val adapter =
@@ -167,21 +170,21 @@ class Iap2BluetoothClient(
                 null
             }
         if (adapter == null || !adapter.isEnabled) {
-            log("BT-C: 蓝牙不可用或未开启")
+            log("BT-C: Bluetooth unavailable or off")
             return false
         }
-        // 每轮启动重置 SDP 结论与跳过日志（新配对/换固件后重新探测）
+        // Reset the SDP verdicts and skip logs every round (re-probe after a new pairing / firmware change)
         iap2ServiceCache.clear()
         skippedNoService.clear()
         running = true
         val myGeneration = generation.incrementAndGet()
         val target = targetProvider()
         log(
-            "BT-C: 启动——将主动连入车机的无线 iAP2 服务（…caff）" +
+            "BT-C: started; will connect to the head unit wireless iAP2 service (...caff)" +
                 if (target != null) {
-                    "，目标：「${target.name}」${target.address}（只连该设备）"
+                    ", target: \"${target.name}\" ${target.address} (only this device)"
                 } else {
-                    "（未指定目标：依次尝试全部候选设备，可在「连接准备」中指定）"
+                    " (no target set: trying all candidate devices in turn, one can be chosen in Connection Setup)"
                 },
         )
         Thread({ connectLoop(myGeneration) }, "iap2-bt-client").apply {
@@ -202,18 +205,18 @@ class Iap2BluetoothClient(
             } ?: return
         var lastFailureLogAt = 0L
         while (running && generation.get() == myGeneration) {
-            // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
-            //  - inboundActive：接收端正在连我们（两条 RFCOMM 会互相踩；Audi 实测双会话混乱）
-            //  - sessionActive：CarPlay 会话已建立（已拿到端点）——与其它接收端的连接尝试全部暂停
-            //    典型场景：连着 Redmi/DiPlay 时不再无脑探测车机 Audi（消除日志噪音与蓝牙churn）；
-            //    会话结束（任一端 BT 会话终结 / 手动断开）时自动恢复。
+            // Quiet mode (enabled after the 2026-10-10 user test): fully silent during a session, no connection attempts/logs at all:
+            //  - inboundActive: a receiver is connecting to us (two RFCOMM links step on each other; Audi measured a messy double session)
+            //  - sessionActive: a CarPlay session is established (endpoint obtained); all connection attempts to other receivers pause.
+            //    Typical case: while connected to Redmi/DiPlay we no longer blindly probe the Audi (removes log noise and Bluetooth churn);
+            //    resumes automatically when the session ends (either BT session ends / manual disconnect).
             if (BtSessionGate.inboundActive || BtSessionGate.sessionActive) {
                 sleepQuietly(2_000)
                 continue
             }
             val candidates = candidateDevices(adapter)
             if (candidates.isEmpty()) {
-                log("BT-C: 没有已配对的蓝牙设备——请先在系统设置里与车机完成蓝牙配对")
+                log("BT-C: no paired Bluetooth devices; pair with the head unit in system settings first")
                 sleepQuietly(RETRY_DELAY_MILLIS * 3)
                 continue
             }
@@ -227,20 +230,21 @@ class Iap2BluetoothClient(
                         null
                     } ?: device.address
                 runCatching { adapter.cancelDiscovery() }
-                // 自动模式（未选目标）先过 SDP 闸门：候选=全部已配对设备，耳机/手表
-                // 没有 iAP2 服务，连不上还白白被断 HFP/A2DP（设备级断开兜底更会波及
-                // 其它在线设备）——确认提供 …caff 才进入「断开+连接」流程。选定目标
-                // 的设备不过闸（用户显式指定，保持原路径与时序）。
+                // Auto mode (no target selected) goes through the SDP gate first: candidates = all paired devices, and headsets/watches
+                // have no iAP2 service, so connecting fails and their HFP/A2DP would be cut for nothing (the device-level
+                // disconnect fallback
+                // would even hit other online devices); only after confirming ...caff do we enter the "disconnect + connect" flow. A
+                // user-selected target skips the gate (explicitly chosen, keep the original path and timing).
                 if (targetProvider() == null && !awaitIap2Service(device)) {
                     if (skippedNoService.add(device.address)) {
-                        log("BT-C: 跳过「$name」（未发现 iAP2 服务——非 CarPlay 设备，保持其音频连接）")
+                        log("BT-C: skipping \"$name\" (no iAP2 service found; not a CarPlay device, leaving its audio connection alone)")
                     }
                     continue
                 }
-                // 「只配对、不连接」：奥迪 MIB3 实测手机与车机处于蓝牙已连接状态
-                // （HFP/A2DP 在线）时，车机不开放无线 CarPlay 的 iAP2 服务窗口——
-                // 表现为每 3s 连接失败。iAP2 是独立的 SDP 直连服务，与这些配置文件
-                // 无关，断开后不影响 CarPlay 本身（声音走 WiFi 的 AirPlay）。
+                // "Pair only, do not connect": Audi MIB3 measured that while the phone and head unit are connected over Bluetooth
+                // (HFP/A2DP online) the head unit does not open its wireless CarPlay iAP2 service window,
+                // which shows up as a connect failure every 3s. iAP2 is an independent direct SDP service unrelated to these
+                // profiles, and disconnecting them does not affect CarPlay itself (audio goes over AirPlay on WiFi).
                 run {
                     val dropped = BtProfiles.disconnect(context, device)
                     if (dropped.isNotEmpty()) {
@@ -249,23 +253,23 @@ class Iap2BluetoothClient(
                             lastProfileLogAt = now
                             val left = BtProfiles.stillConnected(context, device.address)
                             log(
-                                "BT-C: $name 处于蓝牙已连接状态（${dropped.joinToString("/")}）——已断开" +
-                                    if (left.isEmpty()) "" else "（仍有 ${left.joinToString("/")} 在线）",
+                                "BT-C: $name is Bluetooth-connected (${dropped.joinToString("/")}); disconnected" +
+                                    if (left.isEmpty()) "" else " (${left.joinToString("/")} still online)",
                             )
-                            log("BT-C: 车机在「蓝牙已连接」状态下不接受 CarPlay——保持仅配对")
+                            log("BT-C: head unit does not accept CarPlay while Bluetooth-connected; keeping pair-only")
                         }
                     }
                 }
                 val socket = tryConnect(device)
                 if (socket != null) {
-                    log("BT-C: ✓ 已连入 $name 的无线 iAP2 服务（RFCOMM 建立）")
+                    log("BT-C: connected to the wireless iAP2 service of $name (RFCOMM established)")
                     connected = socket
                     break
                 } else {
                     val now = android.os.SystemClock.uptimeMillis()
                     if (now - lastFailureLogAt > FAILURE_LOG_THROTTLE_MILLIS) {
                         lastFailureLogAt = now
-                        log("BT-C: 连接 $name 失败（车机未就绪或不在无线配对窗口），3 秒后重试…")
+                        log("BT-C: connecting to $name failed (head unit not ready or not in wireless pairing window), retry in 3s...")
                     }
                 }
             }
@@ -274,20 +278,20 @@ class Iap2BluetoothClient(
                 continue
             }
             if (generation.get() != myGeneration) {
-                // stop() 与 connect() 成功竞争：本线程已过期，不建会话
+                // stop() raced with a successful connect(): this thread is stale, do not build a session
                 currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
                 return
             }
             runSession(connected)
             sleepQuietly(RETRY_DELAY_MILLIS)
         }
-        log("BT-C: 客户端已停止")
+        log("BT-C: client stopped")
     }
 
     /**
-     * 候选设备：优先 SDP 缓存里带配件端 UUID 的已配对设备；
-     * 缓存缺失时退化为全部已配对设备（connect 时的 SDP 查询会自行过滤）。
-     * 指定了目标车机时**只返回该设备**（用户配对了多台车机时避免误连）。
+     * Candidate devices: paired devices whose SDP cache has the accessory UUID first;
+     * when the cache is missing, fall back to all paired devices (the SDP query at connect time filters on its own).
+     * When a target head unit is set **only that device is returned** (avoids a wrong connection when the user paired several head units).
      */
     @SuppressLint("MissingPermission")
     private fun candidateDevices(adapter: android.bluetooth.BluetoothAdapter): List<BluetoothDevice> {
@@ -298,16 +302,16 @@ class Iap2BluetoothClient(
                 emptyList()
             }
         targetProvider()?.let { target ->
-            // 目标策略：地址命中即唯一候选——不再按 SDP 缓存过滤（缓存可能缺失，
-            // 而用户显式指定就该尝试）；目标不在已配对列表时给一次提示并空转等待。
+            // Target policy: an address match is the only candidate and is not filtered by the SDP cache (the cache may be missing,
+            // and an explicit user choice should be tried); when the target is not in the paired list, notify once and idle-wait.
             val hit = bonded.filter { TargetDevicePrefs.matches(target, it.address) }
             if (hit.isEmpty()) {
                 val now = android.os.SystemClock.uptimeMillis()
                 if (now - lastTargetMissingLogAt > FAILURE_LOG_THROTTLE_MILLIS) {
                     lastTargetMissingLogAt = now
                     log(
-                        "BT-C: 目标设备「${target.name}」(${target.address}) 不在已配对列表" +
-                            "——请到系统蓝牙设置完成配对，或在「连接准备」改选目标",
+                        "BT-C: target device \"${target.name}\" (${target.address}) is not in the paired list" +
+                            "; pair it in system Bluetooth settings, or pick another target in Connection Setup",
                     )
                 }
                 return emptyList()
@@ -329,8 +333,8 @@ class Iap2BluetoothClient(
             } catch (error: IOException) {
                 return null
             }
-        // 连接前就登记：connect() 是阻塞调用（SDP 查询 + 建链最长可达数十秒），
-        // stop() 只有能拿到 socket 引用才能 close() 打断它，否则线程会滞留。
+        // Register before connecting: connect() is blocking (SDP query + link setup can take tens of seconds),
+        // and stop() can only interrupt it with close() if it has the socket reference, otherwise the thread lingers.
         currentSocket.set(socket)
         return try {
             socket.connect()
@@ -362,35 +366,39 @@ class Iap2BluetoothClient(
                 onGeneration,
             )
         } catch (error: IOException) {
-            log("BT-C: SESSION 失败 - ${error.message}")
+            log("BT-C: SESSION failed - ${error.message}")
         } finally {
             activeChannel = null
             currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
             runCatching { socket.close() }
             channel.close()
-            log("BT-C: 本轮会话结束（客户端仍在运行，将自动重连）")
+            log("BT-C: session round ended (client still running, will reconnect automatically)")
         }
     }
 
-    /** 主动结束当前 BT 控制会话（不影响重连循环）。供 AirPlay 配对前复现控制通道退役状态。 */
+    /**
+     * Actively end the current BT control session (the reconnect loop is unaffected). Used to reproduce the retired control channel
+     * state before AirPlay pairing.
+     */
     fun detachCurrentSession() {
         activeChannel?.let { channel ->
             activeChannel = null
             channel.close()
-            log("BT-C: 已主动断开当前控制会话")
+            log("BT-C: current control session actively disconnected")
         }
         currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
     }
 
     fun stop() {
         running = false
-        // 递增世代：即便有线程卡在 connect()，事后也会因世代不符自杀，不会在下次启动时复活
+        // Increment the generation: even if a thread is stuck in connect() it will later kill itself on generation mismatch and not
+        // revive on the next start
         generation.incrementAndGet()
         currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
         activeChannel?.let { runCatching { it.close() } }
         thread?.interrupt()
         thread = null
-        log("BT-C: 已停止")
+        log("BT-C: stopped")
     }
 
     private fun sleepQuietly(millis: Long) {
@@ -402,18 +410,18 @@ class Iap2BluetoothClient(
 }
 
 /**
- * 入站会话门闸：车机主动连入的 iAP2 会话活跃期间，出站客户端暂停连接尝试。
- * 目的：车机通常只有单条无线 iAP2 上下文，双向同时建链会让双方互相干扰。
+ * Inbound session gate: while an iAP2 session initiated by the head unit is active, the outbound client pauses connection attempts.
+ * Reason: a head unit usually has a single wireless iAP2 context, and links opened in both directions interfere with each other.
  */
 object BtSessionGate {
-    /** 入站（车机主动连入）的 iAP2 会话活跃：出站暂停，避免两条 RFCOMM 互相踩。 */
+    /** An inbound (head unit initiated) iAP2 session is active: outbound pauses so two RFCOMM links do not step on each other. */
     @Volatile
     var inboundActive: Boolean = false
 
     /**
-     * CarPlay 会话已建立（任一路径成功拿到端点后置位，由 SessionController 维护）：
-     * 暂停一切出站连接尝试（静默降噪）——典型表现为连着 DiPlay 时不再探测 Audi。
-     * 会话结束/手动断开时由 SessionController 清除。
+     * A CarPlay session is established (set after any path obtains an endpoint, maintained by SessionController):
+     * suspends all outbound connection attempts (quiet mode); typically it stops probing the Audi while connected to DiPlay.
+     * Cleared by SessionController when the session ends / on manual disconnect.
      */
     @Volatile
     var sessionActive: Boolean = false

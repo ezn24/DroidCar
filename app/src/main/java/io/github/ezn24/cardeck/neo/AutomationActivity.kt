@@ -25,10 +25,10 @@ import io.github.ezn24.cardeck.neo.util.SessionHooks.HookIntent
 import io.github.ezn24.cardeck.neo.util.SessionHooks.Target
 
 /**
- * 「连接自动化」设置页（MacroDroid「发送 Intent」式）：连接成功 / 断开两个时机，各自一组 Intent，
- * 每个 Intent 按字段编辑（目标、Action、包名 + App 选择、类名、Data、MIME、Categories、带类型的
- * Extras），可单独启停与测试。界面全用代码搭（字段多、动态行多，XML 反而难维护），
- * 颜色/底图走手机端 MD3 令牌。
+ * "Connection automation" settings page (MacroDroid "send Intent" style): two triggers (connected / disconnected), each with a list of Intents,
+ * each Intent edited per field (target, Action, package + app picker, class name, Data, MIME, Categories, typed
+ * Extras), individually toggled and testable. The UI is built in code (many fields and dynamic rows; XML would be harder to maintain),
+ * with colors/background from the phone-side MD3 tokens.
  */
 class AutomationActivity : AppCompatActivity() {
     private lateinit var content: LinearLayout
@@ -57,7 +57,7 @@ class AutomationActivity : AppCompatActivity() {
         render()
     }
 
-    // ---- 页面 ----
+    // ---- Page ----
 
     private fun header(): View =
         LinearLayout(this).apply {
@@ -168,7 +168,7 @@ class AutomationActivity : AppCompatActivity() {
             )
         }
 
-    // ---- 编辑器 ----
+    // ---- Editor ----
 
     private fun edit(
         event: String,
@@ -374,7 +374,7 @@ class AutomationActivity : AppCompatActivity() {
         lateinit var value: EditText
     }
 
-    /** 已安装且有启动入口的 App 列表（后台扫描），选中后回填包名。 */
+    /** Installed apps with a launcher entry (scanned in the background); the chosen one fills in the package name. */
     private fun pickApp(onPicked: (String) -> Unit) {
         Bg.run("hook-pick-app") {
             val pm = packageManager
@@ -395,7 +395,7 @@ class AutomationActivity : AppCompatActivity() {
         }
     }
 
-    // ---- 小部件 ----
+    // ---- Widgets ----
 
     private fun targetLabel(target: Target): String =
         getString(

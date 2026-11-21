@@ -3,26 +3,26 @@ package io.github.ezn24.cardeck.neo.iap2
 import android.content.Context
 
 /**
- * MFi 挑战长度的**按车机持久化记忆**。
+ * **Per-head-unit persistent memory** of the MFi challenge length.
  *
- * 为什么需要（2026-10-19 奥迪 MMI 3315 实测）：20B 挑战在该车机上静默 6 秒无应答，
- * 改发 32B 后 0.64 秒就回签名——每次连接白等 6 秒。而不同接收端对长度的偏好相反：
- *  - DiPlay（Carlinkit AuthV3）：只接受 **32B**，长度不符直接断链；
- *  - Audi MMI 6318：20B 秒答，32B 曾 0.4 秒拆链；
- *  - Audi MMI 3315：20B 静默，**32B** 才应答。
- * 所以既不能全局写死某一档，也不能只靠进程内记忆（App 重启即丢，每次重连都重付
- * 6 秒）。这里按「车机身份（model + manufacturer）」持久化三件事：
+ * Why (Audi MMI 3315 measured, 2026-10-19): a 20B challenge gets silence for 6 seconds on this head unit, while 32B
+ * gets a signature in 0.64s, so every connection wasted 6s. Receivers also prefer opposite lengths:
+ *  - DiPlay (Carlinkit AuthV3): accepts only **32B**, any other length drops the link;
+ *  - Audi MMI 6318: answers 20B at once, 32B once dropped the link after 0.4s;
+ *  - Audi MMI 3315: 20B silent, only **32B** is answered.
+ * So one length cannot be hard-coded globally, and in-process memory is not enough (lost on app restart, paying
+ * the 6s again on every reconnect). We persist three things per "head unit identity (model + manufacturer)":
  *
- *  - [Entry.succeeded]：最近一次**成功拿到签名**的长度 → 下次直接首选，省掉试探；
- *  - [Entry.silent]：窗口内无应答的长度 → 排到后面（但仍保留为兜底，车机固件可能变）；
- *  - [Entry.rejected]：0xAA04 明确拒绝或**导致拆链**的长度 → 排到最后。
+ *  - [Entry.succeeded]: the length that most recently **got a signature** -> tried first next time, no probing;
+ *  - [Entry.silent]: lengths with no answer within the window -> ordered later (still kept as a fallback, firmware may change);
+ *  - [Entry.rejected]: lengths explicitly rejected with 0xAA04 or that **caused a link drop** -> ordered last.
  *
- * 排序规则见 [orderAttempts]（纯函数，便于单测）：成功档位永远第一；其余沿用
- * 调用方给的基线顺序（真车 20B 优先 / 测试台 32B 优先），最后才是 silent 与
- * rejected。若基线里所有档位都被判过 rejected，则全部照常尝试，避免永久卡死。
+ * Ordering rules are in [orderAttempts] (pure function, unit-testable): the succeeded length is always first; the rest
+ * follow the caller's baseline order (real cars 20B first / test bench 32B first), then silent and
+ * rejected last. If every length in the baseline was judged rejected, all are tried as usual to avoid a permanent deadlock.
  */
 object MfiLengthMemory {
-    /** 单个车机的 MFi 记忆。 */
+    /** MFi memory of a single head unit. */
     data class Entry(
         val succeeded: Int? = null,
         val silent: Set<Int> = emptySet(),
@@ -36,7 +36,10 @@ object MfiLengthMemory {
     private const val KEY_SILENT = "silent_"
     private const val KEY_REJECTED = "rejected_"
 
-    /** 车机身份 → 存储键。只用稳定字段，避免蓝牙名里的可变后缀影响命中。 */
+    /**
+     * Head unit identity -> storage key. Only stable fields are used so a variable suffix in the Bluetooth name does not break
+     * matching.
+     */
     fun receiverKey(identityText: String): String =
         identityText
             .lowercase()
@@ -45,7 +48,7 @@ object MfiLengthMemory {
             .take(64)
             .ifBlank { "unknown" }
 
-    /** 读取某车机的记忆（无 context 时退化为进程内内存表，便于单测）。 */
+    /** Read the memory of a head unit (without a context it falls back to an in-process table, for unit tests). */
     fun load(
         context: Context?,
         identityText: String,
@@ -69,7 +72,7 @@ object MfiLengthMemory {
         length: Int,
     ) {
         update(context, identityText) { entry ->
-            // 成功即证伪该档位的 silent/rejected 旧结论（固件升级后行为可能变）
+            // A success disproves the old silent/rejected verdict of this length (behavior may change after a firmware upgrade)
             Entry(succeeded = length, silent = entry.silent - length, rejected = entry.rejected - length)
         }
     }
@@ -103,10 +106,10 @@ object MfiLengthMemory {
     }
 
     /**
-     * 硬拒绝：链路在该长度的挑战期间被对端直接断开（区别于 0xAA04 拒绝字/静默）。
-     * 这是强证据——即使长度等于已记「成功」也必须推翻：MFi 应答存在归属歧义
-     * （上一档超窗后才到的迟到应答会被记到当前档头上，2026-10-24 DiPlay 实测：
-     * 32B 迟到应答记成 20B 成功，之后每轮 20B 被断链、永久锁死）。
+     * Hard rejection: the peer dropped the link during a challenge of this length (distinct from an 0xAA04 reject word / silence).
+     * This is strong evidence and must overturn even a recorded "success" of the same length: MFi replies have an attribution
+     * ambiguity (a late reply arriving after the previous length's window gets credited to the current length; DiPlay
+     * 2026-10-24: a late 32B reply was recorded as a 20B success, after which every round dropped the link at 20B and stayed locked).
      */
     fun recordHardRejected(
         context: Context?,
@@ -123,35 +126,35 @@ object MfiLengthMemory {
         }
     }
 
-    /** 打印用：把记忆压成一行日志（便于对照实测）。 */
+    /** For printing: compress the memory into one log line (to compare with measurements). */
     fun describe(entry: Entry): String =
         if (entry.isEmpty) {
-            "无"
+            "none"
         } else {
             buildList {
-                entry.succeeded?.let { add("成功=${it}B") }
-                if (entry.silent.isNotEmpty()) add("静默=${entry.silent.sorted().joinToString("/")}B")
-                if (entry.rejected.isNotEmpty()) add("被拒=${entry.rejected.sorted().joinToString("/")}B")
-            }.joinToString("，")
+                entry.succeeded?.let { add("succeeded=${it}B") }
+                if (entry.silent.isNotEmpty()) add("silent=${entry.silent.sorted().joinToString("/")}B")
+                if (entry.rejected.isNotEmpty()) add("rejected=${entry.rejected.sorted().joinToString("/")}B")
+            }.joinToString(", ")
         }
 
     /**
-     * 计算本轮的尝试顺序（纯函数）。
+     * Compute the attempt order for this round (pure function).
      *
-     * @param baseline 调用方按接收端类型给出的基线顺序（长度列表）。
-     * @param entry 该车机的持久化记忆。
-     * @return 依次尝试的长度；保证非空且覆盖 baseline 的全部档位。
+     * @param baseline baseline order (list of lengths) given by the caller according to the receiver type.
+     * @param entry persistent memory of this head unit.
+     * @return lengths to try in order; guaranteed non-empty and covering every length in baseline.
      */
     fun orderAttempts(
         baseline: List<Int>,
         entry: Entry,
     ): List<Int> {
-        // 「成功但又被硬拒绝」= 记忆矛盾（迟到应答误记），不能继续享受第一名——
-        // 降级为普通档参与排序（排在被拒档之前）
+        // "Succeeded but also hard-rejected" = contradictory memory (late reply misattributed), so it cannot keep first place:
+        // demote it to a normal length that sorts before the rejected ones
         val succeeded = entry.succeeded?.takeIf { it !in entry.rejected }
         val rest = baseline.filter { it != succeeded }
-        // 只有「还存在没被判死的档位」时才把 rejected 排到最后；
-        // 全部 rejected 说明与记忆矛盾（换固件/换车同一身份），照常全试。
+        // Only push rejected to the end when "some length is not yet ruled out";
+        // all rejected contradicts the memory (firmware changed / different car with the same identity), so try everything as usual.
         val allRejected = rest.isNotEmpty() && rest.all { it in entry.rejected }
         val rejected = if (allRejected) emptySet() else entry.rejected.filter { it in baseline }.toSet()
         val silent = entry.silent.filter { it in rest && it !in rejected }.toSet()
@@ -161,7 +164,7 @@ object MfiLengthMemory {
         return (listOfNotNull(succeeded) + normal + silentOrdered + rejectedOrdered).distinct()
     }
 
-    // ---- 内部 ----
+    // ---- Internals ----
 
     private val memory = HashMap<String, Entry>()
 

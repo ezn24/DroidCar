@@ -10,24 +10,24 @@ import io.github.ezn24.cardeck.neo.service.CarPlayService
 import io.github.ezn24.cardeck.neo.util.DebugFileLog
 
 /**
- * 上车自动连接 / 下车自动收摊。
+ * Auto-connect when getting in the car / auto-teardown when leaving.
  *
- * **为什么用清单静态接收器**：`ACTION_ACL_CONNECTED` / `ACTION_ACL_DISCONNECTED` 在
- * 隐式广播豁免清单里（Android 开发者文档「隐式广播例外情况」明确列出），所以即使
- * 应用进程被杀，车机蓝牙连上的瞬间也能把进程拉起来。
+ * **Why a manifest-registered receiver**: `ACTION_ACL_CONNECTED` / `ACTION_ACL_DISCONNECTED` are on the
+ * implicit broadcast exception list (explicitly listed in the Android developer docs "Implicit broadcast exceptions"), so even if the
+ * app process was killed, the moment the head unit Bluetooth connects it can start the process.
  *
- * **为什么能启动前台服务**：Android 12+ 限制后台启动 FGS，豁免清单里**没有**
- * 「蓝牙广播」这一项；本应用能起是因为持有 `SYSTEM_ALERT_WINDOW`（暗幕/触摸探针
- * 依赖它）——它是官方豁免项（targetSdk 34 下只需要权限存在；Android 15+ 才额外
- * 要求当时有可见悬浮窗）。没授悬浮窗权限时 `startForegroundService` 会抛
- * `ForegroundServiceStartNotAllowedException`，这里只记日志——用户手动打开 App
- * 连接一次即可（那次有可见 Activity，不受限制）。
+ * **Why a foreground service may start**: Android 12+ restricts background FGS starts, and the exemption list has **no**
+ * "Bluetooth broadcast" entry; this app can start because it holds `SYSTEM_ALERT_WINDOW` (the dim overlay / touch probe
+ * need it), an official exemption (under targetSdk 34 only the permission must exist; Android 15+ additionally
+ * requires a visible overlay window at that moment). Without the overlay permission `startForegroundService` throws
+ * `ForegroundServiceStartNotAllowedException`; we only log it, and the user can open the app and connect once by hand
+ * (that time a visible Activity exists, so no restriction applies).
  *
- * **目标过滤**：优先用户选定的目标车机（[TargetDevicePrefs]）；未选定时按车机名称
- * 关键词兜底。耳机/手表等 ACL 连接不会误触发。
+ * **Target filter**: the user-selected target head unit ([TargetDevicePrefs]) wins; with none selected we fall back to head unit name
+ * keywords. ACL connections of headsets/watches do not trigger it by mistake.
  *
- * 音频注意：自动连接只推视频——AudioPlaybackCapture 需要 MediaProjection 授权令牌，
- * 系统不允许无令牌静默获取（appops PROJECT_MEDIA 只是其中一道闸，不产生令牌）。
+ * Audio note: auto-connect only pushes video, because AudioPlaybackCapture needs a MediaProjection grant token and
+ * the system does not allow acquiring it silently without one (appops PROJECT_MEDIA is only one gate and yields no token).
  */
 class CarBluetoothReceiver : BroadcastReceiver() {
     @SuppressLint("MissingPermission")
@@ -43,19 +43,19 @@ class CarBluetoothReceiver : BroadcastReceiver() {
         }
         val device = deviceOf(intent) ?: return
         val app = context.applicationContext
-        // 「上车自动连接」开关（设置 → 显示，默认开）
+        // "Auto-connect when getting in the car" switch (Settings -> Display, default on)
         if (!AutoConnectPrefs.enabled(app)) return
-        // 这两个访问需要 BLUETOOTH_CONNECT；未授权时放弃（无法判断是不是目标车机）
+        // These accesses need BLUETOOTH_CONNECT; give up when not granted (cannot tell whether it is the target head unit)
         val address = runCatching { device.address }.getOrNull() ?: return
         val name = runCatching { device.name }.getOrNull()
 
         if (!isCarDevice(app, address, name)) {
-            DebugFileLog.append(app, "AUTO: 忽略非车机蓝牙 ${name ?: "?"}（$address）")
+            DebugFileLog.append(app, "AUTO: ignoring non-car Bluetooth ${name ?: "?"} ($address)")
             return
         }
 
         if (action == BluetoothDevice.ACTION_ACL_CONNECTED) {
-            DebugFileLog.append(app, "AUTO: 车机蓝牙已连上 ${name ?: "?"}（$address）——自动拉起会话")
+            DebugFileLog.append(app, "AUTO: car Bluetooth connected ${name ?: "?"} ($address), auto-starting session")
             runCatching {
                 context.startForegroundService(
                     Intent(context, CarPlayService::class.java)
@@ -64,13 +64,14 @@ class CarBluetoothReceiver : BroadcastReceiver() {
             }.onFailure { error ->
                 DebugFileLog.append(
                     app,
-                    "AUTO: 自动启动被系统拦截（${error.javaClass.simpleName}: ${error.message}）" +
-                        "——请授予「显示在其他应用上层」后重试，或手动打开 App 连接一次",
+                    "AUTO: auto-start blocked by the system (${error.javaClass.simpleName}: ${error.message})" +
+                        "; grant \"Display over other apps\" and retry, or open the app and connect once by hand",
                 )
             }
         } else {
-            DebugFileLog.append(app, "AUTO: 车机蓝牙已断开 ${name ?: "?"}（$address）——结束会话")
-            // 会话在跑时服务就是前台进程，startService 允许；不在跑说明本来就没有会话
+            DebugFileLog.append(app, "AUTO: car Bluetooth disconnected ${name ?: "?"} ($address), ending session")
+            // While a session runs the service is the foreground process so startService is allowed; if not running there was no
+            // session anyway
             runCatching {
                 context.startService(
                     Intent(context, CarPlayService::class.java)
@@ -100,7 +101,7 @@ class CarBluetoothReceiver : BroadcastReceiver() {
     }
 
     private companion object {
-        /** 未选目标车机时的兜底：常见车机蓝牙名关键词（真车 + 测试台）。 */
+        /** Fallback when no target head unit is selected: common head unit Bluetooth name keywords (real cars + test bench). */
         val CAR_KEYWORDS = listOf("BMW", "MINI", "AUDI", "PORSCHE", "MERCEDES", "BENZ", "VOLVO", "CARPLAY")
     }
 }

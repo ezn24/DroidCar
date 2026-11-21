@@ -11,22 +11,22 @@ import java.net.ServerSocket
 import kotlin.concurrent.thread
 
 /**
- * 「奥迪 MMI 3315_5GHz 首连必拒」回放测试（2026-10-21 真机 sysdiagnose，
- * docs/PROTOCOL-NOTES.md §13a）：车机在自身就绪窗口内对配对请求一律 403
- * （真 iPhone 的 pair-verify 通过后照样在认证段被 403，18~20s 后车机自动
- * 重邀、第二次即成）。
+ * "Audi MMI 3315_5GHz always rejects the first connection" replay test (2026-10-21 real-device sysdiagnose,
+ * docs/PROTOCOL-NOTES.md section 13a): within its own readiness window the head unit answers every pairing request with 403
+ * (a real iPhone is also 403'd in the auth phase after pair-verify passes; 18~20s later the head unit
+ * re-invites automatically and the second attempt succeeds).
  *
- * 脚本化接收端 = 回环 ServerSocket，对所有 pair-setup / pair-verify 请求
- * 恒回 `HTTP/1.1 403 Forbidden`，驱动真实 [AirPlayClient] 配对循环，断言：
- *  1. `pairingForbidden` 被置位（verify/认证段的 403 也要标记——旧实现只认
- *     pair-setup 段，导致主控误走「断 BT 重试」与「明文降级」两条歧路）；
- *  2. 退避节奏：403 后 ≥4.5s 才进入下一轮尝试（5s 退避，见
- *     [pairingRetryBackoffMs]），不再以 500ms 猛攻可能重置车机就绪状态机；
- *  3. 12s 窗口内 2~4 轮尝试、不产出密钥（对 403 车机没有可成功的路径）。
+ * The scripted receiver = a loopback ServerSocket that always answers every pair-setup / pair-verify request
+ * with `HTTP/1.1 403 Forbidden`, driving the real [AirPlayClient] pairing loop, asserting:
+ *  1. `pairingForbidden` is set (a 403 in the verify/auth phase must also mark it -- the old implementation only recognised
+ *     the pair-setup phase, so the controller wrongly took the "drop BT and retry" and "plaintext downgrade" detours);
+ *  2. Backoff cadence: after a 403 the next attempt starts only after >= 4.5s (5s backoff, see
+ *     [pairingRetryBackoffMs]), no longer hammering at 500ms which could reset the head unit's readiness state machine;
+ *  3. 2~4 attempt rounds within the 12s window, producing no keys (a 403 head unit has no path to success).
  */
 class ForbiddenAudiReplayTest {
     @Test
-    fun `首连 403 窗口 - 标记 forbidden 并按 5s 退避重试`() {
+    fun `first-connect 403 window - mark forbidden and retry with 5s backoff`() {
         val server = ServerSocket(0, 16, InetAddress.getLoopbackAddress())
         val requestAtNs = ArrayList<Long>()
         val lock = Any()
@@ -46,7 +46,7 @@ class ForbiddenAudiReplayTest {
                         val out = s.getOutputStream()
                         try {
                             while (true) {
-                                val head = readHead(input) ?: break // 连接关闭：回到 accept 等下一连接
+                                val head = readHead(input) ?: break // Connection closed: back to accept and wait for the next one
                                 val length =
                                     Regex("Content-Length: *(\\d+)", RegexOption.IGNORE_CASE)
                                         .find(head)
@@ -55,7 +55,7 @@ class ForbiddenAudiReplayTest {
                                         ?.toIntOrNull() ?: 0
                                 if (length > 0) skipFully(input, length)
                                 synchronized(lock) { requestAtNs.add(System.nanoTime()) }
-                                // 必须回显 CSeq：客户端按 CSeq 派发应答，缺了会当 10s 超时
+                                // Must echo CSeq: the client dispatches responses by CSeq, a missing one is treated as a 10s timeout
                                 val cseq =
                                     Regex("CSeq: *(\\d+)", RegexOption.IGNORE_CASE)
                                         .find(head)
@@ -68,7 +68,7 @@ class ForbiddenAudiReplayTest {
                                 out.flush()
                             }
                         } catch (_: Exception) {
-                            // 客户端断开换新连接（403 快路径行为），继续服务
+                            // The client disconnects and opens a new connection (403 fast-path behavior); keep serving
                         }
                     }
                 }
@@ -95,24 +95,24 @@ class ForbiddenAudiReplayTest {
                 runCatching { acceptor.join(1_000) }
             }
 
-        assertNull("403 窗口内不可能建立密钥", keys)
-        assertTrue("verify/认证段的 403 也必须置位 pairingForbidden", client.pairingForbidden)
+        assertNull("No key can be established within the 403 window", keys)
+        assertTrue("A 403 in the verify/auth phase must also set pairingForbidden", client.pairingForbidden)
         assertTrue(client.attemptedPairing)
 
         val stamps =
             synchronized(lock) { requestAtNs.sorted() }.map { it / 1_000_000 }
-        assertTrue("请求过少（${stamps.size} 次）——循环未真正轮转", stamps.size >= 4)
-        // 轮次聚类：同轮内 setup→verify 两条请求间隔 <3s，轮与轮之间 ≥4.5s（5s 退避）
+        assertTrue("Too few requests (${stamps.size}) -- the loop did not really cycle", stamps.size >= 4)
+        // Round clustering: setup->verify requests within a round are <3s apart, rounds are >= 4.5s apart (5s backoff)
         val cycles = ArrayList<Long>()
         for (i in stamps.indices) {
             if (i == 0 || stamps[i] - stamps[i - 1] >= 3_000) cycles.add(stamps[i])
         }
-        assertTrue("轮次 ${cycles.size}（期望 2~4）", cycles.size in 2..4)
+        assertTrue("Rounds ${cycles.size} (expected 2~4)", cycles.size in 2..4)
         val gaps = cycles.zipWithNext { a, b -> b - a }
-        assertTrue("轮间退避不足（$gaps ms，期望 ≥4500）", gaps.all { it >= 4_500 })
+        assertTrue("Backoff between rounds too short ($gaps ms, expected >= 4500)", gaps.all { it >= 4_500 })
     }
 
-    /** 读到 HTTP 头结束（\r\n\r\n）；连接关闭返回 null。 */
+    /** Reads up to the end of the HTTP header (\r\n\r\n); returns null if the connection is closed. */
     private fun readHead(input: InputStream): String? {
         val buf = StringBuilder()
         val chunk = ByteArray(1)

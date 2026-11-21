@@ -20,6 +20,7 @@
         android:layout_height="match_parent" />
 
     <LinearLayout
+        android:id="@+id/dashMediaContent"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:gravity="center_horizontal"
@@ -141,5 +142,79 @@
             android:layout_width="0dp"
             android:layout_height="0dp"
             android:layout_weight="0.3" />
+    </LinearLayout>
+    <!-- Call card: replaces the music controls while a call rings or is connected (CallState). -->
+    <LinearLayout
+        android:id="@+id/dashCallContent"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:paddingLeft="8dp"
+        android:paddingRight="8dp"
+        android:visibility="gone">
+
+        <!-- Caller photo (round clip in code); hidden when the call notification carries none -->
+        <ImageView
+            android:id="@+id/dashCallAvatar"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:layout_marginBottom="8dp"
+            android:importantForAccessibility="no"
+            android:scaleType="centerCrop"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/dashCallStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:letterSpacing="0.1"
+            android:textColor="#FFE0E0E5"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/dashCallName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="2"
+            android:textColor="#FFF5F5F7"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/dashCallTime"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:fontFeatureSettings="tnum"
+            android:textColor="#FFE0E0E5"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:id="@+id/dashCallLeft"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:padding="14dp" />
+
+            <View
+                android:layout_width="32dp"
+                android:layout_height="1dp" />
+
+            <ImageView
+                android:id="@+id/dashCallRight"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:padding="14dp" />
+        </LinearLayout>
     </LinearLayout>
 </FrameLayout>

@@ -16,24 +16,24 @@ import android.view.SurfaceControl
 import java.lang.reflect.Method
 
 /**
- * Shizuku UserService 实现：运行在常驻 shell 进程（uid 2000），
- * 通过反射 InputManager.injectInputEvent 直接注入触摸事件到指定 display。
+ * Shizuku UserService implementation: runs in the resident shell process (uid 2000) and
+ * injects touch events straight into a given display by reflecting InputManager.injectInputEvent.
  *
- * injectInputEvent 的位置随版本变化：
- * - Android 13 及以下：InputManager 实例方法；
- * - Android 14+：迁移到 InputManagerGlobal.getInstance() 单例。
- * 部分版本签名带第三参 targetDisplayId，按形参类型自适应；
- * 老签名（两参）依赖 InputEvent.setDisplayId 指定目标屏。
+ * The location of injectInputEvent varies by version:
+ * - Android 13 and below: InputManager instance method;
+ * - Android 14+: moved to the InputManagerGlobal.getInstance() singleton.
+ * Some versions take a third targetDisplayId parameter (adapted by parameter type);
+ * the old two-parameter signature relies on InputEvent.setDisplayId to pick the target display.
  *
- * 反射失败（ROM hidden API 差异）由 ping()/diag() 暴露，调用方回退 `input -d`。
- * （移植自参考项目 android-auto 的 CarInputServiceImpl）
+ * Reflection failures (ROM hidden-API differences) are exposed through ping()/diag(); callers fall back to `input -d`.
+ * (Ported from the reference project android-auto's CarInputServiceImpl)
  */
 class CarInputServiceImpl(
     private val context: Context,
 ) : ICarInput.Stub() {
     /**
-     * 物理屏是否被我们置为 OFF。服务自尽（APK 升级导致的过期自清）前必须恢复，
-     * 否则手机会停在一块「逻辑醒着、物理黑着」的屏上（按电源键两次可恢复）。
+     * Whether we turned the physical panel OFF. Must be restored before the service exits (stale self-reap after an APK upgrade),
+     * otherwise the phone is left on a screen that is "logically awake, physically dark" (recoverable by pressing the power key twice).
      */
     @Volatile
     private var physicalScreenOff = false
@@ -42,7 +42,7 @@ class CarInputServiceImpl(
     private var outputRecorder: android.media.AudioRecord? = null
     private var outputPipe: android.os.ParcelFileDescriptor? = null
 
-    /** shell 输出采集绕开普通播放捕获的应用 opt-out，不使用麦克风源。 */
+    /** Shell output capture bypasses the app opt-out of normal playback capture and does not use the microphone source. */
     @SuppressLint("MissingPermission", "WrongConstant", "SoonBlockedPrivateApi", "PrivateApi")
     @Synchronized
     override fun startAudioCapture(
@@ -56,7 +56,7 @@ class CarInputServiceImpl(
         var writer: android.os.ParcelFileDescriptor? = null
         var recorder: android.media.AudioRecord? = null
         return try {
-            // AudioRecord 需要实际 shell UID 的 attribution，不能沿用主应用包名。
+            // AudioRecord needs the actual shell UID attribution; the main app's package name cannot be reused.
             val shellContext =
                 object : android.content.ContextWrapper(context) {
                     override fun getPackageName(): String = "com.android.shell"
@@ -137,7 +137,7 @@ class CarInputServiceImpl(
         }
     }
 
-    // ---- 车机麦克风注入（AudioPolicy 录音注入，docs/MIC-RESEARCH.md 实验 1/2 验证） ----
+    // ---- Car microphone injection (AudioPolicy recording injection, verified by experiments 1/2 in docs/MIC-RESEARCH.md) ----
 
     @Volatile
     private var micPolicy: Any? = null
@@ -147,11 +147,12 @@ class CarInputServiceImpl(
     private var micPipe: android.os.ParcelFileDescriptor? = null
 
     /**
-     * 注入用的播放轨道。照 AOSP `AudioPolicy.createAudioTrackSource` 的属性自己建，只多一步
-     * `setContext(shell)`：系统那个方法建轨时 attribution 取的是进程的 opPackageName（=CarDeck
-     * 的包名）而 uid 是 shell 2000，AudioFlinger 判身份不符直接拒绝——实测
-     * 「UnsupportedOperationException: Cannot create AudioTrack」。与 startAudioCapture 的
-     * AudioRecord 必须 setContext 同一个坑。
+     * Playback track used for injection. Built by hand with the attributes of AOSP
+     * `AudioPolicy.createAudioTrackSource`, with one extra step,
+     * `setContext(shell)`: when the system method builds the track its attribution uses the process opPackageName (= CarDeck's
+     * package name) while the uid is shell 2000, so AudioFlinger sees a mismatched identity and refuses; observed as
+     * "UnsupportedOperationException: Cannot create AudioTrack". Same pitfall as the AudioRecord in startAudioCapture,
+     * which also needs setContext.
      */
     @androidx.annotation.RequiresApi(34)
     private fun injectionTrack(
@@ -160,14 +161,15 @@ class CarInputServiceImpl(
     ): android.media.AudioTrack {
         val registration = mix.javaClass.getMethod("getRegistration").invoke(mix) as String
         val attrs = android.media.AudioAttributes.Builder()
-        // USAGE_VIRTUAL_SOURCE(15) 是 @SystemApi 常量：反射调用（AOSP 自己建注入轨道就是这个 usage）
+        // USAGE_VIRTUAL_SOURCE(15) is a @SystemApi constant: call by reflection (AOSP builds its own injection track with this usage)
         android.media.AudioAttributes.Builder::class.java
             .getMethod("setUsage", Int::class.java)
             .invoke(attrs, 15)
         val addTag = android.media.AudioAttributes.Builder::class.java.getMethod("addTag", String::class.java)
-        // 只能有 addr= 这一个标签：APM 按 tags **开头**是否为 "addr=" 把轨道路由进 mix 的 submix。
-        // 曾多加 fixedVolume（那是 createAudioRecordSink 用的）→ tags 变成 "fixedVolume;addr=…"，
-        // 轨道没进注入设备，录音拿到的是空的（2026-11-17 dumpsys audio 对照实验定谳）。
+        // There may be only the addr= tag: APM routes the track into the mix's submix depending on whether tags **starts with** "addr=".
+        // An extra fixedVolume (used by createAudioRecordSink) once made tags "fixedVolume;addr=...",
+        // the track never reached the injection device and the recording came back empty (pinned down 2026-11-17 by a
+        // dumpsys audio A/B experiment).
         addTag.invoke(attrs, "addr=$registration")
         val minimum =
             android.media.AudioTrack.getMinBufferSize(
@@ -199,7 +201,7 @@ class CarInputServiceImpl(
             }.looper
     }
 
-    /** AudioPolicy 需要 shell UID 的 attribution（不能沿用主应用包名）。 */
+    /** AudioPolicy needs the shell UID attribution (the main app's package name cannot be reused). */
     private fun shellContext(): Context =
         object : android.content.ContextWrapper(context) {
             override fun getPackageName(): String = "com.android.shell"
@@ -226,13 +228,13 @@ class CarInputServiceImpl(
         return try {
             val ruleBuilderClass = Class.forName("android.media.audiopolicy.AudioMixingRule\$Builder")
             val ruleBuilder = ruleBuilderClass.getConstructor().newInstance()
-            // MIX_ROLE_INJECTOR=1：这条 mix 是「往录音里注入」而不是「截取播放」
+            // MIX_ROLE_INJECTOR=1: this mix "injects into recordings" rather than "captures playback"
             runCatching { ruleBuilderClass.getMethod("setTargetMixRole", Int::class.java).invoke(ruleBuilder, 1) }
             val setPreset =
                 android.media.AudioAttributes.Builder::class.java.getMethod("setCapturePreset", Int::class.java)
             val addRule =
                 ruleBuilderClass.getMethod("addRule", android.media.AudioAttributes::class.java, Int::class.java)
-            // HOTWORD 不在内：热词走 SoundTrigger/DSP，注入不到（实验 2）
+            // HOTWORD is excluded: the hotword goes through SoundTrigger/DSP and cannot be injected into (experiment 2)
             for (preset in MIC_INJECT_PRESETS) {
                 val attrs = android.media.AudioAttributes.Builder()
                 setPreset.invoke(attrs, preset)
@@ -257,8 +259,8 @@ class CarInputServiceImpl(
             val policyBuilderClass = Class.forName("android.media.audiopolicy.AudioPolicy\$Builder")
             val policyBuilder = policyBuilderClass.getConstructor(Context::class.java).newInstance(shellContext())
             policyBuilderClass.getMethod("addMix", mixClass).invoke(policyBuilder, mix)
-            // UserService 的 binder 线程没有 Looper（独立 app_process 实验里有 prepareMainLooper）：
-            // AudioPolicy 的状态回调要一个 Looper，给它专用线程
+            // The UserService binder thread has no Looper (the standalone app_process experiment calls prepareMainLooper):
+            // AudioPolicy status callbacks need a Looper, so give it a dedicated thread
             policyBuilderClass.getMethod("setLooper", android.os.Looper::class.java).invoke(policyBuilder, micLooper())
             policy = policyBuilderClass.getMethod("build").invoke(policyBuilder)
             val registered =
@@ -270,7 +272,8 @@ class CarInputServiceImpl(
                 if (android.os.Build.VERSION.SDK_INT >= 34) {
                     injectionTrack(mix, format)
                 } else {
-                    // Android 12/13 没有 AudioTrack.Builder.setContext：只能用系统方法（可能因身份被拒）
+                    // Android 12/13 has no AudioTrack.Builder.setContext: only the system method is usable (it may be
+                    // refused over identity)
                     policyClass.getMethod("createAudioTrackSource", mixClass).invoke(policy, mix) as android.media.AudioTrack
                 }
             track.play()
@@ -293,7 +296,7 @@ class CarInputServiceImpl(
                 } catch (error: Exception) {
                     fileLog("mic injection pipe ended: ${error.message}")
                 } finally {
-                    // 应用端关管道 / 应用进程死掉：立刻注销，把真实麦克风还给其它应用
+                    // App closed the pipe / app process died: unregister at once and hand the real microphone back to other apps
                     synchronized(this) {
                         if (micTrack === activeTrack) stopMicInjection()
                     }
@@ -343,25 +346,238 @@ class CarInputServiceImpl(
         }
     }
 
-    // ---- 谁在录音：车机麦克风自动切换的触发源 ----
+    // ---- Call audio (VoIP far-end voice) to the car ----
+
+    @Volatile
+    private var callPolicy: Any? = null
+
+    @Volatile
+    private var callRecord: android.media.AudioRecord? = null
+
+    /**
+     * Loopback capture of `USAGE_VOICE_COMMUNICATION` playback (WhatsApp's far-end voice, measured 2026-11-21): the mix takes
+     * the voice off the phone speaker and hands it to us as PCM through the returned pipe. Needs
+     * CAPTURE_VOICE_COMMUNICATION_OUTPUT + MODIFY_AUDIO_ROUTING (shell holds both). The record sink is built by hand like
+     * [injectionTrack] (setContext(shell)), with attributes from AOSP `AudioPolicy.createAudioRecordSink`.
+     */
+    @SuppressLint("MissingPermission", "WrongConstant")
+    @Synchronized
+    override fun startCallCapture(sampleRate: Int): android.os.ParcelFileDescriptor? {
+        stopCallCapture()
+        if (sampleRate !in 8_000..48_000 || android.os.Build.VERSION.SDK_INT < 34) return null
+        val identity = android.os.Binder.clearCallingIdentity()
+        var policy: Any? = null
+        var record: android.media.AudioRecord? = null
+        val audioManager = context.getSystemService(android.media.AudioManager::class.java)
+        val policyClass = Class.forName("android.media.audiopolicy.AudioPolicy")
+        val mixClass = Class.forName("android.media.audiopolicy.AudioMix")
+        return try {
+            val ruleBuilderClass = Class.forName("android.media.audiopolicy.AudioMixingRule\$Builder")
+            val ruleBuilder = ruleBuilderClass.getConstructor().newInstance()
+            val attrs =
+                android.media.AudioAttributes
+                    .Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .build()
+            ruleBuilderClass
+                .getMethod("addRule", android.media.AudioAttributes::class.java, Int::class.java)
+                .invoke(ruleBuilder, attrs, 1) // RULE_MATCH_ATTRIBUTE_USAGE
+            // Without it APM refuses to route VOICE_COMMUNICATION into a mix
+            ruleBuilderClass.getMethod("voiceCommunicationCaptureAllowed", Boolean::class.java).invoke(ruleBuilder, true)
+            val rule = ruleBuilderClass.getMethod("build").invoke(ruleBuilder)
+            val mixFormat =
+                android.media.AudioFormat
+                    .Builder()
+                    .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO)
+                    .build()
+            val mixBuilderClass = Class.forName("android.media.audiopolicy.AudioMix\$Builder")
+            val mixBuilder =
+                mixBuilderClass
+                    .getConstructor(Class.forName("android.media.audiopolicy.AudioMixingRule"))
+                    .newInstance(rule)
+            mixBuilderClass.getMethod("setFormat", android.media.AudioFormat::class.java).invoke(mixBuilder, mixFormat)
+            mixBuilderClass.getMethod("setRouteFlags", Int::class.java).invoke(mixBuilder, 2) // ROUTE_FLAG_LOOP_BACK
+            val mix = mixBuilderClass.getMethod("build").invoke(mixBuilder)
+            val policyBuilderClass = Class.forName("android.media.audiopolicy.AudioPolicy\$Builder")
+            val policyBuilder = policyBuilderClass.getConstructor(Context::class.java).newInstance(shellContext())
+            policyBuilderClass.getMethod("addMix", mixClass).invoke(policyBuilder, mix)
+            policyBuilderClass.getMethod("setLooper", android.os.Looper::class.java).invoke(policyBuilder, micLooper())
+            policy = policyBuilderClass.getMethod("build").invoke(policyBuilder)
+            val registered =
+                android.media.AudioManager::class.java
+                    .getMethod("registerAudioPolicy", policyClass)
+                    .invoke(audioManager, policy) as Int
+            check(registered == 0) { "registerAudioPolicy=$registered" }
+            val registration = mix.javaClass.getMethod("getRegistration").invoke(mix) as String
+            val recordAttrs = android.media.AudioAttributes.Builder()
+            android.media.AudioAttributes.Builder::class.java
+                .getMethod("setInternalCapturePreset", Int::class.java)
+                .invoke(recordAttrs, android.media.MediaRecorder.AudioSource.REMOTE_SUBMIX)
+            android.media.AudioAttributes.Builder::class.java
+                .getMethod("addTag", String::class.java)
+                .invoke(recordAttrs, "addr=$registration")
+            val recordFormat =
+                android.media.AudioFormat
+                    .Builder()
+                    .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(android.media.AudioFormat.CHANNEL_IN_MONO)
+                    .build()
+            val builder = android.media.AudioRecord.Builder()
+            android.media.AudioRecord.Builder::class.java
+                .getMethod("setAudioAttributes", android.media.AudioAttributes::class.java)
+                .invoke(builder, recordAttrs.build())
+            builder.setAudioFormat(recordFormat)
+            android.media.AudioRecord.Builder::class.java
+                .getMethod("setContext", Context::class.java)
+                .invoke(builder, shellContext())
+            val minimum =
+                android.media.AudioRecord.getMinBufferSize(
+                    sampleRate,
+                    android.media.AudioFormat.CHANNEL_IN_MONO,
+                    android.media.AudioFormat.ENCODING_PCM_16BIT,
+                )
+            record = builder.setBufferSizeInBytes(maxOf(minimum, 2048) * 2).build()
+            check(record.state == android.media.AudioRecord.STATE_INITIALIZED) { "record sink not initialized" }
+            record.startRecording()
+            val pipe = android.os.ParcelFileDescriptor.createPipe()
+            callPolicy = policy
+            callRecord = record
+            val activeRecord: android.media.AudioRecord = record
+            val writer = pipe[1]
+            Thread({
+                try {
+                    android.os.ParcelFileDescriptor.AutoCloseOutputStream(writer).use { output ->
+                        // 10ms chunks keep the call path short
+                        val pcm = ByteArray(sampleRate / 100 * 2)
+                        while (callRecord === activeRecord) {
+                            val read = activeRecord.read(pcm, 0, pcm.size)
+                            if (read < 0) break
+                            if (read > 0) output.write(pcm, 0, read)
+                        }
+                    }
+                } catch (error: Exception) {
+                    fileLog("call capture pipe ended: ${error.message}")
+                } finally {
+                    // App closed the pipe / died: give the voice back to the phone speaker at once
+                    synchronized(this) {
+                        if (callRecord === activeRecord) stopCallCapture()
+                    }
+                }
+            }, "shell-call-capture").apply {
+                isDaemon = true
+                start()
+            }
+            fileLog("call capture started: ${sampleRate}Hz mono")
+            pipe[0]
+        } catch (error: Throwable) {
+            var root: Throwable = error
+            while (root.cause != null && root.cause !== root) root = root.cause!!
+            fileLog("call capture failed: ${root.javaClass.name}: ${root.message}")
+            runCatching { record?.release() }
+            policy?.let { p ->
+                runCatching {
+                    android.media.AudioManager::class.java
+                        .getMethod("unregisterAudioPolicy", policyClass)
+                        .invoke(audioManager, p)
+                }
+            }
+            null
+        } finally {
+            android.os.Binder.restoreCallingIdentity(identity)
+        }
+    }
+
+    @Synchronized
+    override fun stopCallCapture() {
+        val record = callRecord
+        val policy = callPolicy
+        callRecord = null
+        callPolicy = null
+        runCatching { record?.stop() }
+        runCatching { record?.release() }
+        if (policy != null) {
+            runCatching {
+                val audioManager = context.getSystemService(android.media.AudioManager::class.java)
+                android.media.AudioManager::class.java
+                    .getMethod("unregisterAudioPolicy", Class.forName("android.media.audiopolicy.AudioPolicy"))
+                    .invoke(audioManager, policy)
+            }
+            fileLog("call capture stopped")
+        }
+    }
+
+    // ---- Who is recording: trigger source for automatic car-microphone switching ----
 
     private val activeRecorders = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
 
     @Volatile
     private var recorderWatchStarted = false
 
+    /**
+     * Answer / end a call through ITelecomService with the shell's identity (TelecomManager would attribute the call to
+     * CarDeck's package name, which does not match uid 2000). Signatures differ between releases, so the methods are
+     * looked up by name and called with the calling package as the first String argument.
+     */
+    override fun callControl(action: Int): Int {
+        val name =
+            when (action) {
+                1 -> "acceptRingingCall"
+                2 -> "endCall"
+                else -> return 0
+            }
+        val identity = android.os.Binder.clearCallingIdentity()
+        return try {
+            val binder =
+                Class
+                    .forName("android.os.ServiceManager")
+                    .getMethod("getService", String::class.java)
+                    .invoke(null, "telecom") as android.os.IBinder
+            val telecom =
+                Class
+                    .forName("com.android.internal.telecom.ITelecomService\$Stub")
+                    .getMethod("asInterface", android.os.IBinder::class.java)
+                    .invoke(null, binder)
+            val method =
+                telecom.javaClass.methods
+                    .filter { it.name == name }
+                    .minByOrNull { it.parameterTypes.size }
+                    ?: return 0
+            val args =
+                method.parameterTypes
+                    .map { type ->
+                        when (type) {
+                            String::class.java -> "com.android.shell"
+                            Int::class.javaPrimitiveType -> 0
+                            Boolean::class.javaPrimitiveType -> false
+                            else -> null
+                        }
+                    }.toTypedArray()
+            val result = method.invoke(telecom, *args)
+            fileLog("callControl $name -> $result")
+            if (result == false) 0 else 1
+        } catch (t: Throwable) {
+            fileLog("callControl $name failed: $t")
+            0
+        } finally {
+            android.os.Binder.restoreCallingIdentity(identity)
+        }
+    }
+
     override fun removeTasks(taskIds: IntArray): Int {
         val atm =
             runCatching {
                 Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
             }.getOrElse {
-                fileLog("removeTasks: 取 ActivityTaskManager 失败 $it")
+                fileLog("removeTasks: ActivityTaskManager lookup failed $it")
                 return 0
             } ?: return 0
         val remove = runCatching { atm.javaClass.getMethod("removeTask", Int::class.javaPrimitiveType) }.getOrNull() ?: return 0
         return taskIds.count { id ->
             runCatching { remove.invoke(atm, id) as? Boolean == true }
-                .onFailure { fileLog("removeTasks: #$id 失败 ${it.cause ?: it}") }
+                .onFailure { fileLog("removeTasks: #$id failed ${it.cause ?: it}") }
                 .getOrDefault(false)
         }
     }
@@ -370,6 +586,29 @@ class CarInputServiceImpl(
         if (!recorderWatchStarted) startRecorderWatch()
         return activeRecorders.keys.joinToString(",")
     }
+
+    override fun ringingApps(): String =
+        try {
+            val context = shellContext()
+            val audio = context.getSystemService(android.media.AudioManager::class.java)
+            val pm = context.packageManager
+            val cls = android.media.AudioPlaybackConfiguration::class.java
+            // getClientUid / getPlayerState are @SystemApi: reflection; PLAYER_STATE_STARTED = 2
+            val uidOf = cls.getMethod("getClientUid")
+            val stateOf = cls.getMethod("getPlayerState")
+            audio.activePlaybackConfigurations
+                .asSequence()
+                .filter { it.audioAttributes.usage == android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE }
+                .filter { (stateOf.invoke(it) as Int) == 2 }
+                .map { uidOf.invoke(it) as Int }
+                .filter { it >= android.os.Process.FIRST_APPLICATION_UID }
+                .flatMap { pm.getPackagesForUid(it).orEmpty().asSequence() }
+                .distinct()
+                .joinToString(",")
+        } catch (t: Throwable) {
+            fileLog("ringingApps failed: $t")
+            ""
+        }
 
     @Synchronized
     private fun startRecorderWatch() {
@@ -402,12 +641,12 @@ class CarInputServiceImpl(
     }
 
     /**
-     * 僵尸自清（治本，2026-10-16）：Shizuku 按「组件+进程名+版本(APK lastUpdateTime)」复用
-     * 常驻 UserService 进程。重装 APK 后旧版本进程既不受 force-stop 影响、Shizuku 也不回收；
-     * 而它创建的虚拟屏**只有它自己能释放**（releaseDisplay 只查本进程的 map）——表现为
-     * 「重启后检测到残留屏，点清理却释放 0/N」。本进程周期性比对「启动时读到的
-     * lastUpdateTime」与当前安装值：不一致即自身 dex 已过期，自尽交系统回收进程，
-     * 它持有的全部虚拟屏随之释放。
+     * Zombie self-reap (the real fix, 2026-10-16): Shizuku reuses the resident UserService process by
+     * "component + process name + version (APK lastUpdateTime)". After an APK reinstall the old-version process is
+     * unaffected by force-stop and Shizuku does not reap it, and the virtual displays it created **can only be released by itself**
+     * (releaseDisplay checks only its own map), shown as "leftover displays detected after restart, cleanup releases 0/N".
+     * This process periodically compares the "lastUpdateTime read at startup" with the currently installed value: a mismatch
+     * means its own dex is stale, so it exits and lets the system reap the process, releasing every virtual display it holds.
      */
     private val startupLastUpdateTime: Long =
         runCatching {
@@ -430,15 +669,16 @@ class CarInputServiceImpl(
                         context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
                     }.getOrDefault(-1L)
                 if (startupLastUpdateTime > 0 && now > 0 && now != startupLastUpdateTime) {
-                    // 物理屏若被我们置为 OFF，自尽前必须恢复：否则新版本进程还没起来，
-                    // 手机就停在一块「逻辑醒着、物理黑着」的屏上（按电源键两次才恢复）。
+                    // If we turned the physical panel OFF it must be restored before exiting: otherwise the new-
+                    // version process is not up yet
+                    // and the phone sits on a "logically awake, physically dark" screen (recoverable only by pressing the power key twice).
                     if (physicalScreenOff) {
-                        fileLog("stale self-reap: 恢复物理屏点亮（避免升级后停在黑屏）")
+                        fileLog("stale self-reap: restoring physical panel power (avoid a black screen after the upgrade)")
                         runCatching { setPhysicalScreenPower(true) }
                     }
                     fileLog(
-                        "stale self-reap: lastUpdateTime $startupLastUpdateTime -> $now，" +
-                            "exiting pid=${android.os.Process.myPid()}（其持有的虚拟屏随进程回收）",
+                        "stale self-reap: lastUpdateTime $startupLastUpdateTime -> $now, " +
+                            "exiting pid=${android.os.Process.myPid()} (virtual displays it holds are released with the process)",
                     )
                     android.os.Process.killProcess(android.os.Process.myPid())
                     return@Thread
@@ -460,7 +700,7 @@ class CarInputServiceImpl(
             try {
                 context.getSystemService(Context.INPUT_SERVICE) as? InputManager
             } catch (t: Throwable) {
-                Log.d(TAG, "probe getSystemService(INPUT_SERVICE) 异常", t)
+                Log.d(TAG, "probe getSystemService(INPUT_SERVICE) exception", t)
                 null
             }
         if (im != null) {
@@ -473,7 +713,7 @@ class CarInputServiceImpl(
             val m = findInjectMethod(cls.methods)
             if (m != null) return@lazy Injector(global, m)
         } catch (t: Throwable) {
-            Log.d(TAG, "probe InputManagerGlobal 异常", t)
+            Log.d(TAG, "probe InputManagerGlobal exception", t)
         }
         null
     }
@@ -505,10 +745,10 @@ class CarInputServiceImpl(
         return try {
             setDisplayIdMethod?.invoke(event, displayId)
             val m = inj.method
-            // 模式 0 = INJECT_INPUT_EVENT_MODE_ASYNC（scrcpy 同款）。曾用 2（WAIT_FOR_FINISH）：
-            // 每个事件都要等目标 App 处理完才返回——在 Google 地图上按住拖动转圈时地图每帧
-            // 重绘很重，MOVE 一个个排队，触摸读线程被拖住，表现为「拖不动、松手后地图自己
-            // 继续转」（2026-11-20 用户实测）。异步注入仍由 InputDispatcher 按序投递。
+            // Mode 0 = INJECT_INPUT_EVENT_MODE_ASYNC (same as scrcpy). Mode 2 (WAIT_FOR_FINISH) was used once:
+            // every event waited until the target app finished handling it. Holding and dragging on Google Maps (spinner)
+            // redraws the map heavily every frame, MOVEs queued up one by one and the touch reader thread was held back,
+            // showing as "can't drag, and after release the map keeps spinning on its own" (2026-11-20 user test).
             val result: Boolean =
                 when {
                     m.parameterTypes.size == 2 -> m.invoke(inj.receiver, event, INJECT_MODE_ASYNC) as Boolean
@@ -518,13 +758,13 @@ class CarInputServiceImpl(
                 }
             if (!result && !injectFailLogged) {
                 injectFailLogged = true
-                Log.d(TAG, "injectInputEvent 返回 false method=$m")
+                Log.d(TAG, "injectInputEvent returned false method=$m")
             }
             result
         } catch (t: Throwable) {
             if (!injectFailLogged) {
                 injectFailLogged = true
-                Log.d(TAG, "inject 异常 method=${inj.method}", t)
+                Log.d(TAG, "inject exception method=${inj.method}", t)
             }
             false
         } finally {
@@ -532,14 +772,14 @@ class CarInputServiceImpl(
         }
     }
 
-    /** KeyEvent 没有可复用的池化语义（recycle 已废弃），只有 MotionEvent 需要回收。 */
+    /** KeyEvent has no reusable pooling semantics (recycle is deprecated); only MotionEvent needs recycling. */
     private fun recycle(event: InputEvent) {
         (event as? MotionEvent)?.recycle()
     }
 
     /**
-     * 按键注入（iDrive 旋钮 → 方向键/确认键）：与触摸共用 injectInputEvent，
-     * 差别只是 event 换成 KeyEvent 且同样 setDisplayId 到目标虚拟屏。
+     * Key injection (iDrive knob -> D-pad/confirm key): shares injectInputEvent with touch;
+     * the only difference is the event is a KeyEvent, likewise setDisplayId'd to the target virtual display.
      */
     override fun keyEvent(
         displayId: Int,
@@ -579,7 +819,7 @@ class CarInputServiceImpl(
             e.setSource(InputDevice.SOURCE_TOUCHSCREEN)
             e
         } catch (t: Throwable) {
-            Log.d(TAG, "build MotionEvent 异常", t)
+            Log.d(TAG, "build MotionEvent exception", t)
             null
         }
 
@@ -657,20 +897,21 @@ class CarInputServiceImpl(
         return inject(up, displayId)
     }
 
-    // ---- 受信虚拟屏 ----
+    // ---- Trusted virtual display ----
 
-    // VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 << 30（@hide/@SystemApi，编译期不可引用，写原始值）
+    // VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 << 30 (@hide/@SystemApi, not referable at compile time, so the raw value is written)
     private val virtualDisplays = HashMap<Int, android.hardware.display.VirtualDisplay>()
 
-    // ---- IME 展示策略 ----
+    // ---- IME display policy ----
 
     /**
-     * 受信虚拟屏的 IME 策略默认是 FALLBACK——键盘被系统路由到手机默认屏，车机侧永远
-     * 看不到（2026-10-17 定谳，车机「设置」搜索框点击无键盘根因）。创建受信屏后显式
-     * 设 LOCAL 让键盘画进本屏、随合成流推给车机。
+     * A trusted virtual display's IME policy defaults to FALLBACK: the system routes the keyboard to the phone's default
+     * display and the car never sees it (pinned down 2026-10-17: why tapping the "Settings" search box showed no keyboard on the car).
+     * After creating a trusted display we explicitly set LOCAL so the keyboard is drawn on this display and streamed
+     * to the car with the composition.
      *
-     * 枚举值反射自 SystemApi 常量而非硬编码 0：厂商 ROM 有魔改枚举值的风险（2026-10-17
-     * 排查时按此防御；本机实测与 AOSP 一致 = 0）。读不到时回落 0 并记日志。
+     * The enum value is reflected from the SystemApi constant instead of hard-coding 0: vendor ROMs may tamper with the enum values
+     * (a defensive choice from the 2026-10-17 investigation; this phone matches AOSP = 0). If it cannot be read, fall back to 0 and log it.
      */
     private val imePolicyLocal: Int by lazy {
         val value =
@@ -680,7 +921,7 @@ class CarInputServiceImpl(
                     .getField("DISPLAY_IME_POLICY_LOCAL")
                     .getInt(null)
             } catch (t: Throwable) {
-                fileLog("DISPLAY_IME_POLICY_LOCAL 反射失败，回退 AOSP 值 0：$t")
+                fileLog("DISPLAY_IME_POLICY_LOCAL reflection failed, falling back to the AOSP value 0: $t")
                 0
             }
         fileLog("DISPLAY_IME_POLICY_LOCAL=$value")
@@ -688,9 +929,9 @@ class CarInputServiceImpl(
     }
 
     /**
-     * IWindowManager 代理（按方法名反射，不依赖 AIDL 事务号）。
-     * 该 ROM 上走 ServiceManager+Stub.asInterface；WindowManagerGlobal.getWindowManagerService
-     * 路径会致进程被杀（2026-10-17 实测），勿用。
+     * IWindowManager proxy (reflected by method name, independent of AIDL transaction numbers).
+     * On this ROM it goes through ServiceManager+Stub.asInterface; the WindowManagerGlobal.getWindowManagerService
+     * path gets the process killed (observed 2026-10-17), do not use it.
      */
     private val windowManagerProxy: Any? by lazy {
         try {
@@ -704,14 +945,15 @@ class CarInputServiceImpl(
                 .getMethod("asInterface", IBinder::class.java)
                 .invoke(null, binder)
         } catch (t: Throwable) {
-            fileLog("IWindowManager 反射失败（IME 策略将不生效）：$t")
+            fileLog("IWindowManager reflection failed (the IME policy will not take effect): $t")
             null
         }
     }
 
     /**
-     * 把受信虚拟屏的 IME 策略设为 LOCAL（键盘画进本屏）。
-     * 失败不影响主链路：最坏情况与改动前一致——键盘留在手机主屏、车机侧不可见。
+     * Sets a trusted virtual display's IME policy to LOCAL (keyboard drawn on this display).
+     * A failure does not affect the main path: worst case is the same as before the change, the keyboard stays on
+     * the phone's main display and is invisible on the car.
      */
     private fun applyImePolicyLocal(displayId: Int) {
         val proxy = windowManagerProxy ?: return
@@ -725,13 +967,13 @@ class CarInputServiceImpl(
                         .getMethod("getDisplayImePolicy", Integer.TYPE)
                         .invoke(proxy, displayId)
                 }.getOrNull()
-            fileLog("setDisplayImePolicy($displayId, LOCAL=$imePolicyLocal) ok, 读回=$readBack")
+            fileLog("setDisplayImePolicy($displayId, LOCAL=$imePolicyLocal) ok, read back=$readBack")
         } catch (t: Throwable) {
-            fileLog("setDisplayImePolicy($displayId, LOCAL=$imePolicyLocal) 失败：$t")
+            fileLog("setDisplayImePolicy($displayId, LOCAL=$imePolicyLocal) failed: $t")
         }
     }
 
-    /** 文件日志：shell 进程 logcat 被 HKS 加密，写 /data/local/tmp 供 adb 读取。 */
+    /** File log: logcat in the shell process is HKS-encrypted, so write to /data/local/tmp for adb to read. */
     private fun fileLog(message: String) {
         try {
             java.io.FileWriter("/data/local/tmp/carinput_svc.log", true).use { w ->
@@ -748,8 +990,8 @@ class CarInputServiceImpl(
         }
     }
 
-    // WrongConstant：flags 里的 TRUSTED/ALWAYS_UNLOCKED/OWN_DISPLAY_GROUP 是 @hide 常量
-    // （运行时可行性已真机实证），lint 的 IntDef 模型只认公开 API。
+    // WrongConstant: TRUSTED/ALWAYS_UNLOCKED/OWN_DISPLAY_GROUP in flags are @hide constants
+    // (runtime viability confirmed on a real device); lint's IntDef model only knows the public API.
     @android.annotation.SuppressLint("WrongConstant")
     override fun createDisplay(
         name: String,
@@ -761,41 +1003,45 @@ class CarInputServiceImpl(
     ): Int {
         return try {
             fileLog("createDisplay $name ${width}x$height@$dpi start")
-            // 关键：必须用「shell 包的 Context」——系统检查 packageName 与调用 uid(2000) 匹配，
-            // 用本 app 的 Context 会报 SecurityException('packageName must match the owner uid')
+            // Key point: the "shell package Context" must be used: the system checks that packageName matches the calling uid (2000),
+            // and the app's own Context throws SecurityException('packageName must match the owner uid')
             val shellContext =
                 try {
                     context.createPackageContext("com.android.shell", 0)
                 } catch (t: Throwable) {
-                    fileLog("createPackageContext(com.android.shell) 失败：$t，回退本 app context")
+                    fileLog("createPackageContext(com.android.shell) failed: $t, falling back to the app context")
                     context
                 }
             fileLog("ctx package=${shellContext.packageName}")
             val dm = shellContext.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
-            // VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6（@hide）：
-            // 不声明时应用看到 "-touch" 配置（无触摸设备）→ 部分应用（如头条）
-            // 切 TV/桌面式大头部布局（2026-10-11 实测：搜索区占满半屏的根因）。
+            // VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6 (@hide):
+            // when not declared, apps see a "-touch" configuration (no touch device) and some apps (e.g. Toutiao)
+            // switch to a TV/desktop-style layout with a huge header (2026-10-11 field test: root cause of the search
+            // area filling half the screen).
             //
-            // VIRTUAL_DISPLAY_FLAG_PUBLIC（公开 API = 1）必须随受信屏一起声明（2026-10-17 定谳）：
-            // 不声明时 DisplayDeviceInfo 带 FLAG_PRIVATE（owner=shell 2000），而 WMS.addWindow
-            // 的访问闸 displayContent.hasAccess(session.mUid) → Display.hasAccess 对私有屏只放行
-            // owner/system/root/UID-present——第三方输入法（uid 10xxx）的键盘窗口会被
-            // ADD_INVALID_DISPLAY(-9) 拒绝，永远加不进该屏（车机侧「设置」点搜索框无键盘的
-            // 最终根因：策略已 LOCAL、令牌已迁屏，IME 服务也 showWindow 了，但窗口加不进）。
-            // 公开化只放宽窗口访问；ROM 的「公开屏默认自动镜像」仅在未声明
-            // OWN_CONTENT_ONLY 时生效，我们已声明，不受影响。dock 屏不受信、无输入场景，
-            // 维持私有（也避免无关窗口挂上去）。
+            // VIRTUAL_DISPLAY_FLAG_PUBLIC (public API = 1) must be declared along with the trusted display (pinned down 2026-10-17):
+            // without it DisplayDeviceInfo carries FLAG_PRIVATE (owner=shell 2000), and the access gate of WMS.addWindow,
+            // displayContent.hasAccess(session.mUid) -> Display.hasAccess, lets only owner/system/root/UID-present into a private display,
+            // so a third-party IME's (uid 10xxx) keyboard window is refused with
+            // ADD_INVALID_DISPLAY(-9) and can never be added to this display (the final root cause of no keyboard when tapping the
+            // "Settings" search box on the car: policy already LOCAL, token already moved, IME service already called
+            // showWindow, yet the window cannot be added).
+            // Making it public only relaxes window access; the ROM's "public displays auto-mirror by default" applies only when
+            // OWN_CONTENT_ONLY is not declared, which we do declare, so it is unaffected. The dock display is untrusted and has no input
+            // scenario, so it stays private (this also keeps unrelated windows from attaching).
             val baseFlags =
                 (if (trusted) FLAG_TRUSTED or android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC else 0) or
                     FLAG_SUPPORTS_TOUCH or
                     FLAG_DESTROY_CONTENT_ON_REMOVAL or
                     android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
-            // 受信屏额外要「独立显示组 + 永远已解锁」：
-            //  · OWN_DISPLAY_GROUP：手机主屏休眠时虚拟屏不跟着休眠（物理屏断电后仍出帧）；
-            //  · ALWAYS_UNLOCKED：设备锁屏时该屏不画 Keyguard（否则车机看到锁屏/黑屏）。
-            // OWN_DISPLAY_GROUP 复用 ADD_TRUSTED_DISPLAY（受信屏本来就要）；ALWAYS_UNLOCKED
-            // 另需 ADD_ALWAYS_UNLOCKED_DISPLAY——部分 ROM 未授予 shell，带上会抛
-            // SecurityException 把整块屏打挂，因此逐级降级重试。
+            // Trusted displays additionally need "own display group + always unlocked":
+            //  - OWN_DISPLAY_GROUP: the virtual display does not sleep with the phone's main display (frames continue
+            //  after the panel is powered off);
+            //  - ALWAYS_UNLOCKED: when the device is locked this display does not draw Keyguard (otherwise the car
+            //  sees a lock screen/black).
+            // OWN_DISPLAY_GROUP reuses ADD_TRUSTED_DISPLAY (trusted displays need it anyway); ALWAYS_UNLOCKED
+            // also needs ADD_ALWAYS_UNLOCKED_DISPLAY, which some ROMs do not grant to shell and passing it throws
+            // SecurityException that kills the whole display, hence the stepwise degrade-and-retry.
             var vd: android.hardware.display.VirtualDisplay? = null
             if (trusted) {
                 vd =
@@ -807,10 +1053,10 @@ class CarInputServiceImpl(
                         dpi,
                         surface,
                         baseFlags or FLAG_OWN_DISPLAY_GROUP or FLAG_ALWAYS_UNLOCKED,
-                        "受信+独立组+ALWAYS_UNLOCKED",
+                        "trusted+own group+ALWAYS_UNLOCKED",
                     )
                 if (vd == null) {
-                    fileLog("$name 带 ALWAYS_UNLOCKED 失败——降级为独立组（ROM 可能未给 shell 该权限）")
+                    fileLog("$name with ALWAYS_UNLOCKED failed - degrading to own group (the ROM may not grant shell that permission)")
                     vd =
                         createVirtualDisplayAttempt(
                             dm,
@@ -820,21 +1066,22 @@ class CarInputServiceImpl(
                             dpi,
                             surface,
                             baseFlags or FLAG_OWN_DISPLAY_GROUP,
-                            "受信+独立组",
+                            "trusted+own group",
                         )
                 }
                 if (vd == null) {
-                    fileLog("$name 带 OWN_DISPLAY_GROUP 失败——回退基础 flags")
-                    vd = createVirtualDisplayAttempt(dm, name, width, height, dpi, surface, baseFlags, "受信基础")
+                    fileLog("$name with OWN_DISPLAY_GROUP failed - falling back to base flags")
+                    vd = createVirtualDisplayAttempt(dm, name, width, height, dpi, surface, baseFlags, "trusted base")
                 }
             } else {
-                // dock 屏（不受信）默认落在**默认显示组**：物理主屏断电/锁屏时整组跟着灭，
-                // 车机侧表现为「app 屏正常、dock 栏全黑」，解锁后恢复（2026-10-23 实测）。
-                // 与受信屏同款三级降级：组+解锁 → 组 → 基础。
-                //  · AOSP 只在 AUTO_MIRROR 时清掉 OWN_DISPLAY_GROUP，而 AUTO_MIRROR 只随
-                //    PUBLIC 自动置上；dock 没声明 PUBLIC，所以该 flag 会保留；
-                //  · 两者都只要求权限（ADD_TRUSTED_DISPLAY / ADD_ALWAYS_UNLOCKED_DISPLAY），
-                //    不改变 dock「不受信」的语义（第三方任务仍然上不去）。
+                // The dock display (untrusted) lands in the **default display group** by default: when the physical
+                // main display is powered off/locked the whole group goes dark,
+                // shown on the car as "app display fine, dock bar all black", recovering after unlock (2026-10-23 field test).
+                // Same three-step degradation as the trusted display: group+unlocked -> group -> base.
+                //  - AOSP clears OWN_DISPLAY_GROUP only with AUTO_MIRROR, and AUTO_MIRROR is set automatically only with
+                //    PUBLIC; the dock does not declare PUBLIC, so the flag is kept;
+                //  - both only require permissions (ADD_TRUSTED_DISPLAY / ADD_ALWAYS_UNLOCKED_DISPLAY) and
+                //    do not change the dock's "untrusted" semantics (third-party tasks still cannot get onto it).
                 vd =
                     createVirtualDisplayAttempt(
                         dm,
@@ -844,10 +1091,10 @@ class CarInputServiceImpl(
                         dpi,
                         surface,
                         baseFlags or FLAG_OWN_DISPLAY_GROUP or FLAG_ALWAYS_UNLOCKED,
-                        "非受信+独立组+ALWAYS_UNLOCKED",
+                        "untrusted+own group+ALWAYS_UNLOCKED",
                     )
                 if (vd == null) {
-                    fileLog("$name 带 ALWAYS_UNLOCKED 失败——降级为独立组（ROM 可能未给 shell 该权限）")
+                    fileLog("$name with ALWAYS_UNLOCKED failed - degrading to own group (the ROM may not grant shell that permission)")
                     vd =
                         createVirtualDisplayAttempt(
                             dm,
@@ -857,20 +1104,23 @@ class CarInputServiceImpl(
                             dpi,
                             surface,
                             baseFlags or FLAG_OWN_DISPLAY_GROUP,
-                            "非受信+独立组",
+                            "untrusted+own group",
                         )
                 }
                 if (vd == null) {
-                    fileLog("$name 带 OWN_DISPLAY_GROUP 失败——回退基础 flags（主屏断电时该屏会跟着休眠）")
-                    vd = createVirtualDisplayAttempt(dm, name, width, height, dpi, surface, baseFlags, "非受信")
+                    fileLog(
+                        "$name with OWN_DISPLAY_GROUP failed - falling back to base flags " +
+                            "(this display will sleep with the main display when it powers off)",
+                    )
+                    vd = createVirtualDisplayAttempt(dm, name, width, height, dpi, surface, baseFlags, "untrusted")
                 }
             }
             val created = vd
             val id = created?.display?.displayId ?: -1
             fileLog("createVirtualDisplay -> vd=$created id=$id")
-            // 读回校验（2026-10-23 荣耀实测）：flag 生效时 Display 层 flags 应带
-            // ALWAYS_UNLOCKED（1 << 9）——不带 OWN_DISPLAY_GROUP 时系统会静默剥掉
-            // ALWAYS_UNLOCKED（创建成功无异常但读回没有），必须靠读回才能发现。
+            // Read-back check (2026-10-23 Honor field test): when the flag takes effect the Display-layer flags should include
+            // ALWAYS_UNLOCKED (1 << 9); without OWN_DISPLAY_GROUP the system silently strips
+            // ALWAYS_UNLOCKED (creation succeeds with no exception but the read-back lacks it), so only a read-back can reveal it.
             if (id >= 0) {
                 val realFlags =
                     try {
@@ -880,8 +1130,8 @@ class CarInputServiceImpl(
                     }
                 val effective = (realFlags and 0x200) != 0
                 fileLog(
-                    "ALWAYS_UNLOCKED 读回 display.flags=0x${realFlags.toString(16)} -> " +
-                        if (effective) "生效" else "未生效（锁屏仍会影响该屏）",
+                    "ALWAYS_UNLOCKED read-back display.flags=0x${realFlags.toString(16)} -> " +
+                        if (effective) "in effect" else "not in effect (lock screen still affects this display)",
                 )
             }
             if (created == null || id < 0) {
@@ -889,8 +1139,8 @@ class CarInputServiceImpl(
                 return -1
             }
             synchronized(virtualDisplays) { virtualDisplays[id] = created }
-            // 只有受信屏能设 IME 策略（WMS 对非受信屏抛 SecurityException），且正需要它：
-            // dock 屏只承载自有 DockActivity，无输入场景
+            // Only trusted displays can set the IME policy (WMS throws SecurityException for untrusted ones), and they need it:
+            // the dock display hosts only its own DockActivity, no input scenario
             if (trusted) applyImePolicyLocal(id)
             Log.i(TAG, "createDisplay $name id=$id size=${width}x$height@$dpi")
             id
@@ -918,7 +1168,7 @@ class CarInputServiceImpl(
         }
     }
 
-    /** 助理包名 → uid 缓存（-1 = 未安装）。 */
+    /** Assistant package name -> uid cache (-1 = not installed). */
     private val assistantUids = HashMap<String, Int>()
 
     override fun isAssistantListening(): Boolean =
@@ -944,16 +1194,25 @@ class CarInputServiceImpl(
                 uid >= 0 && ASSISTANT_MIC_OPS.any { op -> runCatching { appOps.isOpActive(op, uid, pkg) }.getOrDefault(false) }
             }
         } catch (t: Throwable) {
-            fileLog("isAssistantListening 失败：$t")
+            fileLog("isAssistantListening failed: $t")
             false
+        }
+
+    override fun detachDisplaySurface(displayId: Int): Boolean =
+        synchronized(virtualDisplays) {
+            val display = virtualDisplays[displayId] ?: return@synchronized false
+            runCatching { display.setSurface(null) }
+                .onFailure { fileLog("detachDisplaySurface #$displayId failed: $it") }
+                .isSuccess
         }
 
     override fun releaseDisplay(displayId: Int): Boolean {
         val vd = synchronized(virtualDisplays) { virtualDisplays.remove(displayId) }
         if (vd == null) {
-            // 不在本进程 map：该屏由其它（旧版本）UserService 进程创建，只有创建者能释放。
-            // 应用侧兜底见 CarInputClient.reapStaleUserServices（杀持有进程）。
-            fileLog("releaseDisplay id=$displayId -> 非本进程持有（跨进程无法释放）")
+            // Not in this process's map: the display was created by another (old-version) UserService process, and
+            // only its creator can release it.
+            // The app-side fallback is CarInputClient.reapStaleUserServices (kills the holding process).
+            fileLog("releaseDisplay id=$displayId -> not held by this process (cannot be released across processes)")
             return false
         }
         return try {
@@ -966,7 +1225,10 @@ class CarInputServiceImpl(
         }
     }
 
-    /** 创建一次虚拟屏；失败（含 SecurityException / ROM 静默返回 null）返回 null 并留痕。 */
+    /**
+     * Creates a virtual display once; on failure (including SecurityException / ROM silently returning null) returns
+     * null and leaves a trace.
+     */
     private fun createVirtualDisplayAttempt(
         dm: android.hardware.display.DisplayManager,
         name: String,
@@ -981,16 +1243,16 @@ class CarInputServiceImpl(
             fileLog("createDisplay($name) $label flags=0x${flags.toString(16)}")
             dm.createVirtualDisplay(name, width, height, dpi, surface, flags, null, null)
         } catch (t: Throwable) {
-            fileLog("createDisplay($name) $label 异常：$t")
+            fileLog("createDisplay($name) $label exception: $t")
             null
         }
 
-    // ---- 物理主屏电源（真息屏；系统保持唤醒） ----
+    // ---- Physical main display power (true screen-off; the system stays awake) ----
 
     /**
-     * 对**物理主屏**做硬件级断电/点亮（同 scrcpy `-S/--turn-screen-off`）：
-     * 不按电源键（那会锁屏），而是直接调 SurfaceFlinger 的 setDisplayPowerMode。
-     * 系统仍认为屏幕亮着 → 不锁屏、不进 Doze，虚拟屏继续出帧。
+     * Hardware-level power off/on of the **physical main display** (same as scrcpy `-S/--turn-screen-off`):
+     * instead of pressing the power key (which locks the screen) it calls SurfaceFlinger's setDisplayPowerMode directly.
+     * The system still believes the screen is on -> no lock, no Doze, and virtual displays keep producing frames.
      */
     override fun setPhysicalScreenPower(on: Boolean): Boolean {
         val ok = setPanelPower(on)
@@ -1000,14 +1262,14 @@ class CarInputServiceImpl(
     }
 
     /**
-     * 面板电源统一核心（两套实现的合并点，2026-10-24）：
-     * token 三路枚举按「实测通过率」排序（任何 ROM 只要有一路可用就能工作）；
-     * 断电/点亮统一走 SurfaceControl.setDisplayPowerMode 反射。
+     * Core of panel power (merge point of two implementations, 2026-10-24):
+     * the three token paths are ordered by measured pass rate (any ROM works as long as one path is usable);
+     * power off/on all go through SurfaceControl.setDisplayPowerMode by reflection.
      */
     private fun setPanelPower(on: Boolean): Boolean {
         val token =
             physicalDisplayToken() ?: run {
-                fileLog("setPanelPower($on) 失败：各入口都拿不到内置屏 token")
+                fileLog("setPanelPower($on) failed: no entry point gave the built-in display token")
                 return false
             }
         val mode = if (on) POWER_MODE_NORMAL else POWER_MODE_OFF
@@ -1018,34 +1280,35 @@ class CarInputServiceImpl(
                 .invoke(null, token, mode)
             true
         } catch (t: Throwable) {
-            fileLog("setPanelPower($on) 失败：$t")
+            fileLog("setPanelPower($on) failed: $t")
             false
         }
     }
 
     /**
-     * 物理主屏 token，三路按序回退（不同 ROM 删改面不同，全试最稳）：
-     * ① SurfaceControl.getInternalDisplayToken——荣耀 A17（SDK 37）实测唯一可用，
-     *    放首位（MagicOS 保留了这条「更老」API）；
-     * ② DisplayControl 类加载器——SDK 34+ 的正统入口（scrcpy 同款：services.jar 里的
-     *    类要 ClassLoaderFactory + android_servers JNI 才可见）；
-     * ③ SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken——Android 11~14 旧入口。
-     * 首个物理屏 id 即内置屏（AOSP 约定数组首元素为默认屏）。
+     * Physical main display token, three paths tried in order (different ROMs remove different surfaces, trying all is the most robust):
+     * 1. SurfaceControl.getInternalDisplayToken: the only one that worked on Honor A17 (SDK 37),
+     *    put first (MagicOS kept this "older" API);
+     * 2. DisplayControl class loader: the canonical SDK 34+ entry (same as scrcpy: classes in services.jar
+     *    are visible only via ClassLoaderFactory + android_servers JNI);
+     * 3. SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken: the old Android 11~14 entry.
+     * The first physical display id is the built-in one (AOSP convention: the first array element is the default display).
      */
-    // BlockedPrivateApi/DEPRECATION：本方法刻意走隐藏/废弃 API（UserService 跑在 shell
-    // 域不受应用层 hidden API 强制约束；三路回退的运行时行为已真机实证）。
+    // BlockedPrivateApi/DEPRECATION: this method deliberately uses hidden/deprecated APIs (the UserService runs in the shell
+    // domain and is not bound by the app-layer hidden-API enforcement; the runtime behavior of the three paths is
+    // confirmed on a real device).
     @android.annotation.SuppressLint("BlockedPrivateApi")
     @Suppress("DEPRECATION")
     private fun physicalDisplayToken(): IBinder? {
-        // ① getInternalDisplayToken（部分 ROM 的 SurfaceControl 仍保留）
+        // 1. getInternalDisplayToken (still kept in SurfaceControl on some ROMs)
         runCatching {
             val sc = SurfaceControl::class.java
             (sc.getDeclaredMethod("getInternalDisplayToken").invoke(null) as? IBinder)?.let {
                 fileLog("token via getInternalDisplayToken")
                 return it
             }
-        }.onFailure { fileLog("getInternalDisplayToken 入口失败：${it.message}") }
-        // ② DisplayControl（新系统：方法已从 SurfaceControl 迁出）
+        }.onFailure { fileLog("getInternalDisplayToken entry failed: ${it.message}") }
+        // 2. DisplayControl (newer systems: the methods moved out of SurfaceControl)
         displayControlClass?.let { cls ->
             runCatching {
                 val ids = cls.getMethod("getPhysicalDisplayIds").invoke(null) as LongArray
@@ -1054,9 +1317,9 @@ class CarInputServiceImpl(
                     fileLog("token via DisplayControl id=$id")
                     return it
                 }
-            }.onFailure { fileLog("DisplayControl token 入口失败：${it.message}") }
+            }.onFailure { fileLog("DisplayControl token entry failed: ${it.message}") }
         }
-        // ③ getPhysicalDisplayIds/getPhysicalDisplayToken（Android 11~14）
+        // 3. getPhysicalDisplayIds/getPhysicalDisplayToken (Android 11~14)
         runCatching {
             val sc = SurfaceControl::class.java
             val ids = sc.getDeclaredMethod("getPhysicalDisplayIds").invoke(null) as LongArray
@@ -1065,11 +1328,11 @@ class CarInputServiceImpl(
                 fileLog("token via SurfaceControl.getPhysicalDisplayToken id=$id")
                 return it
             }
-        }.onFailure { fileLog("getPhysicalDisplayToken 入口失败：${it.message}") }
+        }.onFailure { fileLog("getPhysicalDisplayToken entry failed: ${it.message}") }
         return null
     }
 
-    /** DisplayControl 类加载器（真息屏用）：只运行在 Shizuku UserService（shell uid）里。 */
+    /** DisplayControl class loader (for true screen-off): runs only inside the Shizuku UserService (shell uid). */
     private val displayControlClass: Class<*>? by lazy {
         try {
             val factory = Class.forName("com.android.internal.os.ClassLoaderFactory")
@@ -1086,7 +1349,7 @@ class CarInputServiceImpl(
                 )
             val classpath = System.getenv("SYSTEMSERVERCLASSPATH")
             if (classpath.isNullOrEmpty()) {
-                fileLog("SYSTEMSERVERCLASSPATH 为空——无法加载 DisplayControl")
+                fileLog("SYSTEMSERVERCLASSPATH is empty - cannot load DisplayControl")
                 return@lazy null
             }
             val loader =
@@ -1101,21 +1364,21 @@ class CarInputServiceImpl(
                     null,
                 ) as ClassLoader
             val cls = loader.loadClass("com.android.server.display.DisplayControl")
-            // 静态 JNI 方法在 libandroid_servers.so 里注册；必须加载进这个 ClassLoader
+            // The static JNI methods are registered in libandroid_servers.so; it must be loaded into this ClassLoader
             registerAndroidServersLibrary(cls)
-            fileLog("DisplayControl 已就绪")
+            fileLog("DisplayControl ready")
             cls
         } catch (t: Throwable) {
-            fileLog("DisplayControl 加载失败（SDK ${Build.VERSION.SDK_INT}）：$t")
+            fileLog("DisplayControl load failed (SDK ${Build.VERSION.SDK_INT}): $t")
             null
         }
     }
 
     /**
-     * 把 libandroid_servers.so 的 JNI 注册进 [cls] 所在的 ClassLoader（scrcpy 同款路径）。
+     * Registers libandroid_servers.so's JNI into the ClassLoader of [cls] (same path as scrcpy).
      *
-     * 本类只运行在 Shizuku UserService（shell uid 2000 的 app_process），不受应用进程的
-     * hidden-API 限制；lint 的 BlockedPrivateApi 按 targetSdk 应用进程判定，故此处豁免。
+     * This class runs only in the Shizuku UserService (app_process of shell uid 2000) and is not subject to the app process's
+     * hidden-API restrictions; lint's BlockedPrivateApi judges by the targetSdk app process, hence the exemption here.
      */
     @SuppressLint("BlockedPrivateApi")
     private fun registerAndroidServersLibrary(cls: Class<*>) {
@@ -1142,53 +1405,53 @@ class CarInputServiceImpl(
     companion object {
         private const val TAG = "CarInputSvc"
 
-        /** InputManager.INJECT_INPUT_EVENT_MODE_ASYNC（@hide，AOSP 恒为 0）。 */
+        /** InputManager.INJECT_INPUT_EVENT_MODE_ASYNC (@hide, always 0 in AOSP). */
         private const val INJECT_MODE_ASYNC = 0
 
-        /** 自清巡检周期：重装 APK 后旧进程最迟约 15s 内自行退出（成本仅一次 PM 查询）。 */
+        /** Self-reap patrol period: after an APK reinstall the old process exits on its own within ~15s at most (cost: one PM query). */
         private const val STALE_CHECK_INTERVAL_MS = 15_000L
 
-        /** VIRTUAL_DISPLAY_FLAG_TRUSTED（@hide；AOSP 定义 = 1 << 10 = 0x400）。 */
-        /** 会弹语音助理浮层的应用：Google 应用（Gemini 浮层宿主）与独立 Gemini 应用。 */
+        /** VIRTUAL_DISPLAY_FLAG_TRUSTED (@hide; AOSP defines = 1 << 10 = 0x400). */
+        /** Apps that pop up the voice-assistant overlay: the Google app (Gemini overlay host) and the standalone Gemini app. */
         private val ASSISTANT_PACKAGES = listOf("com.google.android.googlequicksearchbox", "com.google.android.apps.bard")
 
-        /** 开麦相关 AppOp（字符串形式；hotword 为隐藏常量，按字符串传入同样有效）。 */
+        /** Mic-related AppOps (as strings; hotword is a hidden constant, but passing it as a string works just as well). */
         private val ASSISTANT_MIC_OPS = listOf("android:record_audio", "android:record_audio_hotword")
 
         private const val FLAG_TRUSTED = 1 shl 10
 
-        /** VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH（@hide；AOSP 定义 = 1 << 6 = 0x40）。 */
+        /** VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH (@hide; AOSP defines = 1 << 6 = 0x40). */
         private const val FLAG_SUPPORTS_TOUCH = 1 shl 6
 
         /**
-         * VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL（@hide；AOSP 定义 = 1 << 8 = 0x100）。
-         * 不声明时释放虚拟屏，系统把屏上的任务**搬到手机主屏**——每断开一次，手机最近任务里
-         * 就多一张地图/音乐卡（2026-11-18 用户实测）。声明后屏上任务随屏销毁（进程不杀，
-         * 导航/音乐的前台服务照常）。
+         * VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL (@hide; AOSP defines = 1 << 8 = 0x100).
+         * When not declared, releasing a virtual display makes the system **move its tasks to the phone's main display**, adding
+         * one map/music card to the phone's recents on every disconnect (2026-11-18 user test). When declared the tasks are destroyed
+         * with the display (the process is not killed; navigation/music foreground services carry on).
          */
         private const val FLAG_DESTROY_CONTENT_ON_REMOVAL = 1 shl 8
 
         /**
-         * VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP（@hide；AOSP 定义 = 1 << 11 = 0x800）。
-         * 虚拟屏进自己的 DisplayGroup：手机主屏休眠/断电时，它不跟着进入 OFF。
-         * 需要 ADD_TRUSTED_DISPLAY（受信屏本来就要）——见 DisplayManagerService 的校验。
+         * VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP (@hide; AOSP defines = 1 << 11 = 0x800).
+         * The virtual display joins its own DisplayGroup: when the phone's main display sleeps/powers off it does not go OFF with it.
+         * Needs ADD_TRUSTED_DISPLAY (trusted displays need it anyway); see the check in DisplayManagerService.
          */
         private const val FLAG_OWN_DISPLAY_GROUP = 1 shl 11
 
         /**
-         * VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED（@hide；AOSP 定义 = 1 << 12 = 0x1000）。
-         * 锁屏状态下该屏不显示 Keyguard。**另需 ADD_ALWAYS_UNLOCKED_DISPLAY**，
-         * 部分 ROM 未授予 shell——createDisplay 里必须能降级重试，否则整块屏创建失败。
+         * VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED (@hide; AOSP defines = 1 << 12 = 0x1000).
+         * While the device is locked this display does not show Keyguard. **Also needs ADD_ALWAYS_UNLOCKED_DISPLAY**,
+         * which some ROMs do not grant to shell; createDisplay must be able to degrade and retry, or the whole display fails to be created.
          */
         private const val FLAG_ALWAYS_UNLOCKED = 1 shl 12
 
-        /** SurfaceControl 显示电源模式：OFF=硬件断电，NORMAL=正常点亮。 */
+        /** SurfaceControl display power modes: OFF = hardware power off, NORMAL = lit normally. */
         private const val POWER_MODE_OFF = 0
         private const val POWER_MODE_NORMAL = 2
 
-        /** SurfaceControl 显示电源模式（@hide；AOSP 定义 OFF=0 / NORMAL=2，反射失败时兜底用）。 */
+        /** SurfaceControl display power modes (@hide; AOSP defines OFF=0 / NORMAL=2, used as a fallback when reflection fails). */
     }
 }
 
-/** 被注入的录音来源：MIC / VOICE_RECOGNITION / VOICE_COMMUNICATION / DEFAULT / UNPROCESSED。 */
+/** Injected recording sources: MIC / VOICE_RECOGNITION / VOICE_COMMUNICATION / DEFAULT / UNPROCESSED. */
 private val MIC_INJECT_PRESETS = intArrayOf(1, 6, 7, 0, 9)

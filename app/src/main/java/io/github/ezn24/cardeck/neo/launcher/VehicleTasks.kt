@@ -1,6 +1,6 @@
 package io.github.ezn24.cardeck.neo.launcher
 
-/** 两种系统 dump 标题都要支持；只取 Task 行，忽略 ActivityRecord 等嵌套重复。 */
+/** Both system dump headings must be supported; take only Task lines and ignore nested duplicates such as ActivityRecord. */
 internal fun parseTaskDisplays(dump: String): Map<Int, Map<String, List<String>>> {
     val display = Regex("""(?:Display #(\d+)|Display: mDisplayId=(\d+))""")
     val task = Regex("""Task\{[^\x7D\r\n]*?#(\d+)[^\x7D\r\n]*?\bA=\d+:([A-Za-z0-9_.]+)(?=\s|:|\x7D)""")
@@ -8,10 +8,10 @@ internal fun parseTaskDisplays(dump: String): Map<Int, Map<String, List<String>>
     val out = linkedMapOf<Int, MutableMap<String, MutableSet<String>>>()
     for (line in dump.lineSequence()) {
         display.find(line)?.let { id = (it.groupValues[1].ifEmpty { it.groupValues[2] }).toInt() }
-        // 只认任务条目行（「* Task{」）。同一段 dump 里还有 mLastFocusedRootTask=Task{…}、
-        // mPreferredTopFocusableRootTask=Task{…}、task=Task{…} 之类的**引用字段**，任务关掉后
-        // 仍保留旧值——当成任务会让「背景应用」误判关不掉（2026-11-17 三星录音机：
-        // removeTask 回「No task with id」而清单里一直还有它）。
+        // Accept only task entry lines ("* Task{"). The same dump also has **reference fields** such as mLastFocusedRootTask=Task{...},
+        // mPreferredTopFocusableRootTask=Task{...} and task=Task{...} that keep stale values after the task is closed
+        // - treating them as tasks makes "background apps" wrongly think a task cannot be closed (2026-11-17 Samsung voice recorder:
+        // removeTask returned "No task with id" while the list still showed it).
         if (!line.trimStart().startsWith("* Task{")) continue
         val match = task.find(line) ?: continue
         if (id < 0) continue
@@ -20,7 +20,7 @@ internal fun parseTaskDisplays(dump: String): Map<Int, Map<String, List<String>>
     return out.mapValues { (_, apps) -> apps.mapValues { it.value.toList() } }
 }
 
-/** 手机主屏与 CarDeck 自身永远不能成为关闭目标。 */
+/** The phone main screen and CarDeck itself can never become a close target. */
 internal fun vehicleTasks(
     snapshot: Map<Int, Map<String, List<String>>>,
     displays: Set<Int>,
@@ -33,4 +33,26 @@ internal fun vehicleTasks(
         }
     }
     return result.mapValues { it.value.toList() }
+}
+
+/** Prefer the exact previous task. An unrelated map opened on the phone is never a car task. */
+internal fun findMapTask(
+    snapshot: Map<Int, Map<String, List<String>>>,
+    pkg: String,
+    target: Int,
+    vehicleDisplays: List<Int>,
+    remembered: String?,
+): Pair<String, Int>? {
+    val rememberedId = remembered?.takeIf { it.startsWith("$pkg:") }?.substringAfter(':')
+    if (rememberedId?.toIntOrNull() != null) {
+        for ((display, apps) in snapshot) {
+            if (rememberedId in apps[pkg].orEmpty()) return rememberedId to display
+        }
+    }
+    for (display in listOf(target) + vehicleDisplays) {
+        if (display <= 0) continue
+        val id = snapshot[display]?.get(pkg)?.firstOrNull()
+        if (id != null) return id to display
+    }
+    return null
 }

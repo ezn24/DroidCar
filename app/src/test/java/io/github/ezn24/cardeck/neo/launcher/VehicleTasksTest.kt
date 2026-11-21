@@ -51,7 +51,7 @@ class VehicleTasksTest {
     }
 
     @Test fun staleTaskReferenceFieldsAreNotOpenTasks() {
-        // 关掉的任务仍可能留在 mLastFocusedRootTask 等字段里，不能算「还开着」
+        // A closed task may still linger in fields like mLastFocusedRootTask; it must not count as "still open"
         val parsed =
             parseTaskDisplays(
                 """
@@ -68,5 +68,17 @@ class VehicleTasksTest {
     @Test fun malformedOutputCannotInventTaskTargets() {
         assertTrue(parseTaskDisplays("Permission denied").isEmpty())
         assertTrue(parseTaskDisplays("Task{abc #10 type=standard A=1000:com.example.app U=0}").isEmpty())
+    }
+
+    @Test
+    fun reconnectSelectsTheSameMapTaskEvenWhenAnotherTaskIsOnTheCar() {
+        val snapshot =
+            mapOf(
+                0 to mapOf("com.example.map" to listOf("43", "45")),
+                159 to mapOf("com.example.map" to listOf("62")),
+            )
+        assertEquals("45" to 0, findMapTask(snapshot, "com.example.map", 159, listOf(159), "com.example.map:45"))
+        assertEquals("62" to 159, findMapTask(snapshot, "com.example.map", 159, listOf(159), "com.example.map:90"))
+        assertEquals(null, findMapTask(snapshot, "com.example.map", 160, listOf(160), "different.package:43"))
     }
 }

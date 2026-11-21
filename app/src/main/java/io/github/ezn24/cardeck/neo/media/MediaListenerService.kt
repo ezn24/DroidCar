@@ -8,15 +8,15 @@ import android.service.notification.NotificationListenerService
 import io.github.ezn24.cardeck.neo.launcher.VirtualLauncher
 
 /**
- * 通知监听服务：借通知使用权枚举系统活跃媒体会话，向应用提供「正在播放」状态
- * （歌名/歌手/播放中）。音乐卡片（仪表盘）据此渲染与控制。
+ * Notification listener service: uses notification access to enumerate active system media sessions and
+ * expose "now playing" state (title/artist/playing) to the app. The dashboard music card renders from it.
  *
- * **为什么必须有通知使用权**：`MediaSessionManager.getActiveSessions()` 在未授权时
- * 仍会返回会话（所以播放状态拿得到），但 `metadata` 恒为 null——表现为「播放状态在变、
- * 歌名歌手却始终为空」。这个组合最容易误判成解析 bug，实际是权限没给（2026-10-18 实测）。
+ * **Why notification access is required**: without it `MediaSessionManager.getActiveSessions()`
+ * still returns sessions (so playback state is readable) but `metadata` is always null. The symptom is
+ * "playback state changes, title/artist stay empty", easily mistaken for a parsing bug (2026-10-18).
  *
- * 授权路径：系统设置「通知使用权」，或 Shizuku（shell）执行
- * `cmd notification allow_listener <本组件>`（见 [NotificationAccess]）。
+ * Grant path: system settings "Notification access", or Shizuku (shell) running
+ * `cmd notification allow_listener <this component>` (see [NotificationAccess]).
  */
 class MediaListenerService : NotificationListenerService() {
     companion object {
@@ -26,18 +26,32 @@ class MediaListenerService : NotificationListenerService() {
     override fun onNotificationPosted(sbn: android.service.notification.StatusBarNotification) {
         io.github.ezn24.cardeck.neo.notifications.NotificationBannerController
             .post(this, sbn)
+        // Turn-by-turn for the head unit's cluster (no-op unless a car subscribed to route guidance)
+        runCatching {
+            io.github.ezn24.cardeck.neo.nav.MapsNotificationSource
+                .onPosted(this, sbn)
+        }
+        // Incoming / ongoing calls for the car's call card
+        runCatching {
+            io.github.ezn24.cardeck.neo.call.CallState
+                .onPosted(sbn)
+        }
     }
 
     override fun onNotificationRemoved(sbn: android.service.notification.StatusBarNotification) {
         io.github.ezn24.cardeck.neo.notifications.NotificationBannerController
             .remove(sbn.key)
+        io.github.ezn24.cardeck.neo.nav.MapsNotificationSource
+            .onRemoved(sbn)
+        io.github.ezn24.cardeck.neo.call.CallState
+            .onRemoved(sbn)
     }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
-        // 已连上即代表系统认可本应用的通知使用权（此时 metadata 才会可读）。
-        // 两个状态都置位：NotificationAccess 供「是否要再试授权」判断，
-        // MediaSessionsState 供 UI 文案区分「没在播放」与「读不到信息」。
+        // Connected means the system accepts our notification access (metadata is readable now).
+        // Set both states: NotificationAccess uses it to decide whether to retry granting,
+        // MediaSessionsState lets the UI tell "not playing" from "cannot read info".
         NotificationAccess.markGranted()
         NotificationAccess.markConnected()
         MediaSessionsState.accessGranted = true
@@ -49,8 +63,17 @@ class MediaListenerService : NotificationListenerService() {
             MediaSessionsState.resyncHook = { mainHandler.post { refresh() } }
             update(manager.getActiveSessions(componentName(this)))
             mainHandler.post(periodicRefresh)
+            io.github.ezn24.cardeck.neo.call.CallState
+                .attach(this)
+            // A call already in progress when the listener (re)binds
+            runCatching {
+                activeNotifications?.forEach {
+                    io.github.ezn24.cardeck.neo.call.CallState
+                        .onPosted(it)
+                }
+            }
         } catch (_: SecurityException) {
-            // 通知使用权被撤销：静默（授权后系统会重新绑定本服务）
+            // Notification access revoked: stay silent (the system rebinds the service after re-grant)
             MediaSessionsState.accessGranted = false
         }
     }
@@ -59,10 +82,12 @@ class MediaListenerService : NotificationListenerService() {
         super.onListenerDisconnected()
         MediaSessionsState.accessGranted = false
         NotificationAccess.markDisconnected()
-        // 必须清空：否则卡片会保留断开前的歌名/播放状态，出现「正在播放 + 未在播放」
-        // 甚至「正在播放 + 无法读取播放信息」的自相矛盾显示（2026-10-19 实测：
-        // 重装后监听器未被系统绑定，卡片长时间停在旧状态）。
+        // Must clear: otherwise the card keeps the pre-disconnect title/state, giving contradictory
+        // displays such as "playing + not playing" or "playing + cannot read info" (2026-10-19:
+        // after reinstall the listener was not bound by the system and the card stayed stale).
         MediaSessionsState.publish(null)
+        io.github.ezn24.cardeck.neo.call.CallState
+            .clear()
         watched.clear()
     }
 
@@ -82,17 +107,18 @@ class MediaListenerService : NotificationListenerService() {
             update(controllers ?: emptyList())
         }
 
-    /** 已注册播放回调的会话（避免重复注册）。 */
+    /** Sessions with a playback callback registered (avoids duplicate registration). */
     private val watched = HashSet<android.media.session.MediaSession.Token>()
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /**
-     * 兜底轮询：部分播放器不触发回调/回调丢失时保证卡片信息更新。
+     * Fallback polling: keeps the card current for players that fire no callbacks or lose them.
      *
-     * 只在**车机会话期间**每秒真轮询（音乐卡只在车机上显示）。此前只要有通知使用权就
-     * 全天每秒 getActiveSessions + 反序列化 metadata（含封面），没连车也照跑；
-     * 会话外改为每 5s 只看一眼会话是否开始（不碰 binder），播放回调照常推送。
+     * Real 1 Hz polling only **during a car session** (the music card only shows on the car). Previously,
+     * whenever notification access existed it ran getActiveSessions + metadata deserialization (with
+     * cover art) every second all day, even with no car; outside sessions it now only checks every 5s
+     * whether a session started (no binder), while playback callbacks still push as usual.
      */
     private val periodicRefresh =
         object : Runnable {
@@ -105,17 +131,17 @@ class MediaListenerService : NotificationListenerService() {
             }
         }
 
-    /** 上次封面提取键（会话+歌名+封面 uri）——getBitmap 每次反序列化，1s 轮询不能重复做。 */
+    /** Last cover extraction key (session+title+cover uri); getBitmap deserializes each time, so 1s polling must not repeat it. */
     private var lastArtKey: String? = null
 
-    /** 封面位图缓存（键不变时复用同一实例，保证 NowPlaying 的 equals 判稳）。 */
+    /** Cover bitmap cache (reuses the same instance while the key is unchanged, keeping NowPlaying equals stable). */
     private var cachedArt: android.graphics.Bitmap? = null
 
-    /** 上次「键匹配但封面为空」的时刻：切歌瞬间 metadata 常不完整（歌名先到、
-     *  封面字段滞后），空结果只保持 2 秒，之后重试直到封面就绪。 */
+    /** Last time of "key matched but cover empty": right after a track change metadata is often
+     *  incomplete (title first, cover field lagging), so an empty result is kept only 2s, then retried until the cover is ready. */
     private var artEmptyAt = 0L
 
-    /** 封面 uri 解码专用单线程（串行；主线程不能做 IO/解码）。 */
+    /** Dedicated single thread for cover uri decoding (serial; the main thread must not do IO/decoding). */
     private val artExecutor =
         java.util.concurrent.Executors.newSingleThreadExecutor { r ->
             Thread(r, "media-art").apply { isDaemon = true }
@@ -141,7 +167,7 @@ class MediaListenerService : NotificationListenerService() {
         refresh()
     }
 
-    /** 从活跃会话提取正在播放态：优先 PLAYING 的会话，否则保留第一个有元数据的。 */
+    /** Extract the now-playing state from active sessions: prefer a PLAYING session, else keep the first with metadata. */
     private fun refresh() {
         val controllers =
             try {
@@ -165,6 +191,7 @@ class MediaListenerService : NotificationListenerService() {
                         meta?.getString(MediaMetadata.METADATA_KEY_ARTIST)
                             ?: meta?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST),
                     playing = playing,
+                    album = meta?.getString(MediaMetadata.METADATA_KEY_ALBUM),
                     art = artFor(controller, meta, title),
                     pkg = controller.packageName,
                     positionMs = state?.position ?: 0L,
@@ -177,8 +204,8 @@ class MediaListenerService : NotificationListenerService() {
     }
 
     /**
-     * 封面提取（带缓存）：仅「会话+歌名+封面 uri」变化时重新提取——位图键直接从
-     * metadata 取；uri 型封面（content:// 等）经后台线程解码，完成前先给无封面态。
+     * Cover extraction (cached): re-extract only when "session+title+cover uri" changes. Bitmap keys come
+     * straight from metadata; uri covers (content:// etc.) decode on a background thread, with a no-cover state until done.
      */
     private fun artFor(
         controller: android.media.session.MediaController,
@@ -192,8 +219,8 @@ class MediaListenerService : NotificationListenerService() {
         val now = android.os.SystemClock.elapsedRealtime()
         if (key == lastArtKey) {
             if (cachedArt != null) return cachedArt
-            // 键没变但封面为空：2 秒内不重试（getBitmap 有成本），超后重提取——
-            // app 在切歌后补封面（bitmap 键从无到有）靠这条路兜住
+            // Key unchanged but cover empty: no retry within 2s (getBitmap has a cost); after that re-extract,
+            // which covers apps that add the cover after the track change (bitmap key goes from absent to present)
             if (now - artEmptyAt < 2_000) return null
         }
         lastArtKey = key
@@ -208,7 +235,7 @@ class MediaListenerService : NotificationListenerService() {
         }
         artEmptyAt = now
         if (artUri != null) {
-            // 解码在专用线程；就绪后不主动 refresh——periodicRefresh 下一轮（≤1s）拉取
+            // Decoding runs on the dedicated thread; no refresh once ready, periodicRefresh picks it up next round (<=1s)
             artExecutor.execute {
                 val bmp =
                     runCatching {
@@ -228,7 +255,7 @@ class MediaListenerService : NotificationListenerService() {
         return null
     }
 
-    /** 封面缩到 ≤512px（卡片显示 ~120dp，控制内存）。 */
+    /** Cover downscaled to <=512px (the card shows ~120dp; keeps memory down). */
     private fun scaleArt(src: android.graphics.Bitmap): android.graphics.Bitmap {
         val maxSide = maxOf(src.width, src.height)
         if (maxSide <= 512) return src
@@ -239,24 +266,25 @@ class MediaListenerService : NotificationListenerService() {
     }
 }
 
-/** 全局「正在播放」状态（本进程内共享；GridActivity 音乐卡监听渲染）。 */
+/** Global "now playing" state (shared in this process; the GridActivity music card listens and renders). */
 object MediaSessionsState {
     data class NowPlaying(
         val title: String?,
         val artist: String?,
         val playing: Boolean,
+        val album: String? = null,
         val art: android.graphics.Bitmap? = null,
-        /** 媒体会话所属应用（点击封面拉回正在播放的应用）。 */
+        /** App owning the media session (tapping the cover brings the playing app back). */
         val pkg: String? = null,
-        /** 采样时刻的播放位置（ms）。 */
+        /** Playback position at the sampling instant (ms). */
         val positionMs: Long = 0L,
-        /** 播放速度（暂停时 0——不外推）。 */
+        /** Playback speed (0 while paused, so no extrapolation). */
         val playbackSpeed: Float = 1f,
         val durationMs: Long = 0L,
-        /** 位置采样的 SystemClock.elapsedRealtime 锚点。 */
+        /** Anchor of the position sample in SystemClock.elapsedRealtime. */
         val anchoredAtMs: Long = 0L,
     ) {
-        /** 渲染时刻的推算播放位置（播放中按速度外推，钳制在时长内）。 */
+        /** Estimated position at render time (extrapolated by speed while playing, clamped to the duration). */
         fun displayPositionAt(elapsedRealtimeMs: Long): Long {
             if (durationMs <= 0) return 0
             val base =
@@ -274,11 +302,11 @@ object MediaSessionsState {
         private set
 
     /**
-     * 通知使用权是否已授予。
+     * Whether notification access has been granted.
      *
-     * **未授权时 `metadata` 恒为 null**（会话本身仍可见、播放状态照常变化），
-     * 卡片必须据此区分「真的没在播放」与「有播放但读不到信息」，
-     * 否则文案会误导成「媒体信息未连接」。
+     * **Without it `metadata` is always null** (the session is still visible and playback state still changes),
+     * so the card must tell "really not playing" from "playing but info unreadable";
+     * otherwise the text would misleadingly say "media info not connected".
      */
     @Volatile
     var accessGranted: Boolean = false
@@ -293,11 +321,26 @@ object MediaSessionsState {
         listeners.remove(listener)
     }
 
+    /**
+     * Notified on every publish, including position-only refreshes that [addListener] skips: the head-unit
+     * now-playing feed (CarNowPlaying) needs them to notice seeks and does its own diffing.
+     */
+    private val rawListeners = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
+
+    fun addRawListener(listener: () -> Unit) {
+        rawListeners.add(listener)
+    }
+
+    fun removeRawListener(listener: () -> Unit) {
+        rawListeners.remove(listener)
+    }
+
     fun publish(value: NowPlaying?) {
         val old = nowPlaying
         nowPlaying = value
-        // 位置每秒都在变（1s 兜底轮询）——日志只看内容键，避免刷屏；
-        // listeners 仍每次通知（UI 据此刷新进度文本）
+        rawListeners.forEach { runCatching { it() } }
+        // Position changes every second (1s fallback polling); log only the content key to avoid spam;
+        // listeners are still notified each time (the UI refreshes the progress text from it)
         val contentChanged =
             old?.title != value?.title ||
                 old?.artist != value?.artist ||
@@ -307,17 +350,18 @@ object MediaSessionsState {
             VirtualLauncher.logSink?.invoke(
                 "MEDIA: " + (
                     value?.let { "${it.title ?: "?"} - ${it.artist ?: "?"} playing=${it.playing}" }
-                        ?: "无活跃会话"
+                        ?: "no active session"
                 ),
             )
         }
-        // 内容未变（仅位置锚点随轮询更新）不通知：进度走秒由 UI 侧 mediaTick 每秒自刷新
-        // ——此前 anchoredAtMs 恒变导致每秒全量通知监听者，与 mediaTick 形成双路重复渲染
+        // No notification when content is unchanged (only the position anchor moved with polling); progress ticking is self-refreshed by
+        // the UI mediaTick each second
+        // (previously a constantly changing anchoredAtMs notified all listeners every second, double-rendering with mediaTick)
         if (!contentChanged) return
         listeners.forEach { runCatching { it() } }
     }
 
-    /** 重同步钩子（服务连接时安装）：UI 乐观更新后调用以拉取真实状态。 */
+    /** Resync hook (installed when the service connects): call after an optimistic UI update to pull the real state. */
     @Volatile
     var resyncHook: (() -> Unit)? = null
 

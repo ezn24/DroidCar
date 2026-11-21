@@ -25,18 +25,22 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
 import io.github.ezn24.cardeck.neo.bt.AdapterMode
 import io.github.ezn24.cardeck.neo.bt.BtProfiles
 import io.github.ezn24.cardeck.neo.bt.TargetDevicePrefs
 import io.github.ezn24.cardeck.neo.input.TouchRouter
+import io.github.ezn24.cardeck.neo.launcher.AssistiveDot
 import io.github.ezn24.cardeck.neo.launcher.VirtualLauncher
 import io.github.ezn24.cardeck.neo.launcher.settings.AppOrientationCompat
+import io.github.ezn24.cardeck.neo.launcher.settings.DisplayPrefs
 import io.github.ezn24.cardeck.neo.legal.DisclaimerDialog
 import io.github.ezn24.cardeck.neo.legal.DisclaimerPrefs
 import io.github.ezn24.cardeck.neo.legal.needsDisclaimerAtLaunch
 import io.github.ezn24.cardeck.neo.media.NotificationAccess
+import io.github.ezn24.cardeck.neo.nav.NavAccessibilityAccess
 import io.github.ezn24.cardeck.neo.service.CarPlayService
 import io.github.ezn24.cardeck.neo.shizuku.CarInputClient
 import io.github.ezn24.cardeck.neo.shizuku.Shell
@@ -52,15 +56,15 @@ import io.github.ezn24.cardeck.neo.util.LogExporter
 import java.util.Locale
 
 /**
- * 手机侧界面（Material 3 暗色重构，设计稿 design/phone-ui-proto.html）：
- * 英雄卡承载连接状态与主操作；连接准备清单化；Shell 状态与日志折叠收纳。
- * 会话管线（对象、日志缓冲）全部由 [SessionController] 持有——Activity 只是挂屏：
- * 销毁重建不影响会话，重进界面日志自动续显；连接状态由 1s 轮询对账。
+ * Phone-side UI (Material 3 dark rework, design mock design/phone-ui-proto.html):
+ * the hero card carries connection state and the primary action; connection prerequisites are a checklist; Shell state and logs are collapsed.
+ * The session pipeline (objects, log buffer) is owned entirely by [SessionController]; the Activity only attaches to it:
+ * destroy/recreate does not affect the session, logs resume on re-entry, and connection state is reconciled by a 1s poll.
  */
 class MainActivity : AppCompatActivity() {
     private enum class HeroState { IDLE, CONNECTING, CONNECTED }
 
-    /** 连接中的默认副标题（无阶段提示时）。 */
+    /** Default subtitle while connecting (when there is no phase hint). */
     private companion object {
         val DEFAULT_CONNECTING_HINT get() =
             UiStrings.text(
@@ -68,13 +72,13 @@ class MainActivity : AppCompatActivity() {
             )
         const val KEY_DISCLAIMER_DEADLINE = "disclaimer_deadline"
 
-        /** 底部导航分页（深浅色切换会重建 Activity，分页随 savedState 恢复）。 */
+        /** Bottom-nav page (a light/dark switch recreates the Activity; the page is restored from savedState). */
         const val KEY_TAB = "main_tab"
         const val TAB_CONNECT = 0
         const val TAB_CAR = 1
         const val TAB_DIAG = 2
 
-        /** 壁纸横条里「从相册」选项的键（不是真实来源）。 */
+        /** Key of the "From gallery" option in the wallpaper strip (not a real source). */
         const val PICK_KEY = "pick"
     }
 
@@ -113,29 +117,29 @@ class MainActivity : AppCompatActivity() {
     private lateinit var snackbar: TextView
     private lateinit var appVersionFooter: TextView
 
-    // ---- 英雄卡状态机（1s 轮询 SessionController 对账）----
+    // ---- Hero card state machine (reconciled against SessionController by a 1s poll) ----
     private var heroState: HeroState? = null
     private var connectedAt = 0L
     private var hubBlink: ObjectAnimator? = null
 
-    // 启动残留屏检查进行中（英雄卡显示「检查中」）；发现的残留暂缓清理时
-    // 记在 pendingResidualDisplays，状态旁的「清理残留屏」按钮可再次发起
+    // Startup residual-display check in progress (hero card shows "checking"); residuals whose cleanup was deferred
+    // are kept in pendingResidualDisplays, and the "clean up residual displays" button next to the status can retrigger it
     private var startupCheckRunning = false
     private var pendingResidualDisplays: List<Pair<Int, String>>? = null
 
-    // 英雄卡实时帧率：1s 轮询对 VideoSender 已发帧计数取差值
+    // Live hero-card frame rate: the 1s poll diffs VideoSender's sent-frame counter
     private var lastSentFrames = 0L
 
-    /** 免责声明倒计时截止时刻（elapsedRealtime；旋转重建后透传，不重新计时）。 */
+    /** Disclaimer countdown deadline (elapsedRealtime; carried across rotation recreate, not restarted). */
     private var disclaimerDeadlineAt = 0L
 
     private var activeDisclaimer: androidx.appcompat.app.AlertDialog? = null
 
-    /** Shizuku 授权结果监听（onDestroy 必须注销，否则跨 Activity 泄漏）。 */
+    /** Shizuku permission result listener (must be unregistered in onDestroy, otherwise it leaks across Activities). */
     private var shizukuPermissionListener:
         rikka.shizuku.Shizuku.OnRequestPermissionResultListener? = null
 
-    /** 用户在「请求授权」引导里点了主操作：授权成功后自动继续连接流程。 */
+    /** The user took the primary action in the "request permission" guidance: continue the connect flow automatically once granted. */
     private var pendingShizukuThenConnect = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -149,13 +153,13 @@ class MainActivity : AppCompatActivity() {
         }
 
     /**
-     * 挂屏注册：日志续显（含划掉界面重进时已有会话的历史日志）+ SSID 回填。
+     * Attach registration: log resume (including history of an existing session when re-entering after swiping the UI away) + SSID backfill.
      */
     private val uiHintSinkRef: (String) -> Unit = { message ->
         runOnUiThread { if (!isFinishing && !isDestroyed) snack(message, 6_000L) }
     }
 
-    /** 当前打开的「加入热点」确认弹窗：取消连接时联动关闭（触发流程中止）。 */
+    /** The currently open "join hotspot" confirmation dialog: closed together with cancel-connect (which aborts the flow). */
     private var wifiJoinDialog: androidx.appcompat.app.AlertDialog? = null
 
     private val logListener: (String) -> Unit = { line ->
@@ -170,26 +174,26 @@ class MainActivity : AppCompatActivity() {
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            log("BLUETOOTH_CONNECT 授权: $granted")
+            log("BLUETOOTH_CONNECT permission: $granted")
             if (granted && pendingStartAfterBtPermission.compareAndSet(true, false)) {
-                // 授权期间 Shizuku 可能被停掉：这里同样走前置检查
+                // Shizuku may have been stopped during the grant: run the same precheck here
                 ensureShizukuReady { showAudioChoiceDialog() }
             }
         }
 
-    /** 蓝牙权限授权后自动继续启动连接。 */
+    /** Continue starting the connection automatically after the Bluetooth permission is granted. */
     private val pendingStartAfterBtPermission =
         java.util.concurrent.atomic
             .AtomicBoolean(false)
 
-    /** 相册选图写入的槽位（深色 / 浅色）。 */
+    /** Slot (dark / light) that the gallery-picked image is written to. */
     private var pendingWallpaperSlot = WallpaperStore.Slot.DARK
 
-    /** 车机壁纸选择（Photo Picker；无需存储权限）。选中即持久化并通知合成器换图。 */
+    /** Head-unit wallpaper picker (Photo Picker; no storage permission needed). The pick is persisted and the compositor is told to swap the image. */
     private val wallpaperPicker =
         registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
             if (uri == null) {
-                log("WALLPAPER: 未选择图片")
+                log("WALLPAPER: no image selected")
                 return@registerForActivityResult
             }
             val slot = pendingWallpaperSlot
@@ -198,7 +202,7 @@ class MainActivity : AppCompatActivity() {
                     .setFromUri(this, uri, slot)
             if (ok) buildWallpaperStrips()
             log(
-                "WALLPAPER: ${if (ok) "壁纸已更新（会话进行中约 1 秒内上车；下次连接自动生效）" else "保存失败"}",
+                "WALLPAPER: ${if (ok) "wallpaper updated (reaches the car within ~1s during a session; otherwise applies on next connect)" else "save failed"}",
             )
             if (ok) {
                 snack(
@@ -215,9 +219,9 @@ class MainActivity : AppCompatActivity() {
 
     private val audioPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            log("MODE: RECORD_AUDIO 授权: $granted（音频通道需要）")
-            // 录音授权与投屏授权必须**依次**弹：同时发起时两个系统弹窗叠在一起，
-            // 先出现的那个会在另一个弹出时跳动/移位（用户长期反馈的「弹窗动一下」）
+            log("MODE: RECORD_AUDIO permission: $granted (needed by the audio channel)")
+            // The audio-recording and screen-capture grants must be requested one after the other: if both system dialogs
+            // are raised at once they stack and the first one jumps/shifts when the other appears (the long-reported "dialog jitter")
             launchProjectionConsent()
         }
 
@@ -227,8 +231,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 申请车机侧声音所需授权。Shizuku 就绪时走 [SilentProjectionActivity]（appops 放行，
-     * 与「上车自动连接」同一路径）——不弹任何系统窗；否则依次弹录音 → 投屏两个系统授权。
+     * Request the grants needed for head-unit audio. When Shizuku is ready, go through [SilentProjectionActivity] (appops allow,
+     * same path as "auto-connect on boarding") so no system dialog is shown; otherwise ask for recording, then screen capture, in turn.
      */
     private fun requestAudioCapture() {
         if (ShizukuGate.state(this) == ShizukuGate.State.READY) {
@@ -239,10 +243,10 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     if (grant != null) {
-                        log("MODE: 已经 Shizuku 静默取得投屏授权（不弹系统窗）")
+                        log("MODE: screen-capture grant obtained silently via Shizuku (no system dialog)")
                         onProjectionGranted(grant.resultCode, grant.data)
                     } else {
-                        log("MODE: 静默授权失败，改用系统授权弹窗")
+                        log("MODE: silent grant failed, falling back to the system grant dialog")
                         requestAudioCaptureViaSystem()
                     }
                 }
@@ -266,7 +270,7 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val data = result.data
             if (result.resultCode != RESULT_OK || data == null) {
-                log("MODE: 投屏权限被拒绝（车机侧声音不可用）")
+                log("MODE: screen-capture permission denied (head-unit audio unavailable)")
                 return@registerForActivityResult
             }
             onProjectionGranted(result.resultCode, data)
@@ -276,13 +280,13 @@ class MainActivity : AppCompatActivity() {
         resultCode: Int,
         data: android.content.Intent,
     ) {
-        // Android 14+ 顺序：先把结果交给服务，由服务升级 FGS 类型后调 getMediaProjection
+        // Android 14+ order: hand the result to the service first, which upgrades the FGS type and then calls getMediaProjection
         CarPlayService.pendingProjectionResult =
             resultCode to data
         CarPlayService
             .start(this)
-        log("MODE: ✓ 投屏权限已授予（重启手机后需重新授权）")
-        // 会话已在进行中授权（授权晚于连接）：等投影就绪后动态补启音频通道
+        log("MODE: ✓ screen-capture permission granted (must be granted again after a phone reboot)")
+        // Granted while a session is already running (grant came after connect): once the projection is ready, start the audio channel dynamically
         Bg.run("audio-late-start") {
             val deadline = SystemClock.uptimeMillis() + 5_000L
             while (SystemClock.uptimeMillis() < deadline) {
@@ -290,25 +294,25 @@ class MainActivity : AppCompatActivity() {
                 Thread.sleep(200)
             }
             if (CarPlayService.mediaProjection == null) {
-                log("MODE: 投影 5 秒未就绪（服务异常？），音频通道本次未启动")
+                log("MODE: projection not ready after 5s (service problem?), audio channel not started this time")
                 return@run
             }
             SessionController.maybeStartAudioNow(applicationContext)
-            // 「启动连接」时选了开启声音、投屏授权在此刻才拿到：接着启动连接
+            // Sound was enabled at "start connection" and the capture grant only arrives now: go on to start the connection
             if (pendingStartAfterProjection.compareAndSet(true, false)) {
                 startConnectionNow()
             }
         }
     }
 
-    /** 投屏授权是「启动连接」的前置（选了开启声音且尚未授权）时置位。 */
+    /** Set when the capture grant is a prerequisite of "start connection" (sound enabled and not yet granted). */
     private val pendingStartAfterProjection =
         java.util.concurrent.atomic
             .AtomicBoolean(false)
 
     /**
-     * 「启动连接」前的声音选择：原先每次弹窗问，现在改读连线页的「车机声音」开关（2026-11-18 用户要求）。
-     * 保留这个入口名，授权回调等多处续连路径都经由它。
+     * Sound choice before "start connection": it used to prompt every time, now it reads the "head-unit audio" switch on the connection page (user request 2026-11-18).
+     * The entry name is kept because several continue-connect paths (e.g. permission callbacks) go through it.
      */
     private fun showAudioChoiceDialog() {
         beginWithAudio(
@@ -317,7 +321,7 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /** 「取消连接」确认弹窗（防误触）：中止当前连接尝试并断开蓝牙/WiFi 链路。 */
+    /** "Cancel connection" confirmation dialog (guards against accidental taps): aborts the current attempt and drops the Bluetooth/WiFi links. */
     private fun promptCancelConnecting() {
         DarkMessageDialog.show(
             activity = this,
@@ -338,8 +342,8 @@ class MainActivity : AppCompatActivity() {
                             .text(R.string.screen_013),
                         DarkMessageDialog.Emphasis.DANGER,
                     ) {
-                        // 关闭仍在等待的「加入热点」确认弹窗（其 onChoice(null) 会与
-                        // connectCancelled 一起让 autoJoin 流程立即中止）
+                        // Close the still-waiting "join hotspot" confirmation dialog (its onChoice(null), together with
+                        // connectCancelled, makes the autoJoin flow abort immediately)
                         wifiJoinDialog?.cancel()
                         wifiJoinDialog = null
                         SessionController.cancelConnecting(this)
@@ -349,8 +353,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 启动连接的前置检查：蓝牙权限 → 蓝牙开关 → WLAN 位置权限（仅 Android 12/12L）。
-     * 任一不满足都弹窗引导（蓝牙关闭时可一键跳系统蓝牙设置），通过后回调继续。
+     * Precheck for "start connection": Bluetooth permission -> Bluetooth switch -> WLAN location permission (Android 12/12L only).
+     * Any failure shows a guidance dialog (one tap to system Bluetooth settings when it is off); on success the callback continues.
      */
     private fun ensureBluetoothReady(onReady: () -> Unit) {
         val granted =
@@ -394,11 +398,11 @@ class MainActivity : AppCompatActivity() {
                                     startActivity(
                                         android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS),
                                     )
-                                }.onFailure { log("BT: 无法打开蓝牙设置，请手动开启") }
+                                }.onFailure { log("BT: cannot open Bluetooth settings, please enable it manually") }
                             },
                         ),
                 )
-                log("BT: 蓝牙未开启——本次连接未发起")
+                log("BT: Bluetooth is off - connection not started")
                 return@ensureWifiLocationReady
             }
             onReady()
@@ -406,9 +410,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 应用专属网络（WifiNetworkSpecifier）在 Android 12/12L 需要位置权限与位置服务；
-     * 13+ 由 NEARBY_WIFI_DEVICES 接管、不再要求定位。缺权限时系统会直接
-     * `requestNetwork` 失败（表现为「未能加入车机热点」，很难自查），因此前置拦截。
+     * An app-specific network (WifiNetworkSpecifier) needs location permission and the location service on Android 12/12L;
+     * 13+ uses NEARBY_WIFI_DEVICES instead and no longer requires location. Without them the system makes
+     * `requestNetwork` fail outright (surfacing as "could not join the head-unit hotspot", hard to diagnose), so it is blocked up front.
      */
     private fun ensureWifiLocationReady(onReady: () -> Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -458,32 +462,32 @@ class MainActivity : AppCompatActivity() {
                                 startActivity(
                                     android.content.Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS),
                                 )
-                            }.onFailure { log("WIFI: 无法打开位置服务设置，请手动开启") }
+                            }.onFailure { log("WIFI: cannot open location service settings, please enable it manually") }
                         },
                     ),
             )
-            log("WIFI: 位置服务未开启——Android 12 下应用专属网络不可用，本次连接未发起")
+            log("WIFI: location service is off - app-specific network is unavailable on Android 12, connection not started")
             return
         }
         onReady()
     }
 
-    /** 位置权限授权后自动继续启动连接（仅 Android 12/12L）。 */
+    /** Continue starting the connection automatically after the location permission is granted (Android 12/12L only). */
     private val pendingStartAfterLocationPermission =
         java.util.concurrent.atomic
             .AtomicBoolean(false)
 
     private val locationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            log("ACCESS_FINE_LOCATION 授权: $granted")
+            log("ACCESS_FINE_LOCATION permission: $granted")
             if (granted && pendingStartAfterLocationPermission.compareAndSet(true, false)) {
                 ensureShizukuReady { showAudioChoiceDialog() }
             }
         }
 
     /**
-     * 「断开连接」确认弹窗（防误触）：断开会立即中断车机画面，
-     * 且投屏授权随保活服务停止而失效（下次要车机侧声音需重新授权）。
+     * "Disconnect" confirmation dialog (guards against accidental taps): disconnecting cuts the head-unit picture immediately,
+     * and the capture grant lapses when the keep-alive service stops (head-unit audio needs a new grant next time).
      */
     private fun promptDisconnect() {
         DarkMessageDialog.show(
@@ -507,54 +511,68 @@ class MainActivity : AppCompatActivity() {
                             .text(R.string.screen_025),
                         DarkMessageDialog.Emphasis.DANGER,
                     ) {
-                        SessionController.disconnect(this)
+                        SessionController.disconnect(this, byUser = true)
                     },
                 ),
         )
     }
 
     /**
-     * 「启动连接」的硬性前置：Shizuku 必须就绪。
+     * Hard prerequisite for "start connection": Shizuku must be ready.
      *
-     * 隐形屏模式的虚拟屏创建、触摸注入、窗口/显示状态读取**全部经 Shizuku shell**；
-     * 未就绪时连接会走到「蓝牙已连、车机黑屏 + 触摸全丢」的半残状态，比直接拦住更糟。
-     * 未就绪时按三态给出对应的可操作引导（装 / 启动 / 授权）。
+     * Virtual-display creation, touch injection and window/display state reads in hidden-display mode all go through the Shizuku shell;
+     * if it is not ready the connection ends up half-working ("Bluetooth connected, head unit black + all touch lost"), worse than blocking outright.
+     * When not ready, actionable guidance is given per state (install / start / grant).
      */
 
     /**
-     * 静默补授予通知使用权（幂等；后台线程）。
+     * Silently grant notification-listener access (idempotent; background thread).
      *
-     * **不能只在 onCreate 试一次**：那次如果 Shizuku 未就绪就会永久跳过，
-     * 用户看到的是「音乐在播、卡片却显示媒体信息未连接」——未授权时
-     * `getActiveSessions()` 仍返回会话（播放状态正常）但 `metadata` 恒为 null。
-     * 因此在每个「Shizuku 确认就绪」的时机都补调一次；已授权时内部直接返回，
-     * 不产生额外 shell 往返。
+     * Do not try only once in onCreate: if Shizuku is not ready then, it is skipped for good,
+     * and the user sees "music playing but the card says media info not connected": without the grant
+     * `getActiveSessions()` still returns sessions (playback state is fine) but `metadata` is always null.
+     * So it is called again at every moment Shizuku is confirmed ready; when already granted it returns
+     * immediately without extra shell round trips.
      */
     private fun ensureNotificationAccessAsync() {
         Bg.run("notification-access") {
             if (ShizukuGate.state(this) != ShizukuGate.State.READY) {
-                log("MEDIA: Shizuku 未就绪——暂无法自动授予通知使用权（就绪后会补）")
+                log("MEDIA: Shizuku not ready - cannot auto-grant notification access yet (will retry once ready)")
                 return@run
             }
             NotificationAccess.ensureGranted(this, ::log)
         }
     }
 
+    private fun setClusterNavigationEnabled(enabled: Boolean) {
+        val app = applicationContext
+        NavAccessibilityAccess.setEnabledByUser(app, enabled)
+        Bg.run("nav-a11y-toggle") {
+            val active = NavAccessibilityAccess.sync(app, ::log)
+            if (enabled && !active) {
+                runOnUiThread {
+                    if (isFinishing || isDestroyed || !NavAccessibilityAccess.enabledByUser(app)) return@runOnUiThread
+                    runCatching { startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                }
+            }
+        }
+    }
+
     private fun ensureShizukuReady(onReady: () -> Unit) {
         val state = ShizukuGate.state(this)
         if (state == ShizukuGate.State.READY) {
-            // Shizuku 就绪即可静默补授权（此前若因未就绪而跳过，这里补上）
+            // Once Shizuku is ready, grant silently (fills in a grant that was skipped earlier because it was not ready)
             ensureNotificationAccessAsync()
             onReady()
             return
         }
-        log("SHIZUKU: 未就绪（$state）——已阻止本次连接")
+        log("SHIZUKU: not ready ($state) - this connection was blocked")
         promptShizukuNotReady(state)
     }
 
     /**
-     * Shizuku 未就绪引导弹窗：主操作随状态变化，附「重试检查」与「取消」。
-     * 走 [DarkMessageDialog] 自绘面板——系统 AlertDialog 是浅色主题，与深色 UI 割裂。
+     * Shizuku-not-ready guidance dialog: the primary action varies with the state, plus "retry check" and "cancel".
+     * Uses the custom [DarkMessageDialog] panel; the system AlertDialog is light-themed and clashes with the dark UI.
      */
     private fun promptShizukuNotReady(state: ShizukuGate.State) {
         val guidance = ShizukuGate.localizedGuidanceOf(state)
@@ -611,7 +629,7 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
 
-            // 未安装：没有可执行的主操作（不给编造的安装链接）
+            // Not installed: no actionable primary action (no made-up install link)
             ShizukuGate.State.NOT_INSTALLED, ShizukuGate.State.READY -> Unit
         }
         DarkMessageDialog.show(
@@ -624,32 +642,34 @@ class MainActivity : AppCompatActivity() {
 
     private fun beginWithAudio(enabled: Boolean) {
         SessionController.audioEnabledForSession = enabled
-        // 声音只剩一个模式：通路协商（AAC-LC 优先，不行自动退 PCM）在会话内自动完成，
-        // 不再有「兼容档」这种人工分支。
+        // Sound has a single mode now: path negotiation (AAC-LC first, automatic fallback to PCM) completes inside the session,
+        // so there is no manual "compatibility tier" branch any more.
         SessionController.audioPreferCompat = false
         if (!enabled) {
-            log("MODE: 本次连接仅推视频（未开启车机侧声音）")
+            log("MODE: this connection pushes video only (head-unit audio not enabled)")
             startConnectionNow()
             return
         }
         if (CarPlayService.mediaProjection != null) {
-            log("MODE: 已选择开启声音（投屏权限已就绪）")
+            log("MODE: sound enabled (screen-capture permission ready)")
             startConnectionNow()
             return
         }
-        // 开启声音需要投屏权限（播放捕获的授权来源）：先申请，授权完成后再启动连接
-        log("MODE: 开启声音需要投屏权限——先后申请（音频捕获依赖），授权后自动开始连接")
+        // Enabling sound needs the screen-capture permission (the source of the playback-capture grant): request it first, then start the connection once granted
+        log(
+            "MODE: sound needs screen-capture permission - requesting in sequence (audio capture depends on it), connection starts after the grant",
+        )
         pendingStartAfterProjection.set(true)
         requestAudioCapture()
     }
 
-    /** 「启动连接」主体（权限检查留在这里；会话启动交给 [SessionController]，幂等不双开）。 */
+    /** Body of "start connection" (permission checks stay here; session start is delegated to [SessionController], idempotent, never doubled). */
     private fun startConnectionNow() {
         runOnUiThread {
-            // 兜底守卫：授权回调等延迟路径也可能走到这里，Shizuku 中途停掉时同样要拦住
+            // Fallback guard: delayed paths such as permission callbacks can also land here, and Shizuku may stop midway, so block again
             val gate = ShizukuGate.state(this)
             if (gate != ShizukuGate.State.READY) {
-                log("SHIZUKU: 未就绪（$gate）——已阻止本次连接")
+                log("SHIZUKU: not ready ($gate) - this connection was blocked")
                 promptShizukuNotReady(gate)
                 return@runOnUiThread
             }
@@ -658,7 +678,7 @@ class MainActivity : AppCompatActivity() {
             ) {
                 permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
             }
-            // 通知权限（API 33+）：前台服务通知可见；拒绝也不影响保活
+            // Notification permission (API 33+): makes the foreground-service notification visible; denial does not affect keep-alive
             if (Build.VERSION.SDK_INT >= 33 &&
                 ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") !=
                 PackageManager.PERMISSION_GRANTED
@@ -672,7 +692,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        // 旋转/重建：沿用原倒计时截止时刻（onResume 据此续弹）
+        // Rotation/recreate: reuse the original countdown deadline (onResume resumes the dialog from it)
         disclaimerDeadlineAt = savedInstanceState?.getLong(KEY_DISCLAIMER_DEADLINE, 0L) ?: 0L
 
         appVersionFooter = findViewById(R.id.appVersionFooter)
@@ -716,7 +736,7 @@ class MainActivity : AppCompatActivity() {
 
         deviceSubtitle.text = deviceName()
         logText.movementMethod = ScrollingMovementMethod()
-        // 控制台在长页面 ScrollView 内：按下时申请父级不拦截竖向手势，否则无法手动滚动
+        // The console sits inside a long-page ScrollView: on touch-down ask the parent not to intercept vertical gestures, otherwise it cannot be scrolled by hand
         logText.setOnTouchListener { v, event ->
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN ->
@@ -728,12 +748,12 @@ class MainActivity : AppCompatActivity() {
             false
         }
         findViewById<ImageView>(R.id.btnLogBottom).setOnClickListener {
-            // 跳到底部：滚动后自动跟底也随之恢复
+            // Jump to the bottom: auto-follow resumes after the scroll
             scrollConsoleToBottom()
         }
 
-        // Shizuku 授权结果：状态行与英雄卡副标题立即刷新；若用户是被「请求授权」引导
-        // 过来的（pendingShizukuThenConnect），授权成功后直接接着走音频选择，不用再点一次。
+        // Shizuku permission result: refresh the status row and hero subtitle immediately; if the user came here via the
+        // "request permission" guidance (pendingShizukuThenConnect), continue straight to the audio choice once granted.
         shizukuPermissionListener =
             rikka.shizuku.Shizuku
                 .OnRequestPermissionResultListener { requestCode, grantResult ->
@@ -742,12 +762,12 @@ class MainActivity : AppCompatActivity() {
                         if (isFinishing || isDestroyed) return@runOnUiThread
                         val granted = grantResult == PackageManager.PERMISSION_GRANTED
                         if (granted) ScreenDimmer.syncScreenTimeout(applicationContext)
-                        log("SHIZUKU: 授权结果 granted=$granted")
+                        log("SHIZUKU: permission result granted=$granted")
                         updateReadyRow()
                         updateShizukuChip()
                         if (granted) {
-                            // Shizuku 刚就绪：补一次通知使用权（改包名/重启后首次授权
-                            // 的典型场景——onCreate 那次因未就绪已跳过）
+                            // Shizuku just became ready: grant notification access once more (typical after a package rename/reboot,
+                            // when the onCreate attempt was skipped because it was not ready)
                             ensureNotificationAccessAsync()
                         }
                         if (granted && pendingShizukuThenConnect) {
@@ -764,14 +784,14 @@ class MainActivity : AppCompatActivity() {
                     runCatching { rikka.shizuku.Shizuku.addRequestPermissionResultListener(it) }
                 }
 
-        // 会话中枢（进程级）：登记 applicationContext + 创建会话对象；
-        // 挂屏注册：日志续显 + SSID 回填
+        // Session hub (process-wide): register applicationContext + create the session objects;
+        // attach registration: log resume + SSID backfill
         SessionController.ensure(this)
         SessionController.logListener = logListener
-        // 连接流程的重要提示（WiFi 未开启/热点加入限制等）以 Snackbar 长显
+        // Important connect-flow hints (WiFi off / hotspot join limits etc.) are shown as a long Snackbar
         SessionController.uiHintSink = uiHintSinkRef
-        // 加入热点确认弹窗：继续自动加入 / 打开 WLAN 设置手动连。
-        // 取消连接时 cancel() 联动关闭（触发 onChoice(null) → 流程检查取消标志中止）
+        // Join-hotspot confirmation dialog: continue auto-join / open WLAN settings to connect manually.
+        // cancel() on cancel-connect closes it (triggers onChoice(null) -> the flow checks the cancel flag and aborts)
         SessionController.dialogSink = { spec, onChoice ->
             runOnUiThread {
                 if (isFinishing || isDestroyed) {
@@ -779,8 +799,8 @@ class MainActivity : AppCompatActivity() {
                     return@runOnUiThread
                 }
                 var answered = false
-                // 取消（返回键/点外部/被 cancelConnecting 联动关闭）= null，流程据此中止；
-                // 「打开 WLAN」除了回调 false，还要把用户送到系统 WLAN 页手动连。
+                // Cancel (back key / tap outside / closed by cancelConnecting) = null, and the flow aborts on it;
+                // besides calling back false, "open WLAN" must also send the user to the system WLAN page to connect manually.
                 val dialog =
                     DarkMessageDialog.show(
                         activity = this,
@@ -815,9 +835,9 @@ class MainActivity : AppCompatActivity() {
 
         setUpUiControls()
         setUpTabs(savedInstanceState?.getInt(KEY_TAB, TAB_CONNECT) ?: TAB_CONNECT)
-        // 以横屏启动时不会触发 onConfigurationChanged，这里按当前方向定一次排布。
-        // 首次调用时 contentArea 未测量（width=0，只能退回屏宽估算），
-        // 布局完成后再精确重算一次，避免英雄卡宽度与右栏让位差几个像素。
+        // Starting in landscape does not trigger onConfigurationChanged, so lay out once here for the current orientation.
+        // On the first call contentArea is unmeasured (width=0, only a screen-width estimate is possible),
+        // so recompute precisely once layout completes, to avoid the hero card width and right-column inset being a few pixels off.
         val startLandscape =
             resources.configuration.orientation ==
                 android.content.res.Configuration.ORIENTATION_LANDSCAPE
@@ -826,8 +846,8 @@ class MainActivity : AppCompatActivity() {
             if (!isFinishing && !isDestroyed) applyContentLayout(startLandscape)
         }
 
-        // 免责声明：未接受当前版本时强制弹（不可取消、需倒计时 + 滑到底）。
-        // savedState 非空（旋转/重建）时复用原截止时刻，不重新计时。
+        // Disclaimer: forced dialog when the current version is not yet accepted (not cancelable, needs countdown + scroll to bottom).
+        // A non-null savedState (rotation/recreate) reuses the original deadline instead of restarting the timer.
         if (savedInstanceState == null &&
             needsDisclaimerAtLaunch(
                 DisclaimerPrefs.acceptedVersion(this),
@@ -838,7 +858,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 底部「免责声明」入口：只读重看（不限制时长、不要求滑到底）。 */
+    /** Bottom "Disclaimer" entry: read-only review (no time limit, no scroll-to-bottom requirement). */
     private fun showDisclaimer(requireAcceptance: Boolean) {
         if (activeDisclaimer?.isShowing == true) return
         if (requireAcceptance && disclaimerDeadlineAt == 0L) {
@@ -851,30 +871,30 @@ class MainActivity : AppCompatActivity() {
                     requireAcceptance = requireAcceptance,
                     deadlineAt = disclaimerDeadlineAt,
                     onDecline = {
-                        // 放弃使用：结束本任务并退出（不用 System.exit，保留正常生命周期收尾）。
-                        // 若已有会话在跑，先正常断开，避免留下无人管理的推流与虚拟屏。
-                        runCatching { SessionController.disconnect(this) }
+                        // Give up: finish this task and exit (not System.exit, to keep normal lifecycle teardown).
+                        // If a session is running, disconnect normally first so no unmanaged stream or virtual display is left behind.
+                        runCatching { SessionController.disconnect(this, byUser = true) }
                         finishAndRemoveTask()
                     },
                     onDismiss = { activeDisclaimer = null },
                 )
     }
 
-    /** onCreate 的 UI 初始化尾部：开关/按钮/折叠卡（会话逻辑不变，仅挂新界面）。 */
+    /** Tail of onCreate's UI initialization: switches/buttons/collapsible cards (session logic unchanged, just attached to the new UI). */
     private fun setUpUiControls() {
         val preferences = getSharedPreferences("settings", Context.MODE_PRIVATE)
-        // 清理旧版本遗留的模式偏好（模式已固定为「隐形屏」启动器）
+        // Clear the mode preference left by old versions (the mode is now fixed to the "hidden display" launcher)
         if (preferences.contains("mode")) {
             preferences.edit().remove("mode").apply()
         }
 
-        // ---- 免责声明（只读重看）----
+        // ---- Disclaimer (read-only review) ----
         findViewById<LinearLayout>(R.id.btnDisclaimer).setOnClickListener {
             showDisclaimer(requireAcceptance = false)
         }
 
-        // ---- 远程调试入口：仅 remote 调试包存在该组件时显示（正式包 resolve 为 null，恒隐藏；
-        // 主代码不引用任何 bridge 类，靠组件探测实现 flavor 差异，调试代码零混入正式产物）----
+        // ---- Remote-debug entry: shown only when the remote debug build has the component (resolves to null in the standard build, always hidden;
+        // main code references no bridge class and detects the component instead, so debug code never leaks into the standard artifact) ----
         val bridgeSetup =
             Intent().setClassName(packageName, "io.github.ezn24.cardeck.neo.bridge.BridgeSetupActivity")
         if (packageManager.resolveActivity(bridgeSetup, 0) != null) {
@@ -884,7 +904,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // ---- Shizuku 状态行：未就绪时点它直接看引导（与「启动连接」被拦下同一套文案）----
+        // ---- Shizuku status row: when not ready, tapping it shows the guidance (same text as when "start connection" is blocked) ----
         findViewById<LinearLayout>(R.id.rowShizuku).setOnClickListener {
             val state = ShizukuGate.state(this)
             if (state == ShizukuGate.State.READY) {
@@ -897,7 +917,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // ---- 常亮+暗幕 ----
+        // ---- Keep-awake + dim cover ----
         ScreenDimmer.enabled =
             preferences.getBoolean("alwaysOn", true)
         switchAlwaysOn.isChecked = ScreenDimmer.enabled
@@ -916,7 +936,7 @@ class MainActivity : AppCompatActivity() {
                 }
             } else {
                 if (VirtualLauncher.appDisplayId >= 0) {
-                    // 会话中：仅关闭常亮/暗幕（投屏探针等资源留待会话结束统一释放）
+                    // During a session: only turn off keep-awake/dim cover (capture probes and other resources are released together at session end)
                     ScreenDimmer
                         .disableDim()
                 } else {
@@ -924,32 +944,32 @@ class MainActivity : AppCompatActivity() {
                         .detach()
                 }
             }
-            log("MODE: 常亮+暗幕 ${if (checked) "开启" else "关闭"}")
+            log("MODE: keep-awake + dim cover ${if (checked) "on" else "off"}")
         }
 
-        // ---- 英雄卡主操作 ----
+        // ---- Hero card primary action ----
         ctaButton.setOnClickListener {
             when (heroState) {
                 HeroState.CONNECTED -> promptDisconnect()
-                // 前置检查：Shizuku（硬性依赖）→ 蓝牙权限/开关 → 音频选择
+                // Prechecks: Shizuku (hard dependency) -> Bluetooth permission/switch -> audio choice
                 HeroState.IDLE -> ensureShizukuReady { ensureBluetoothReady { showAudioChoiceDialog() } }
-                // 连接中可取消：卡在错误网络/等待回连时用户主动脱身（弹窗防误触）
+                // Cancelable while connecting: lets the user escape when stuck on a wrong network or waiting for a reconnect (dialog guards against accidental taps)
                 HeroState.CONNECTING -> promptCancelConnecting()
                 null -> {}
             }
         }
 
-        // ---- 连接准备 ----
+        // ---- Connection prerequisites ----
         findViewById<TextView>(R.id.btnWifi).setOnClickListener {
             val ssid = ssidInput.text.toString().trim()
-            // 自动加入不可用时的手动兜底：密码先进剪贴板，系统 WLAN 页粘贴即可
+            // Manual fallback when auto-join is unavailable: the password goes to the clipboard, paste it in the system WLAN page
             val psk = SessionController.lastWifiPsk
             if (psk != null) {
                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                 cm.setPrimaryClip(android.content.ClipData.newPlainText("carplay-wifi", psk))
                 snack(UiStrings.format(R.string.wifi_password_copied, psk.length))
                 log(
-                    "WiFi: 热点密码已复制到剪贴板，选择 \"$ssid\" 粘贴密码；" +
+                    "WiFi: hotspot password copied to clipboard, pick \"$ssid\" and paste it; " +
                         UiStrings
                             .text(R.string.screen_034),
                 )
@@ -958,23 +978,25 @@ class MainActivity : AppCompatActivity() {
                     UiStrings
                         .text(R.string.screen_035),
                 )
-                log("WiFi: 尚未拿到热点密码（需蓝牙会话 0x5703）——打开 WLAN 设置手动选择 \"$ssid\"")
+                log(
+                    "WiFi: hotspot password not obtained yet (needs Bluetooth session 0x5703) - opening WLAN settings to pick \"$ssid\" manually",
+                )
             }
             try {
                 startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
             } catch (_: Exception) {
-                log("WiFi: 无法打开WLAN设置，请手动前往 设置 > WLAN")
+                log("WiFi: cannot open WLAN settings, please go to Settings > WLAN manually")
             }
         }
 
-        // 目标车机选择：配对了多台车机时指定唯一目标（只向它发请求/只接受它连入）
+        // Target head-unit choice: with several paired head units, pin a single target (requests go only to it / only it may connect in)
         btnPickTarget.setOnClickListener { showTargetPicker() }
 
-        // 车机侧声音授权（原「申请投屏权限」）：RECORD_AUDIO + MediaProjection 一起请求
+        // Head-unit audio grants (formerly "request screen-capture permission"): RECORD_AUDIO + MediaProjection are requested together
         btnAudio.setOnClickListener { requestAudioCapture() }
 
-        // ---- 车机显示 ----
-        // 连线页开关：车机声音（取代连接前弹窗）、车机断开后是否等待回连
+        // ---- Head-unit display ----
+        // Connection-page switches: head-unit audio (replaces the pre-connect dialog), and whether to wait for a reconnect after the head unit disconnects
         findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchCarAudio).apply {
             isChecked =
                 io.github.ezn24.cardeck.neo.launcher.settings.DisplayPrefs
@@ -993,6 +1015,21 @@ class MainActivity : AppCompatActivity() {
                     .setWaitForReconnect(this@MainActivity, checked)
             }
         }
+        findViewById<SwitchCompat>(R.id.switchCarAssistiveDot).apply {
+            isChecked = AssistiveDot.enabled(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> AssistiveDot.setEnabled(this@MainActivity, checked) }
+        }
+        findViewById<SwitchCompat>(R.id.switchClusterNavigation).apply {
+            isChecked = NavAccessibilityAccess.enabledByUser(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> setClusterNavigationEnabled(checked) }
+        }
+        findViewById<SwitchCompat>(R.id.switchCarNotifications).apply {
+            isChecked = DisplayPrefs.showCarNotifications(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                DisplayPrefs.setShowCarNotifications(this@MainActivity, checked)
+                if (checked) ensureNotificationAccessAsync()
+            }
+        }
         findViewById<LinearLayout>(R.id.rowDim).setOnClickListener {
             if (!ScreenDimmer
                     .isAttached()
@@ -1005,21 +1042,21 @@ class MainActivity : AppCompatActivity() {
             }
             ScreenDimmer
                 .enterDimNow()
-            log("DIMMER: 手动假息屏（点击屏幕恢复）")
+            log("DIMMER: manual fake screen-off (tap the screen to restore)")
         }
 
         buildWallpaperStrips()
 
-        // ---- 折叠卡：高级 / 日志 ----
+        // ---- Collapsible cards: advanced / log ----
         bindExpandable(R.id.advHeader, advBody, advChevron)
         bindExpandable(R.id.logHeader, logBody, logChevron)
 
-        // ---- Shell 全局状态 ----
+        // ---- Global Shell state ----
         findViewById<View>(R.id.btnShellRefresh).setOnClickListener { refreshShellState() }
         findViewById<View>(R.id.btnShellReset).setOnClickListener { resetShellState() }
         refreshShellState(startupCheck = true)
 
-        // ---- 日志开关（默认开；关闭后不采集、不渲染；选择持久化） ----
+        // ---- Log switch (default on; when off nothing is collected or rendered; the choice is persisted) ----
         var logEnabled = preferences.getBoolean("logEnabled", true)
         SessionController.logEnabled = logEnabled
         switchLog.isChecked = logEnabled
@@ -1030,8 +1067,8 @@ class MainActivity : AppCompatActivity() {
             renderConsole(SessionController.logText())
         }
         findViewById<ImageView>(R.id.btnClearLog).setOnClickListener {
-            // 清除缓冲后必须显式重渲染：日志回调是增量追加语义，clearLog 的通知
-            // 无法清 UI（见 SessionController.clearLog 注释，「点了没反应」根因）
+            // After clearing the buffer a re-render must be explicit: the log callback has append-only semantics, so the clearLog
+            // notification cannot clear the UI (see the SessionController.clearLog comment, root cause of "tapped but nothing happened")
             SessionController.clearLog()
             renderConsole(SessionController.logText())
         }
@@ -1055,7 +1092,7 @@ class MainActivity : AppCompatActivity() {
             snack(UiStrings.format(R.string.logs_copied, text.length))
         }
         findViewById<ImageView>(R.id.btnExportLog).setOnClickListener { exportLogFile() }
-        // 长按导全部历史：默认只导本次启动，历史日志量大时按需手动取
+        // Long-press exports the full history: by default only this launch is exported; fetch history on demand when it is large
         findViewById<ImageView>(R.id.btnExportLog).setOnLongClickListener {
             exportLogFile(LogExporter.Scope.ALL)
             true
@@ -1067,15 +1104,15 @@ class MainActivity : AppCompatActivity() {
             permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
         }
 
-        // 通知使用权（媒体会话枚举，音乐卡数据源）：Shizuku 就绪时可静默授予。
-        // 幂等可重试——启动时不一定就绪（重启后 Shizuku 未运行、改包名后未授权），
-        // 所以 Shizuku 授权成功、连接建立等时机都会再调一次。
+        // Notification-listener access (media session enumeration, data source of the music card): can be granted silently once Shizuku is ready.
+        // Idempotent and retryable - it may not be ready at launch (Shizuku not running after reboot, not yet granted after a package rename),
+        // so it is called again when Shizuku is granted, when a connection is established, etc.
         ensureNotificationAccessAsync()
 
-        // ---- 车机设置（「车机」分页：与车机双栏共用的设置菜单） ----
+        // ---- Car settings ("Car" page: the settings menu shared with the head-unit two-pane layout) ----
         buildCarMenu()
 
-        // ---- 车机画面截图（合成后的整幅画面） ----
+        // ---- Head-unit screenshot (the whole composited picture) ----
         findViewById<View>(R.id.btnSessionHooks).setOnClickListener {
             startActivity(android.content.Intent(this, AutomationActivity::class.java))
         }
@@ -1085,14 +1122,14 @@ class MainActivity : AppCompatActivity() {
                     if (result == null) {
                         snack(getString(R.string.md_car_screenshot_failed))
                     } else {
-                        log("SCREENSHOT: 车机画面 ${result.width}x${result.height} → ${result.path}")
+                        log("SCREENSHOT: head-unit picture ${result.width}x${result.height} → ${result.path}")
                         snack(result.path.substringAfter("/storage/emulated/0/"))
                     }
                 }
             }
         }
 
-        // 启动即检查：常亮开 + 无悬浮窗权限 → 主动请求
+        // Check at launch: keep-awake on + no overlay permission -> request it proactively
         if (ScreenDimmer.enabled) {
             if (!android.provider.Settings.canDrawOverlays(this)) {
                 promptOverlayPermission(
@@ -1100,9 +1137,9 @@ class MainActivity : AppCompatActivity() {
                         .text(R.string.screen_041),
                 )
             } else {
-                // attach 只挂触摸探针、不排自动暗幕定时器：自动暗幕/常亮由会话驱动
-                // （ScreenDimmer.setSessionActive），否则未连接时也会 45s 后变黑
-                // ——用户实测「会话断了还会启动暗幕」即此（2026-10-19）。
+                // attach only hooks up the touch probe and does not schedule the auto dim timer: auto dim/keep-awake is session-driven
+                // (ScreenDimmer.setSessionActive), otherwise the screen would also go black after 45s while disconnected
+                // (user-observed "dim cover starts after the session ended", 2026-10-19).
                 ScreenDimmer
                     .attach(this)
             }
@@ -1112,9 +1149,13 @@ class MainActivity : AppCompatActivity() {
         VirtualLauncher.logSink = { line -> log(line) }
         CarInputClient.logSink = { line -> log(line) }
 
-        log("CarDeck Phase 0 就绪")
-        log("真车：与车机蓝牙配对 + 手机加入车机热点 -> 点「启动连接」（自动主动连入车机）")
-        log("测试台：两台手机蓝牙配对 -> 备用机跑 xcertplay 无线模式 -> 点「启动连接」等待回连")
+        log("CarDeck Phase 0 ready")
+        log(
+            "Real car: pair Bluetooth with the head unit + join the head-unit hotspot on the phone -> tap \"Start connection\" (connects to the head unit proactively)",
+        )
+        log(
+            "Test bench: pair the two phones over Bluetooth -> run xcertplay wireless mode on the spare phone -> tap \"Start connection\" and wait for it to connect back",
+        )
     }
 
     private fun bindExpandable(
@@ -1133,7 +1174,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== 英雄卡状态机 ====================
+    // ==================== Hero card state machine ====================
 
     private fun tickHero() {
         val s =
@@ -1148,11 +1189,11 @@ class MainActivity : AppCompatActivity() {
             heroState = s
             applyHeroState(s)
         }
-        // 连接中：副标题跟随阶段提示（英雄卡内即可见，不必划到底部看日志）
+        // Connecting: the subtitle follows the phase hint (visible inside the hero card, no need to scroll down to the log)
         if (s == HeroState.CONNECTING) {
             heroSubline.text = SessionController.phaseHint ?: DEFAULT_CONNECTING_HINT
         }
-        // 启动残留屏检查进行中：状态与副标题临时切换为检查提示
+        // Startup residual-display check in progress: status and subtitle temporarily switch to the checking hint
         if (s == HeroState.IDLE && startupCheckRunning) {
             heroStateText.text =
                 UiStrings
@@ -1162,7 +1203,7 @@ class MainActivity : AppCompatActivity() {
                     .text(R.string.screen_043)
             heroProgress.visibility = View.VISIBLE
         }
-        // 空闲但 Shizuku 未就绪：副标题直接说明「点了也连不上」，避免用户反复点
+        // Idle but Shizuku not ready: the subtitle says outright that "tapping will not connect", so the user does not keep tapping
         if (s == HeroState.IDLE && !startupCheckRunning) {
             val gate = ShizukuGate.state(this)
             if (gate != ShizukuGate.State.READY) {
@@ -1180,8 +1221,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 英雄卡统计行（仅连接时显示）：运行时分辨率 + 实际/目标帧率。
-     * 实际帧率 = 1s 轮询对已发帧计数取差值；新会话计数归零时先对齐基线。
+     * Hero card stats row (only while connected): runtime resolution + actual/target frame rate.
+     * Actual frame rate = 1s poll diff of the sent-frame counter; align the baseline first when a new session resets the counter to zero.
      */
     private fun updateHeroStats() {
         if (heroState != HeroState.CONNECTED) return
@@ -1288,7 +1329,7 @@ class MainActivity : AppCompatActivity() {
         ctaIcon.rotation = 0f
     }
 
-    /** 英雄卡主操作按钮统一样式（三个状态仅风格/图标/文案不同）。 */
+    /** Uniform style of the hero card primary-action button (the three states differ only in style/icon/text). */
     private fun styleCta(
         bgRes: Int,
         colorRes: Int,
@@ -1353,9 +1394,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 连接准备计数：Shizuku / 热点 SSID / 蓝牙配对 / 投屏权限。
+     * Connection prerequisite count: Shizuku / hotspot SSID / Bluetooth pairing / screen-capture permission.
      *
-     * Shizuku 是**硬性前置**（未就绪时连接会被拦下），所以计入总数并单独渲染状态行。
+     * Shizuku is a hard prerequisite (connection is blocked when it is not ready), so it counts toward the total and renders its own status row.
      */
     private fun updateReadyRow() {
         var ready = 0
@@ -1412,7 +1453,7 @@ class MainActivity : AppCompatActivity() {
                     UiStrings
                         .text(R.string.screen_051)
             }
-            // 目标设备已不在已配对列表（如系统里删了配对）时提示重选
+            // Prompt to re-pick when the target device is no longer in the paired list (e.g. the pairing was deleted in system settings)
             if (target != null && bondedCount > 0) {
                 val stillBonded =
                     try {
@@ -1431,8 +1472,8 @@ class MainActivity : AppCompatActivity() {
                     btDesc.text = UiStrings.format(R.string.target_removed, target.name)
                 }
             }
-            // 弹窗内可扫描并直接配对未配对设备，因此不再只在「已有配对」时显示：
-            // 一台都没配对时，这里正是用户的入口。
+            // The dialog can scan and pair unpaired devices directly, so it is no longer shown only when "already paired":
+            // with zero paired devices this is exactly the user's entry point.
             btnPickTarget.visibility = View.VISIBLE
         } else {
             btnPickTarget.visibility = View.GONE
@@ -1460,8 +1501,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 「连接准备」里的 Shizuku 状态行：状态即事实源（每次对账时读一次）。
-     * 未就绪时点整行直接给引导弹窗——与点「启动连接」被拦下时看到的是同一套文案。
+     * Shizuku status row in "connection prerequisites": the state is the source of truth (read once per reconcile).
+     * When not ready, tapping the whole row shows the guidance dialog - the same text seen when "start connection" is blocked.
      */
     private fun updateShizukuRow(state: ShizukuGate.State) {
         val ready = state == ShizukuGate.State.READY
@@ -1499,17 +1540,17 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    // ---- 目标车机选择弹窗（扫描/配对状态）----
+    // ---- Target head-unit picker dialog (scan/pairing state) ----
 
-    /** 当前打开的弹窗（扫描回调要往里加行；关闭时统一收尾）。 */
+    /** The currently open dialog (scan callbacks add rows to it; closing cleans up uniformly). */
     private var targetPicker: androidx.appcompat.app.AlertDialog? = null
 
     private var targetPickerReceiver: BroadcastReceiver? = null
 
-    /** 弹窗内已展示的扫描结果（按地址去重；已配对的单独进上组，不进这里）。 */
+    /** Scan results already shown in the dialog (deduplicated by address; paired devices go into the upper group, not here). */
     private val scannedTargets = LinkedHashMap<String, TargetPickerEntry>()
 
-    /** 扫描期间点过「配对」的设备地址（配对完成后自动选中为目标）。 */
+    /** Addresses of devices for which "Pair" was tapped during the scan (auto-selected as target once pairing completes). */
     private var pendingBondAddress: String? = null
 
     private data class TargetPickerEntry(
@@ -1519,12 +1560,12 @@ class MainActivity : AppCompatActivity() {
         val bonded: Boolean,
     )
 
-    /** 扫描权限被拒后置位：授权回调里继续（弹窗可能已关，则忽略）。 */
+    /** Set when the scan permission was denied: the grant callback continues (the dialog may already be closed, then it is ignored). */
     private var pendingTargetScan = false
 
     private val targetScanPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            log("BT-SCAN: BLUETOOTH_SCAN 授权: $granted")
+            log("BT-SCAN: BLUETOOTH_SCAN permission: $granted")
             if (granted && pendingTargetScan) {
                 pendingTargetScan = false
                 targetPicker?.let { startTargetScan(it) }
@@ -1545,14 +1586,14 @@ class MainActivity : AppCompatActivity() {
         }
 
     /**
-     * 目标车机选择弹窗（2026-10-18 改版）：
-     *  组 1「已配对」——直接选用（车机无线 CarPlay 的前置是系统级蓝牙配对）；
-     *  组 2「附近的设备」——实时扫描（经典蓝牙 discovery），点击未配对设备即发起
-     *  系统配对，配对成功后自动设为目标。
+     * Target head-unit picker dialog (reworked 2026-10-18):
+     *  group 1 "Paired" - pick directly (wireless CarPlay on the head unit requires system-level Bluetooth pairing);
+     *  group 2 "Nearby devices" - live scan (classic Bluetooth discovery); tapping an unpaired device starts
+     *  system pairing, and on success it is set as the target automatically.
      *
-     * 首行「自动（不指定）」保留原有语义：出站逐个尝试、入站来者不拒；
-     * 选定后出站只连目标、入站拒绝非目标（防误连家里另一台车机）。
-     * 选择立即生效（链路动态读取目标，无需重连）。
+     * The first row "Auto (unspecified)" keeps the original semantics: outbound tries each in turn, inbound accepts anyone;
+     * once a target is chosen, outbound connects only to it and inbound rejects others (prevents connecting to another head unit at home).
+     * The choice takes effect immediately (the link reads the target dynamically, no reconnect needed).
      */
     private fun showTargetPicker() {
         val adapter =
@@ -1588,7 +1629,7 @@ class MainActivity : AppCompatActivity() {
             updateReadyRow()
         }
         dialog.setOnShowListener {
-            // 面板自带圆角：窗口底色必须透明，否则四角露出方角
+            // The panel has its own rounded corners: the window background must be transparent, otherwise square corners show through
             dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
             val width = (resources.displayMetrics.widthPixels * PanelWindow.WIDTH_FRACTION).toInt()
             dialog.window?.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -1597,13 +1638,13 @@ class MainActivity : AppCompatActivity() {
         startTargetScan(dialog)
     }
 
-    /** 渲染「已配对」组：自动行 + 每个已配对设备。 */
+    /** Render the "Paired" group: the auto row + every paired device. */
     private fun renderBondedGroup(view: View) {
         val list = view.findViewById<LinearLayout>(R.id.bondedList)
         val empty = view.findViewById<TextView>(R.id.bondedEmpty)
         list.removeAllViews()
         val current = TargetDevicePrefs.get(this)
-        // 「自动（不指定）」是模式而非设备：单独放在两组之上，不混进「已配对」组
+        // "Auto (unspecified)" is a mode, not a device: placed above both groups, not mixed into "Paired"
         view.findViewById<LinearLayout>(R.id.autoRowContainer).apply {
             removeAllViews()
             addView(
@@ -1628,8 +1669,8 @@ class MainActivity : AppCompatActivity() {
                     iconTint = R.color.m3_outline,
                 ) {
                     TargetDevicePrefs.set(this@MainActivity, null)
-                    log("TARGET: 已取消目标指定——出站逐个尝试已配对设备，入站接受任一设备")
-                    // 先关弹窗再提示（snackbar 在 Activity 窗口内，会被弹窗盖住）
+                    log("TARGET: target pin cleared - outbound tries each paired device, inbound accepts any")
+                    // Close the dialog before the notice (the snackbar lives in the Activity window and would be covered by the dialog)
                     targetPicker?.dismiss()
                     snack(
                         UiStrings
@@ -1666,7 +1707,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 单个设备行（两组共用；highlighted 时名称用主色）。 */
+    /** A single device row (shared by both groups; the name uses the primary color when highlighted). */
     private fun inflateTargetRow(
         name: String,
         address: String,
@@ -1687,8 +1728,8 @@ class MainActivity : AppCompatActivity() {
         }
         row.findViewById<TextView>(R.id.devAddr).text = address
         row.findViewById<TextView>(R.id.devAction).apply {
-            // 「当前」= 实心绿胶囊 + 对勾 + 深色字；「选择/配对」= 描边胶囊 + 青色字。
-            // 只靠色相区分不够（青 #7EDCE6 vs 绿 #7BD8A5 小字号下难辨），改用形态差异。
+            // "Current" = solid green pill + check mark + dark text; "Select/Pair" = outlined pill + cyan text.
+            // Hue alone is not enough (cyan #7EDCE6 vs green #7BD8A5 are hard to tell apart at small sizes), so shape differs too.
             if (highlighted) {
                 text = "✓ $action"
                 setTextColor(getColor(R.color.m3_surface))
@@ -1698,7 +1739,7 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(getColor(R.color.m3_primary))
                 background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tbtn)
             }
-            // 实心/描边切换后 padding 由 drawable 决定，不需要重设
+            // After switching solid/outlined, padding is decided by the drawable and needs no reset
             setPadding(paddingLeft, paddingTop, paddingRight, paddingBottom)
         }
         row.findViewById<ImageView>(R.id.devIcon).setColorFilter(getColor(iconTint))
@@ -1707,8 +1748,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 开始扫描附近设备：注册 ACTION_FOUND / ACTION_BOND_STATE_CHANGED 后 startDiscovery。
-     * 发现结果按地址去重、排除已配对设备（它们在上一组）；点「配对」调 createBond()。
+     * Start scanning nearby devices: register ACTION_FOUND / ACTION_BOND_STATE_CHANGED, then startDiscovery.
+     * Results are deduplicated by address and exclude paired devices (they are in the group above); tapping "Pair" calls createBond().
      */
     private fun startTargetScan(dialog: androidx.appcompat.app.AlertDialog) {
         val adapter =
@@ -1732,7 +1773,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val scannedList = dialog.findViewById<LinearLayout>(R.id.scannedList) ?: return
-        // 已配对的地址集合：扫描结果里剔掉（避免同一设备在两处出现）
+        // Set of paired addresses: drop them from scan results (so one device does not appear in two places)
         val bondedAddresses =
             bondedDevices()
                 .map { it.address }
@@ -1776,7 +1817,7 @@ class MainActivity : AppCompatActivity() {
                 addAction(BluetoothDevice.ACTION_FOUND)
                 addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
             }
-        // 系统（蓝牙栈）发出的广播：必须用 EXPORTED 才能在部分 ROM 上收到
+        // Broadcasts sent by the system (Bluetooth stack): must be EXPORTED to be received on some ROMs
         ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
         val started =
             try {
@@ -1791,11 +1832,11 @@ class MainActivity : AppCompatActivity() {
                 warn = true,
             )
         } else {
-            log("BT-SCAN: 开始扫描附近蓝牙设备")
+            log("BT-SCAN: started scanning for nearby Bluetooth devices")
         }
     }
 
-    /** 扫描到一台设备：已配对→忽略；新设备→加一行（点「配对」发起系统配对）。 */
+    /** A device was scanned: paired -> ignore; new device -> add a row (tapping "Pair" starts system pairing). */
     private fun onTargetFound(
         dialog: androidx.appcompat.app.AlertDialog,
         device: BluetoothDevice,
@@ -1812,8 +1853,8 @@ class MainActivity : AppCompatActivity() {
         val name = deviceDisplayName(device)
         scannedTargets[address] = TargetPickerEntry(address, name, rssi, bonded = false)
         val list = dialog.findViewById<LinearLayout>(R.id.scannedList) ?: return
-        // 扫描仍在继续：状态行保留并计数，用户知道还可以继续等其它设备。
-        // 刻意不走 updatePickerStatus——它会把列表滚到状态行，发现新设备时抢滚动位置。
+        // Scan still running: keep the status row with a count so the user knows they can keep waiting for other devices.
+        // Deliberately not via updatePickerStatus - it would scroll the list to the status row and steal the scroll position when a new device appears.
         dialog.findViewById<TextView>(R.id.scanStatus)?.apply {
             text = UiStrings.format(R.string.scanned_devices, scannedTargets.size)
             setTextColor(getColor(R.color.m3_mono_dim))
@@ -1834,7 +1875,7 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /** 点击未配对设备：先停扫描（扫描期间配对易失败），再 createBond()。 */
+    /** Tap on an unpaired device: stop the scan first (pairing during a scan tends to fail), then createBond(). */
     private fun beginBond(device: BluetoothDevice) {
         val address =
             try {
@@ -1852,15 +1893,15 @@ class MainActivity : AppCompatActivity() {
             try {
                 device.createBond()
             } catch (error: SecurityException) {
-                log("BT-PAIR: 配对「$name」失败 - 缺少权限：${error.message}")
+                log("BT-PAIR: pairing \"$name\" failed - missing permission: ${error.message}")
                 false
             }
         if (ok) {
-            log("BT-PAIR: 已发起与「$name」($address) 的配对——请在系统弹窗确认")
+            log("BT-PAIR: pairing with \"$name\" ($address) started - confirm in the system dialog")
             pickerNotice(UiStrings.format(R.string.pairing_device, name))
         } else {
             pendingBondAddress = null
-            log("BT-PAIR: 配对「$name」($address) 发起失败（设备可能已配对或蓝牙忙）")
+            log("BT-PAIR: pairing \"$name\" ($address) failed to start (device may already be paired or Bluetooth is busy)")
             pickerNotice(
                 UiStrings
                     .text(R.string.screen_070),
@@ -1869,11 +1910,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 弹窗打开期间的提示。
+     * Notice while the dialog is open.
      *
-     * 弹窗是**独立窗口**（更高层级 + 全屏遮罩），Activity 里的 snackbar 必然被它盖住
-     * ——用户只能看到底部一条被压暗的色块（2026-10-18 反馈）。系统 Toast 属更高窗口层，
-     * 能浮在弹窗之上；同时更新弹窗内的状态行（滚动到可见位置）作为长期可见的说明。
+     * The dialog is a separate window (higher layer + full-screen scrim), so a snackbar in the Activity is always covered
+     * - the user only sees a dimmed strip at the bottom (reported 2026-10-18). A system Toast sits in a higher window layer
+     * and floats above the dialog; the status row inside the dialog is also updated (scrolled into view) as a lasting explanation.
      */
     private fun pickerNotice(message: String) {
         pickerToast(message)
@@ -1881,8 +1922,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 弹窗打开期间的系统 Toast。系统 Toast 属更高窗口层，能浮在弹窗之上；
-     * Activity 内的 snackbar 会被弹窗（独立窗口 + 遮罩）完全盖住。
+     * System Toast while the dialog is open. A system Toast sits in a higher window layer and floats above the dialog;
+     * an Activity snackbar is fully covered by the dialog (separate window + scrim).
      */
     private fun pickerToast(message: String) {
         android.widget.Toast
@@ -1890,7 +1931,7 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    /** 更新弹窗内的状态行并滚动到可见位置（`scanStatus` 在「附近的设备」标题下）。 */
+    /** Update the status row in the dialog and scroll it into view (`scanStatus` sits under the "Nearby devices" heading). */
     private fun updatePickerStatus(
         message: String,
         warn: Boolean = false,
@@ -1900,7 +1941,7 @@ class MainActivity : AppCompatActivity() {
         status.text = message
         status.setTextColor(getColor(if (warn) R.color.m3_amber else R.color.m3_mono_dim))
         status.visibility = View.VISIBLE
-        // 状态行在视口外才滚动（用户在浏览上面的已配对列表时不该被抢走位置）。
+        // Scroll only when the status row is out of the viewport (a user browsing the paired list above must not lose their position).
         status.post {
             val scroll = dialog.findViewById<android.widget.ScrollView>(R.id.pickerScroll) ?: return@post
             val content = scroll.getChildAt(0) ?: return@post
@@ -1915,7 +1956,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** view 相对 ancestor 的内容偏移（沿父链累加 top；ancestor 必须是其祖先）。 */
+    /** Content offset of view relative to ancestor (sum of top along the parent chain; ancestor must be an ancestor of view). */
     private fun offsetWithin(
         view: View,
         ancestor: View,
@@ -1929,7 +1970,7 @@ class MainActivity : AppCompatActivity() {
         return y
     }
 
-    /** 配对状态变化：成功后设为目标并关弹窗；失败给出提示。 */
+    /** Pairing state change: on success set it as the target and close the dialog; on failure show a notice. */
     private fun onBondStateChanged(
         dialog: androidx.appcompat.app.AlertDialog,
         device: BluetoothDevice,
@@ -1946,8 +1987,8 @@ class MainActivity : AppCompatActivity() {
             BluetoothDevice.BOND_BONDED -> {
                 pendingBondAddress = null
                 val name = deviceDisplayName(device)
-                log("BT-PAIR: ✓ 已与「$name」($address) 完成配对——自动设为目标")
-                // 先关弹窗再提示：snackbar 在 Activity 窗口内，弹窗未关时会被盖住
+                log("BT-PAIR: ✓ paired with \"$name\" ($address) - set as target automatically")
+                // Close the dialog before the notice: the snackbar lives in the Activity window and is covered while the dialog is open
                 dialog.dismiss()
                 setTarget(device, name)
                 if (AdapterMode.looksLikeAdapter(name)) {
@@ -1956,16 +1997,16 @@ class MainActivity : AppCompatActivity() {
                     log("BT-PAIR: \"$name\" looks like a wireless CarPlay adapter - tap \"Connect\" and wait for it to connect")
                     return
                 }
-                // 「只配对、不连接」：系统/车机在配对完成后常会自动建立 HFP/A2DP
-                // 连接，而奥迪实测这种「已连接」状态会让车机拒绝 CarPlay。立即与
-                // 1.5s 后各断一次（车机侧重连通常在这两个时间点之间发生）。
+                // "Pair only, do not connect": after pairing the system/head unit often sets up HFP/A2DP
+                // by itself, and on Audi this "connected" state makes the head unit refuse CarPlay. Disconnect once immediately and
+                // once after 1.5s (the head unit's reconnect usually happens between those two moments).
                 val app = applicationContext
                 Bg.run("bt-pair-only") {
                     repeat(2) { attempt ->
                         val dropped = BtProfiles.disconnect(app, device)
                         if (dropped.isNotEmpty()) {
                             log(
-                                "BT-PAIR: 已断开配对后自动建立的 ${dropped.joinToString("/")} 连接" +
+                                "BT-PAIR: dropped ${dropped.joinToString("/")} connection(s) auto-established after pairing" +
                                     UiStrings
                                         .text(R.string.screen_071),
                             )
@@ -1983,22 +2024,22 @@ class MainActivity : AppCompatActivity() {
 
             BluetoothDevice.BOND_NONE -> {
                 pendingBondAddress = null
-                log("BT-PAIR: 与 $address 配对未完成（用户取消或失败）")
-                // 弹窗仍开着：用 Toast（浮在弹窗之上）+ 弹窗内状态行，不用被遮挡的 snackbar
+                log("BT-PAIR: pairing with $address not completed (user cancelled or failed)")
+                // Dialog still open: use a Toast (floats above the dialog) + the status row in the dialog, not the covered snackbar
                 pickerNotice(
                     UiStrings
                         .text(R.string.screen_072),
                 )
             }
-            // BOND_BONDING：继续等（系统确认框未应答）
+            // BOND_BONDING: keep waiting (system confirmation not yet answered)
         }
     }
 
     /**
-     * 设为出站目标；正在进行的连接在下一轮尝试/下一次连入时切换。
+     * Set as the outbound target; an attempt in progress switches on the next attempt / next inbound connection.
      *
-     * @param closePicker true = 先关闭设备选择弹窗再提示（snackbar 属 Activity 窗口，
-     *   弹窗开着时必被盖住——见 pickerNotice 注释）。
+     * @param closePicker true = close the device picker dialog before the notice (the snackbar belongs to the Activity window
+     *   and is always covered while the dialog is open - see the pickerNotice comment).
      */
     private fun setTarget(
         device: BluetoothDevice,
@@ -2009,11 +2050,11 @@ class MainActivity : AppCompatActivity() {
         val previous = TargetDevicePrefs.get(this)
         TargetDevicePrefs.set(this, TargetDevicePrefs.Target(device.address, name))
         log(
-            "TARGET: 目标车机已设为「$name」(${device.address})" +
+            "TARGET: target head unit set to \"$name\" (${device.address})" +
                 UiStrings
                     .text(R.string.screen_073) +
                 if (previous != null && previous.address != device.address) {
-                    "（原目标「${previous.name}」）"
+                    "(previous target \"${previous.name}\")"
                 } else {
                     ""
                 },
@@ -2022,7 +2063,7 @@ class MainActivity : AppCompatActivity() {
         updateReadyRow()
     }
 
-    /** 停掉扫描并注销监听（弹窗关闭/重扫时调用）。 */
+    /** Stop scanning and unregister the listener (called when the dialog closes / rescans). */
     private fun stopTargetScan() {
         stopDiscoveryOnly()
         targetPickerReceiver?.let {
@@ -2033,7 +2074,7 @@ class MainActivity : AppCompatActivity() {
 
     @android.annotation.SuppressLint("MissingPermission")
     private fun stopDiscoveryOnly() {
-        // 调用点均已先确认 BLUETOOTH_SCAN 已授予（扫描流程入口），且此处整体捕获异常
+        // Every call site has already confirmed BLUETOOTH_SCAN is granted (scan-flow entry), and exceptions are caught as a whole here
         try {
             (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
                 .adapter
@@ -2053,7 +2094,7 @@ class MainActivity : AppCompatActivity() {
             emptyList()
         }
 
-    /** 设备展示名（无名称时退回地址）；读名需要 BLUETOOTH_CONNECT，异常时用地址。 */
+    /** Device display name (falls back to the address when there is no name); reading it needs BLUETOOTH_CONNECT, the address is used on exception. */
     private fun deviceDisplayName(device: BluetoothDevice): String =
         try {
             device.name?.takeIf { it.isNotBlank() } ?: device.address
@@ -2066,7 +2107,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-    /** 设备营销名（ro.product.marketname），取不到时退回 Build.MODEL。 */
+    /** Device marketing name (ro.product.marketname), falling back to Build.MODEL when unavailable. */
     private fun deviceName(): String =
         try {
             val sp = Class.forName("android.os.SystemProperties")
@@ -2097,7 +2138,7 @@ class MainActivity : AppCompatActivity() {
                 getColor(if (ready) R.color.m3_ok_dot else R.color.m3_amber),
             )
         }
-        // 副标题与原型一致：设备名 · Shizuku 状态（点色随状态）
+        // Subtitle matches the prototype: device name · Shizuku state (dot color follows the state)
         deviceSubtitle.text =
             UiStrings.format(
                 R.string.device_status,
@@ -2112,14 +2153,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== 通用 UI 工具 ====================
+    // ==================== Common UI helpers ====================
 
     private fun log(message: String) {
-        // 写入进程级缓冲（logcat + 文件 + 挂屏渲染均由 SessionController 统一处理）
+        // Write into the process-wide buffer (logcat + file + attached rendering are all handled by SessionController)
         SessionController.appendLog(message)
     }
 
-    /** Shell 查询/执行（仅后台线程调用；两个诊断面板共用，勿再各写局部函数）。 */
+    /** Shell query/execute (background threads only; shared by both diagnostic panels, do not write local variants again). */
     private fun shExec(
         cmd: String,
         timeoutMs: Long = 4_000L,
@@ -2130,13 +2171,13 @@ class MainActivity : AppCompatActivity() {
     private fun sh(cmd: String): String = shExec(cmd).output
 
     /**
-     * 导出日志到「下载/CarDeck/」并弹窗告知位置。
+     * Export logs to "Downloads/CarDeck/" and tell the user the location in a dialog.
      *
-     * 默认只导**本次进程启动之后**的日志（历史轮次对排查是噪音，动辄几百 KB）；
-     * 长按导出按钮导全部历史（[LogExporter.Scope.ALL]）。
-     * 为什么必须弹窗而不是 snack：snack 只在页面底部浮 2.4s，用户点了导出后
-     * 往往正在看日志区、根本注意不到；且失败时也必须有明确反馈（写文件可能因
-     * 存储满/媒体库异常失败）。
+     * By default only logs since this process started are exported (earlier rounds are noise for diagnosis, often hundreds of KB);
+     * long-pressing the export button exports the whole history ([LogExporter.Scope.ALL]).
+     * Why a dialog and not a snack: a snack floats at the bottom for only 2.4s, and after tapping export the user is
+     * usually looking at the log area and misses it; failures also need clear feedback (writing the file can fail
+     * when storage is full or the media store misbehaves).
      */
     private fun exportLogFile(scope: LogExporter.Scope = LogExporter.Scope.CURRENT_SESSION) {
         snack(
@@ -2163,7 +2204,7 @@ class MainActivity : AppCompatActivity() {
                     )
                     return@runOnUiThread
                 }
-                log("日志已导出（${scope.label}）: ${result.displayPath}（${result.bytes} 字节）")
+                log("Log exported (${scope.label}): ${result.displayPath} (${result.bytes} bytes)")
                 val scopeNote =
                     if (scope == LogExporter.Scope.CURRENT_SESSION) {
                         UiStrings
@@ -2214,7 +2255,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 人类可读大小：<1KB 显示字节（整数除法会显示成误导性的「0 KB」）。 */
+    /** Human-readable size: <1KB shows bytes (integer division would show a misleading "0 KB"). */
     private fun formatBytes(bytes: Long): String =
         when {
             bytes < 1024 -> UiStrings.format(R.string.byte_count, bytes)
@@ -2223,12 +2264,12 @@ class MainActivity : AppCompatActivity() {
         }
 
     /**
-     * 打开系统文件管理器并定位到导出目录（DocumentsUI 的 document URI 可直达子目录）。
+     * Open the system file manager at the export directory (DocumentsUI document URIs can reach a subdirectory directly).
      *
-     * 为什么优先**显式组件**：荣耀 ROM 的隐式 ACTION_VIEW + directory 会被 resolver
-     * 乱匹配（2026-10-18 实测弹出了「网易云音乐」默认项）；同一条 intent 用
-     * `am start` 却正确落到 DocumentsUI。显式指定 FilesActivity 可跳过 resolver，
-     * 失败再逐级回退（别的 ROM 组件名可能不同 → 隐式 → 外部存储根 → 文字指引）。
+     * Why an explicit component first: on Honor ROMs an implicit ACTION_VIEW + directory is mismatched by the resolver
+     * (2026-10-18: it popped up a music app as the default); the same intent via
+     * `am start` lands correctly in DocumentsUI. Naming FilesActivity explicitly skips the resolver,
+     * and failure falls back step by step (other ROMs' component names may differ -> implicit -> external storage root -> text instructions).
      */
     private fun openExportFolder(displayPath: String) {
         val folder = displayPath.substringBeforeLast('/')
@@ -2274,7 +2315,7 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /** 用系统默认应用打开（多数 ROM 会落到文件管理器 / 文本查看器预览）。 */
+    /** Open with the system default app (most ROMs land on the file manager / a text viewer preview). */
     private fun openExportedFile(
         uri: Uri,
         displayPath: String,
@@ -2285,7 +2326,7 @@ class MainActivity : AppCompatActivity() {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
         if (runCatching { startActivity(view) }.isSuccess) return
-        // 无文本查看器时退到「文件管理器」：DocumentsUI 的内部存储根（用户按路径进 下载/CarDeck）
+        // Without a text viewer, fall back to the file manager: DocumentsUI's internal storage root (the user follows the path into Downloads/CarDeck)
         val storageRoot =
             Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(
@@ -2305,7 +2346,7 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /** 分享日志文件（微信/QQ/邮件等），内容 URI 带临时读权限。 */
+    /** Share the log file (WeChat/QQ/mail etc.), the content URI carries a temporary read grant. */
     private fun shareExportedFile(uri: Uri) {
         val send =
             Intent(Intent.ACTION_SEND).apply {
@@ -2334,7 +2375,7 @@ class MainActivity : AppCompatActivity() {
             if (consoleAtBottom()) View.INVISIBLE else View.VISIBLE
     }
 
-    /** 日志内容最大滚动偏移。 */
+    /** Maximum scroll offset of the log content. */
     private fun consoleMaxScroll(): Int {
         val layout = logText.layout ?: return 0
         return (
@@ -2343,17 +2384,17 @@ class MainActivity : AppCompatActivity() {
         ).coerceAtLeast(0)
     }
 
-    /** 是否已在底部（40px 容差：吸收行高舍入，避免永远差几像素判不到底）。 */
+    /** Whether already at the bottom (40px tolerance: absorbs line-height rounding, which would otherwise leave it a few pixels short forever). */
     private fun consoleAtBottom(): Boolean = consoleMaxScroll() - logText.scrollY <= 40
 
     private fun scrollConsoleToBottom() {
-        // +16px 过冲补齐舍入差（控制台深色底，过冲不可见；View 不钳制但视觉无感）
+        // +16px overshoot to cover rounding (dark console background, overshoot is invisible; View does not clamp it but it is visually harmless)
         logText.scrollTo(0, consoleMaxScroll() + 16)
         logText.post { updateLogBottomButton() }
     }
 
     private fun renderConsole(text: String) {
-        // 改文本前已在底部（或用户上翻阅读中）：决定本次是否自动跟底
+        // Whether it was at the bottom before the text change (or the user is scrolled up reading): decides whether this update auto-follows
         val follow = consoleAtBottom()
         logText.text =
             if (SessionController.logEnabled) {
@@ -2369,8 +2410,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 增量追加一行日志（SessionController 逐行直送；此前每行全量 toString + setText
-     * 整段文本，高频日志下 UI/GC 双重放大）。超限时从进程缓冲全量对账一次完成裁剪。
+     * Append one log line incrementally (SessionController pushes line by line; previously every line did a full toString + setText
+     * of the whole text, amplifying UI/GC cost under high-frequency logging). When over the limit, trim by reconciling once from the process buffer.
      */
     private fun appendConsole(line: String) {
         val follow = consoleAtBottom()
@@ -2386,7 +2427,7 @@ class MainActivity : AppCompatActivity() {
 
     private var snackRunnable: Runnable? = null
 
-    /** 自绘 M3 Snackbar（底部反色胶囊，替代 Toast）。 */
+    /** Custom-drawn M3 Snackbar (inverse-color pill at the bottom, replaces Toast). */
     private fun snack(
         message: String,
         durationMs: Long = 2_400L,
@@ -2412,9 +2453,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 解析 dumpsys display 中的 CarPlay 虚拟屏：返回 (displayId, 名称)。
-     * 注意 uniqueId 形如 virtual:com.android.shell,2000,CarPlayDock,36——尾数 36 是
-     * 代次计数器而非显示屏 ID；真实 ID 在 "displayId=39, uniqueId='…'" 段里。
+     * Parse the CarPlay virtual displays in dumpsys display: returns (displayId, name).
+     * Note uniqueId looks like virtual:com.android.shell,2000,CarPlayDock,36 - the trailing 36 is a
+     * generation counter, not the display ID; the real ID is in the "displayId=39, uniqueId='…'" section.
      */
     private fun parseCarPlayDisplays(dump: String): List<Pair<Int, String>> =
         Regex("displayId=(\\d+), uniqueId='[^']*CarPlay(Dock|AppHi|App|Map)")
@@ -2423,7 +2464,7 @@ class MainActivity : AppCompatActivity() {
             .distinctBy { it.first }
             .toList()
 
-    /** 读取 shell 全局状态（后台线程 + UI 回填）。[startupCheck] 时顺带做残留虚拟屏检测。 */
+    /** Read the global shell state (background thread + UI backfill). With [startupCheck] also detects residual virtual displays. */
     private fun refreshShellState(startupCheck: Boolean = false) {
         if (startupCheck) {
             startupCheckRunning = true
@@ -2481,22 +2522,22 @@ class MainActivity : AppCompatActivity() {
                 var residual = carDisplays.filter { it.first !in currentSessionDisplayIds() }
                 if (residual.isNotEmpty()) {
                     log(
-                        "SHELL: 启动检测到 ${residual.size} 个残留虚拟屏: " +
+                        "SHELL: startup check found ${residual.size} residual virtual displays: " +
                             residual.joinToString(", ") { "${it.second}(${it.first})" },
                     )
-                    // 残留屏 = 上次会话异常退出（进程被杀）：横屏覆盖的会话末复原
-                    // 也没执行——一并清理，避免应用在手机侧残留横屏状态
+                    // Residual displays = the last session ended abnormally (process killed): the end-of-session restore of
+                    // landscape overrides did not run either - clean it up together so apps do not stay landscape-overridden on the phone
                     runCatching {
                         val reset =
                             AppOrientationCompat
                                 .resetAll(applicationContext)
-                        if (reset > 0) log("ORIENTATION: 残留会话的横屏覆盖已复原 $reset 个")
+                        if (reset > 0) log("ORIENTATION: restored $reset landscape override(s) from the residual session")
                     }
-                    // 先自动清理一轮（含旧版本 UserService 进程回收——其持有的屏跨进程
-                    // 无法 release，只有进程回收能释放；重装 APK 后 Shizuku 按版本复用的
-                    // 旧进程正是「点清理释放 0/N」的根因，2026-10-16）。清不掉的再问用户。
+                    // Run one automatic cleanup first (including reaping old-version UserService processes - the displays they hold cannot be
+                    // released across processes, only process reaping frees them; the old process Shizuku reuses by version after an APK reinstall
+                    // is exactly the root cause of "clean up released 0/N", 2026-10-16). Ask the user only about what cannot be cleaned.
                     val released = releaseDisplays(residual.map { it.first })
-                    log("SHELL: 启动残留自动清理（释放 $released/${residual.size}）")
+                    log("SHELL: startup residual auto-cleanup (released $released/${residual.size})")
                     if (released > 0) {
                         residual =
                             parseCarPlayDisplays(sh("dumpsys display"))
@@ -2506,12 +2547,12 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     startupCheckRunning = false
                     if (residual.isNotEmpty()) {
-                        // 用户「暂不」时保留 pending，状态旁的按钮可再次发起清理
+                        // When the user picks "not now", keep pending; the button next to the status can retrigger the cleanup
                         pendingResidualDisplays = residual
                         updateResidualChip()
                         if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
                         promptResidualDisplays(residual)
-                        // 自动展开日志卡：启动清理的两条记录直接可见（卡片默认折叠）
+                        // Auto-expand the log card: the two startup-cleanup records are directly visible (the card is collapsed by default)
                         findViewById<View>(R.id.logBody).visibility = View.VISIBLE
                         findViewById<ImageView>(R.id.logChevron)
                             .animate()
@@ -2519,33 +2560,36 @@ class MainActivity : AppCompatActivity() {
                             .setDuration(250L)
                             .start()
                     } else if (heroState == HeroState.IDLE) {
-                        // 无残留：恢复「未连接」默认状态展示
+                        // No residuals: restore the default "not connected" display
                         applyHeroState(HeroState.IDLE)
                     }
                 }
             }
 
-            // 预绑定 UserService：预热触摸注入，并触发旧版本残留进程回收（绑定回调内含
-            // reapStaleUserServices——重装 APK 后 Shizuku 不回收的旧进程，其持有的虚拟屏
-            // 只有进程回收能释放）。**必须晚于上方残留扫描**：回收会让旧进程的虚拟屏立即
-            // 消失，若先于扫描发生，残留清单可能变空 → resetAll（强制横屏复原）被跳过。
+            // Pre-bind UserService: warms up touch injection and triggers reaping of old-version residual processes (the bind callback includes
+            // reapStaleUserServices - old processes Shizuku does not reap after an APK reinstall; the virtual displays they hold
+            // can only be freed by process reaping). Must come after the residual scan above: reaping makes the old process's displays vanish
+            // at once, and if it happened before the scan the residual list could be empty -> resetAll (landscape override restore) would be skipped.
             CarInputClient.ensure(this)
         }
     }
 
-    /** 当前会话持有的虚拟屏（不参与残留清理）。 */
+    /** Virtual displays held by the current session (excluded from residual cleanup). */
     private fun currentSessionDisplayIds(): Set<Int> =
         buildSet {
             val launcher = VirtualLauncher
             listOf(
                 launcher.dockDisplayId,
                 launcher.appDisplayId,
+                launcher.appHiDisplayId,
                 launcher.mapDisplayId,
+                launcher.mediaDisplayId,
                 launcher.gridDisplayId,
             ).forEach { if (it >= 0) add(it) }
+            addAll(launcher.preservedDisplayIds())
         }
 
-    /** 启动检测到残留 CarPlay 虚拟屏：询问是否立即清理（上次会话异常退出遗留）。 */
+    /** Startup detected residual CarPlay virtual displays: ask whether to clean up now (left over from an abnormal exit of the last session). */
     private fun promptResidualDisplays(residual: List<Pair<Int, String>>) {
         if (isFinishing || isDestroyed) return
         val names = residual.joinToString("\n") { "· ${it.second}（displayId=${it.first}）" }
@@ -2574,7 +2618,7 @@ class MainActivity : AppCompatActivity() {
                         if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
                         Bg.run("residual-cleanup") {
                             val released = releaseDisplays(residual.map { it.first })
-                            log("SHELL: 残留虚拟屏清理完成（释放 $released/${residual.size}）")
+                            log("SHELL: residual virtual display cleanup done (released $released/${residual.size})")
                             runOnUiThread {
                                 snack(UiStrings.format(R.string.displays_released, released, residual.size))
                                 refreshShellState()
@@ -2583,19 +2627,19 @@ class MainActivity : AppCompatActivity() {
                     },
                 ),
             onCancel = {
-                // 返回键/点外部关闭 = 暂不：保留英雄卡的「清理残留屏」入口
+                // Back key / tap outside = "not now": keep the hero card's "clean up residual displays" entry
                 updateResidualChip()
             },
         )
     }
 
-    /** 英雄卡状态旁的「清理残留屏」按钮显隐（有待清理残留时出现）。 */
+    /** Show/hide the "clean up residual displays" button next to the hero card status (appears when there is residue to clean). */
     private fun updateResidualChip() {
         btnResidualCleanup.visibility =
             if (pendingResidualDisplays != null) View.VISIBLE else View.GONE
     }
 
-    /** 释放指定虚拟屏（CarInputClient 懒绑定 + 3 秒短等）。后台线程调用，返回成功数。 */
+    /** Release the given virtual displays (CarInputClient lazy binding + 3s short wait). Call from a background thread; returns the success count. */
     private fun releaseDisplays(ids: List<Int>): Int {
         if (ids.isEmpty()) return 0
         var svc = CarInputClient.service
@@ -2609,10 +2653,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val bound = svc ?: return 0
-        ids.forEach { runCatching { bound.releaseDisplay(it) } }
-        // 未直接释放的屏极可能由旧版本 UserService 进程持有（releaseDisplay 只查本进程
-        // map，跨进程无法释放——重装 APK 后 Shizuku 不回收旧进程的已知问题）。
-        // 回收旧进程让其随进程销毁释放，再以实际扫描结果复核（进程回收是异步的）。
+        ids.filterNot { it in currentSessionDisplayIds() }.forEach { runCatching { bound.releaseDisplay(it) } }
+        // Displays not released directly are most likely held by an old-version UserService process (releaseDisplay only checks this process's
+        // map and cannot release across processes - the known problem that Shizuku does not reap old processes after an APK reinstall).
+        // Reap the old process so its displays are freed with it, then re-verify with an actual scan (process reaping is asynchronous).
         CarInputClient.reapStaleUserServices()
         val deadline = SystemClock.uptimeMillis() + 2_000L
         while (true) {
@@ -2623,7 +2667,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 一键把 shell 全局状态复位为系统默认值（含残留虚拟屏释放，保留当前会话屏）。 */
+    /** One-tap reset of the global shell state to system defaults (includes releasing residual virtual displays, keeping the current session's displays). */
     private fun resetShellState() {
         shellStateText.text =
             UiStrings
@@ -2661,14 +2705,14 @@ class MainActivity : AppCompatActivity() {
                     val r = sh(cmd)
                     if (r.ok) "✓ $name" else "✗ $name（${r.output.take(40)}）"
                 }
-            // 残留虚拟屏释放：保留当前会话的各屏，其余 CarPlay* 屏逐一释放
+            // Residual virtual display release: keep the current session's displays, release every other CarPlay* display one by one
             val ids =
                 parseCarPlayDisplays(sh("dumpsys display").output)
                     .map { it.first }
                     .filter { it !in currentSessionDisplayIds() }
                     .toList()
             val released = releaseDisplays(ids)
-            val summary = results.joinToString("；") + "；残留屏释放 $released/${ids.size}"
+            val summary = results.joinToString("; ") + "; residual displays released $released/${ids.size}"
             log("SHELL-RESET: $summary")
             runOnUiThread {
                 shellStateText.text =
@@ -2683,7 +2727,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 悬浮窗权限请求：先弹说明弹窗，用户确认后再跳系统设置。 */
+    /** Overlay permission request: show an explanatory dialog first, then go to system settings once the user confirms. */
     private fun promptOverlayPermission(reason: String) {
         if (android.provider.Settings.canDrawOverlays(this)) return
         DarkMessageDialog.show(
@@ -2703,7 +2747,7 @@ class MainActivity : AppCompatActivity() {
                         UiStrings
                             .text(R.string.screen_097),
                     ) {
-                        log("DIMMER: 用户暂未授权悬浮窗（暗幕不可用，常亮仍生效）")
+                        log("DIMMER: user has not granted overlay permission yet (dim cover unavailable, keep-awake still works)")
                     },
                     DarkMessageDialog.Action(
                         UiStrings
@@ -2718,21 +2762,23 @@ class MainActivity : AppCompatActivity() {
                                 ),
                             )
                         } catch (_: Exception) {
-                            log("DIMMER: 无法打开授权页，请手动前往 设置>应用>特殊权限>显示在其他应用上层")
+                            log(
+                                "DIMMER: cannot open the grant page, please go to Settings > Apps > Special access > Display over other apps manually",
+                            )
                         }
                     },
                 ),
         )
     }
 
-    /** 界面在前台（onResume 与 onPause 之间）。 */
+    /** UI is in the foreground (between onResume and onPause). */
     private var uiResumed = false
 
     private val dimmerCoverListener: (Boolean) -> Unit = { runOnUiThread { syncPhoneUiActivity() } }
 
     /**
-     * 手机主页的动画与 1s 英雄卡刷新只在「真有人看得到」时运行：前台且没被暗幕盖住。
-     * 车机连接时手机多半在暗幕/断电状态，此前动画与刷新照跑（白耗 CPU/GPU/电）。
+     * The phone home page animation and the 1s hero-card refresh run only when someone can actually see it: foreground and not covered by the dim cover.
+     * While the car is connected the phone is mostly under the dim cover / powered off, and animation and refresh used to keep running (wasting CPU/GPU/battery).
      */
     private fun syncPhoneUiActivity() {
         if (isFinishing || isDestroyed) return
@@ -2740,7 +2786,7 @@ class MainActivity : AppCompatActivity() {
         val active = uiResumed && !covered
         mainHandler.removeCallbacks(heroTick)
         if (active) mainHandler.post(heroTick)
-        // 波形动画只在「连线」分页可见时跑（其它分页英雄卡是 GONE）
+        // The wave animation runs only while the "Connect" page is visible (the hero card is GONE on other pages)
         val heroVisible = active && currentTab == TAB_CONNECT
         if (::signalWaves.isInitialized) signalWaves.paused = !heroVisible
         hubBlink?.let { if (heroVisible) it.resume() else it.pause() }
@@ -2748,8 +2794,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 系统栏平时与页面同色（深浅色跟随手机）；暗幕盖住时切回纯黑——暗幕是
-     * APPLICATION_OVERLAY 窗口、盖不到系统栏，浅色主题下会剩两条亮边。
+     * System bars normally match the page color (light/dark follows the phone); switch back to pure black while the dim cover is up - the cover is
+     * an APPLICATION_OVERLAY window that cannot reach the system bars, so in a light theme two bright edges would remain.
      */
     private fun applySystemBars(covered: Boolean) {
         val black = android.graphics.Color.BLACK
@@ -2762,7 +2808,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ---- 底部导航（MD3 Navigation bar；横屏改为左侧 Navigation rail，见 applyContentLayout） ----
+    // ---- Bottom navigation (MD3 Navigation bar; in landscape it becomes a left Navigation rail, see applyContentLayout) ----
     private var currentTab = TAB_CONNECT
 
     private fun setUpTabs(initial: Int) {
@@ -2807,7 +2853,7 @@ class MainActivity : AppCompatActivity() {
         syncPhoneUiActivity()
     }
 
-    // ---- 车机壁纸：深色 / 浅色两条缩略图（默认、内置图案、我的图片、从相册；浅色多一个「同深色」） ----
+    // ---- Head-unit wallpaper: dark / light thumbnail rows (default, built-in patterns, my image, from gallery; light has an extra "same as dark") ----
 
     private fun buildWallpaperStrips() {
         fillWallpaperStrip(findViewById(R.id.wallpaperDarkStrip), WallpaperStore.Slot.DARK)
@@ -2823,7 +2869,7 @@ class MainActivity : AppCompatActivity() {
         val options = mutableListOf<Pair<String, String>>()
         if (slot == WallpaperStore.Slot.LIGHT) options += WallpaperStore.SRC_SAME to getString(R.string.wp_same)
         options += WallpaperStore.SRC_DEFAULT to getString(R.string.wp_default)
-        // 内置图案按槽位排序：本槽位色调的在前
+        // Built-in patterns sorted by slot: those matching this slot's tone come first
         val presets =
             io.github.ezn24.cardeck.neo.ui.WallpaperPresets.ALL
                 .sortedBy { it.light != (slot == WallpaperStore.Slot.LIGHT) }
@@ -2925,11 +2971,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
         WallpaperStore.setSource(this, slot, key)
-        log("WALLPAPER: ${slot.name} 槽位 → $key（会话进行中约 1 秒内上车）")
+        log("WALLPAPER: ${slot.name} slot → $key (reaches the car within ~1s during a session)")
         buildWallpaperStrips()
     }
 
-    /** 「车机」分页的设置菜单：与车机双栏同一份 [SettingsMenus]，点开进共用内容页。 */
+    /** The "Car" page settings menu: the same [SettingsMenus] as the head-unit two-pane layout, opening the shared content pages. */
     private fun buildCarMenu() {
         val list = findViewById<LinearLayout>(R.id.carMenuList)
         list.removeAllViews()
@@ -2937,7 +2983,7 @@ class MainActivity : AppCompatActivity() {
         theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
         for (item in io.github.ezn24.cardeck.neo.launcher.settings.SettingsMenus.ALL) {
             val row = layoutInflater.inflate(R.layout.item_phone_settings_menu, list, false)
-            // 菜单项原是独立卡片；放进分组卡里改成列表行
+            // Menu items used to be standalone cards; inside a group card they become list rows
             row.setBackgroundResource(ripple.resourceId)
             (row.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.topMargin = 0
             row.findViewById<ImageView>(R.id.menuIcon).setImageResource(item.iconRes)
@@ -2953,7 +2999,7 @@ class MainActivity : AppCompatActivity() {
         uiResumed = true
         ScreenDimmer.addCoverListener(dimmerCoverListener)
         syncPhoneUiActivity()
-        // 旋转/重建后尚未接受：用原截止时刻续弹（不重新等 10 秒）
+        // Not yet accepted after rotation/recreate: resume the dialog from the original deadline (no new 10s wait)
         if (needsDisclaimerAtLaunch(
                 DisclaimerPrefs.acceptedVersion(this),
                 DisclaimerPrefs.CURRENT_VERSION,
@@ -2971,18 +3017,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 旋转（已声明 configChanges，Activity 不重建）：视图与所有内存状态原样保留。
-     * 需要处理两件事：
-     * 1. **内容区切成双栏**——横屏屏高只有 ~300dp，英雄卡单独就占满整屏，
-     *    其余内容全被挤到屏幕外（用户实测「要滑动才能看到」）；
-     * 2. **重算弹窗窗口**——它们按旧方向的屏宽算过（92%），不重算会只占中间一半。
+     * Rotation (configChanges declared, the Activity is not recreated): views and all in-memory state are kept as they are.
+     * Two things need handling:
+     * 1. The content area switches to two columns - in landscape the screen is only ~300dp tall, the hero card alone fills it,
+     *    and the rest is pushed off screen (user-reported "have to scroll to see it");
+     * 2. Window sizes of dialogs are recomputed - they were computed from the old orientation's screen width (92%), and without a recompute they cover only the middle half.
      */
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
         if (isFinishing || isDestroyed) return
         applyContentLayout(landscape = newConfig.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE)
         PanelWindow.resizeShowing(this)
-        // 目标车机弹窗不走 DarkMessageDialog，单独重算
+        // The target head-unit dialog does not use DarkMessageDialog, so recompute it separately
         targetPicker?.window?.let {
             val width = (resources.displayMetrics.widthPixels * PanelWindow.WIDTH_FRACTION).toInt()
             it.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -2990,15 +3036,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 内容区排布：竖屏单列（英雄卡与详情同在一个 ScrollView）⇄
-     * 横屏双栏（英雄卡**固定在左侧**，只有右侧详情列滚动）。
+     * Content layout: portrait single column (hero card and details in one ScrollView) <->
+     * landscape two columns (hero card fixed on the left, only the right-hand details column scrolls).
      *
-     * 横屏为什么要把英雄卡移出 ScrollView：它和详情同属一个滚动容器时，
-     * 滑右栏会把英雄卡一起带走（用户实测反馈）。移入 [contentArea] 后它是固定层，
-     * 滚动只作用于 mainScroll；右侧内容通过 ScrollView 的左内边距让位。
+     * Why the hero card leaves the ScrollView in landscape: in the same scroll container as the details,
+     * scrolling the right column would carry the hero card away too (user-reported). Once moved into [contentArea] it is a fixed layer,
+     * scrolling affects only mainScroll, and the right-hand content makes room through the ScrollView's left padding.
      *
-     * onCreate 也要调用一次——旋转不重建，但**以横屏启动**不会触发
-     * onConfigurationChanged。
+     * onCreate must call it once as well - rotation does not recreate, but starting in landscape does not trigger
+     * onConfigurationChanged.
      */
     private fun applyContentLayout(landscape: Boolean) {
         val contentArea = findViewById<android.widget.FrameLayout>(R.id.contentArea)
@@ -3008,9 +3054,9 @@ class MainActivity : AppCompatActivity() {
         val detail = findViewById<android.widget.LinearLayout>(R.id.detailColumn)
         val density = resources.displayMetrics.density
         val gap = (12 * density).toInt()
-        // 横屏屏高只有 ~300dp：波形区 176→70dp、内边距 24/20→12dp，
-        // 让「状态 + 副标题 + 启动连接」全部留在首屏。
-        // 预算：顶部栏 ~60 + 波形 70 + 状态 40 + 副标题 20 + 18 间距 + 按钮 52 + 内边距 24 ≈ 284dp
+        // Landscape is only ~300dp tall: wave area 176→70dp, padding 24/20→12dp,
+        // so that "status + subtitle + start connection" all stay on the first screen.
+        // Budget: top bar ~60 + wave 70 + status 40 + subtitle 20 + 18 spacing + button 52 + padding 24 ≈ 284dp
         val waveHeight = ((if (landscape) 70 else 176) * density).toInt()
         for (id in intArrayOf(R.id.heroWaveFrame, R.id.signalWaves)) {
             findViewById<View>(id).layoutParams =
@@ -3019,8 +3065,8 @@ class MainActivity : AppCompatActivity() {
         val padTop = ((if (landscape) 12 else 24) * density).toInt()
         val padBottom = ((if (landscape) 12 else 20) * density).toInt()
         hero.setPadding(hero.paddingStart, padTop, hero.paddingEnd, padBottom)
-        // 横屏波形框只有 70dp：圆盘同步缩到 44dp，让外圈轨道与弧线仍有空间
-        // （圆盘 74dp 会把波形框撑满、弧线被完全挤出可视区，真机截图暴露）
+        // The landscape wave box is only 70dp: the disc shrinks to 44dp too, leaving room for the outer track and arcs
+        // (a 74dp disc fills the wave box and squeezes the arcs out of the visible area, exposed by a device screenshot)
         val plateSize = ((if (landscape) 44 else 74) * density).toInt()
         val carSize = ((if (landscape) 24 else 38) * density).toInt()
         findViewById<View>(R.id.hubPlate).layoutParams =
@@ -3033,8 +3079,8 @@ class MainActivity : AppCompatActivity() {
                 width = carSize
                 height = carSize
             }
-        // 横屏波形框只有 70dp：装不下 CARPLAY 标签，标签让位
-        // （圆盘是视觉主体，品牌字在顶部标题里已有）
+        // The landscape wave box is only 70dp: no room for the CARPLAY label, so the label yields
+        // (the disc is the visual focus, and the brand text is already in the top title)
         findViewById<View>(R.id.hubCaption).visibility =
             if (landscape) View.GONE else View.VISIBLE
         val railWidth = applyNavPlacement(landscape, density)
@@ -3045,23 +3091,23 @@ class MainActivity : AppCompatActivity() {
                 row.removeView(hero)
                 contentArea.addView(hero)
             }
-            // 宽度用**屏幕宽减页面内边距**推算，不读 contentArea.width：
-            // 旋转瞬间后者还是旧方向的测量值（竖屏 1168 → 英雄卡只有 537px，
-            // 副标题被挤成三行，真机截图暴露）。
+            // Width is derived from the screen width minus page padding, not read from contentArea.width:
+            // at the moment of rotation the latter is still the old orientation's measurement (portrait 1168 → the hero card is only 537px,
+            // the subtitle gets squeezed to three lines, exposed by a device screenshot).
             val pagePadding =
                 (16 * resources.displayMetrics.density * 2).toInt()
             val available =
                 (resources.displayMetrics.widthPixels - pagePadding - railWidth).coerceAtLeast(1)
             val heroWidth = (available * 0.46f).toInt().coerceAtLeast(1)
-            // 高度必须 WRAP_CONTENT：FrameLayout 会把 MATCH_PARENT/WRAP 视作铺满，
-            // 铺满会把按钮顶到卡片底缘、副标题挤成三行（真机截图暴露）
+            // Height must be WRAP_CONTENT: FrameLayout treats MATCH_PARENT/WRAP as fill,
+            // and fill pushes the button to the card's bottom edge and squeezes the subtitle to three lines (exposed by a device screenshot)
             hero.layoutParams =
                 android.widget.FrameLayout
                     .LayoutParams(
                         heroWidth,
                         android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
                     ).apply { gravity = android.view.Gravity.START or android.view.Gravity.TOP }
-            // 右侧内容让出英雄卡宽度（含间距）：滚动条仍在屏幕右缘
+            // The right-hand content makes room for the hero card width (including spacing): the scrollbar stays at the right screen edge
             scroll.setPadding(heroWidth + gap, scroll.paddingTop, scroll.paddingEnd, scroll.paddingBottom)
             (detail.layoutParams as android.widget.LinearLayout.LayoutParams).apply {
                 width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -3094,8 +3140,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 导航栏位置：竖屏底部横条（80dp）；横屏屏高只有 ~300dp，底栏会把英雄卡挤出首屏，
-     * 改成左侧竖向导航栏（MD3 Navigation rail）。返回导航栏占用的宽度（竖屏为 0）。
+     * Navigation bar position: portrait bottom strip (80dp); in landscape the screen is only ~300dp tall and a bottom bar would push the hero card off the first screen,
+     * so it becomes a left vertical navigation bar (MD3 Navigation rail). Returns the width the navigation bar takes (0 in portrait).
      */
     private fun applyNavPlacement(
         landscape: Boolean,
@@ -3142,7 +3188,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // 强制声明不得随 Activity 销毁残留窗口（旋转时 Activity 重建，onResume 会续弹）
+        // Force-declared state must not leave a window behind when the Activity is destroyed (rotation recreates the Activity, onResume resumes it)
         runCatching { activeDisclaimer?.dismiss() }
         activeDisclaimer = null
         shizukuPermissionListener?.let {
@@ -3150,11 +3196,11 @@ class MainActivity : AppCompatActivity() {
         }
         shizukuPermissionListener = null
         pendingShizukuThenConnect = false
-        // 蓝牙扫描/配对监听随界面销毁收尾：Activity 退出后不再需要（也避免广播泄漏）
+        // Bluetooth scan/pair listeners are torn down with the UI: no longer needed once the Activity exits (also avoids a leaked receiver)
         runCatching { stopTargetScan() }
         targetPicker = null
-        // 只解绑"挂屏"，不动会话——连接由前台服务保活、对象归 SessionController 持有；
-        // 显式断开请用「断开连接」按钮（任意实例都能断到真管线）。
+        // Unbind only the "attachment", not the session - the connection is kept alive by the foreground service and objects are owned by SessionController;
+        // for an explicit disconnect use the "Disconnect" button (any instance can reach the real pipeline).
         if (SessionController.logListener === logListener) SessionController.logListener = null
         if (SessionController.uiHintSink === uiHintSinkRef) SessionController.uiHintSink = null
         SessionController.dialogSink = null

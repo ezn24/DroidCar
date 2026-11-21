@@ -7,12 +7,12 @@ import io.github.ezn24.cardeck.neo.shizuku.CarInputClient
 import io.github.ezn24.cardeck.neo.shizuku.ShizukuGate
 
 /**
- * 隐形屏模式：以普通 API 创建与车机同分辨率的 PUBLIC 虚拟屏（surface 即编码输入），
- * 经 Shizuku(shell) `am start --display` 把应用启动进去；手机主屏可正常息屏。
+ * Hidden-display mode: creates a PUBLIC virtual display at the head unit's resolution through the regular API (its surface is the encoder input),
+ * and launches apps into it via Shizuku (shell) `am start --display`; the phone's main screen can turn off normally.
  *
- * 启动目标优先「高德地图车机版」（天生横屏；其引导页会丢 --display，需显式启动
- * MainMapActivity 并强制 fullscreen），未安装回退手机版高德。
- * （移植自参考项目 android-auto 的 VirtualDisplaySource）
+ * The launch target prefers the Amap car edition (landscape by design; its onboarding page drops --display, so
+ * MainMapActivity is started explicitly and forced fullscreen), falling back to the phone edition of Amap if it is not installed.
+ * (Ported from the reference project android-auto, VirtualDisplaySource.)
  */
 class HiddenDisplaySource(
     private val context: Context,
@@ -20,7 +20,7 @@ class HiddenDisplaySource(
 ) : ScreenSource {
     override val name: String = "隐形屏"
 
-    /** 兼容字段：双屏架构下指向应用屏 displayId。 */
+    /** Compatibility field: points at the app display's displayId in the multi-display architecture. */
     var displayId: Int = -1
         private set
 
@@ -31,38 +31,38 @@ class HiddenDisplaySource(
         densityDpi: Int,
     ): Boolean {
         detach()
-        // 逐状态诊断：Shizuku「开着」≠ 已授权本应用（服务端授权必须弹窗点一次）
+        // Per-state diagnostics: Shizuku "running" does not mean this app is authorized (the server-side grant needs a one-time dialog)
         when (val gate = ShizukuGate.state(context)) {
             ShizukuGate.State.READY -> Unit
 
             ShizukuGate.State.NOT_INSTALLED -> {
-                log("SHIZUKU: 未安装 Shizuku App（shizuku.rikka.app）")
+                log("SHIZUKU: Shizuku app not installed (shizuku.rikka.app)")
                 return false
             }
 
             ShizukuGate.State.NOT_RUNNING -> {
-                log("SHIZUKU: 服务未运行——打开 Shizuku App 点「启动」（手机重启后需重新启动）")
+                log("SHIZUKU: service not running - open the Shizuku app and tap Start (needed again after a phone reboot)")
                 return false
             }
 
             ShizukuGate.State.UNAUTHORIZED -> {
-                log("SHIZUKU: 未授权本应用——已发起授权请求，请在弹窗中点「允许」后重连")
+                log("SHIZUKU: this app is not authorized - permission request sent; tap Allow in the dialog, then reconnect")
                 ShizukuGate.requestPermission()
                 return false
             }
         }
-        // 等 UserService 真正就绪再建屏：会话在 RECORD 后立刻 attach，服务可能还在
-        // spawn（调试包加载 dex 更慢）。立刻判「不可用」会白白回退到应用侧 PUBLIC 屏
-        // ——那条路径对 UserService 依赖更重，服务没起来就彻底没有触摸（2026-10-22 K60E）。
-        // 本方法已在后台线程（VideoSender.start 回调）执行，阻塞等待是安全的。
+        // Wait until the UserService is actually ready before creating displays: the session attaches right after RECORD, and the service may still be
+        // spawning (slower still with the debug build loading dex). Declaring it unavailable immediately would needlessly fall back to the app-side PUBLIC display,
+        // a path that depends even more on the UserService; with the service down there is no touch at all (2026-10-22 K60E).
+        // This method already runs on a background thread (VideoSender.start callback), so blocking here is safe.
         val svc = CarInputClient.awaitReady(context, USER_SERVICE_WAIT_MS)
         if (svc == null) {
             log(
-                "SHIZUKU: UserService 在 ${USER_SERVICE_WAIT_MS}ms 内未就绪" +
-                    "——将回退应用侧 PUBLIC 屏（触摸可能不可用，请检查 Shizuku 是否被系统冻结）",
+                "SHIZUKU: UserService not ready within ${USER_SERVICE_WAIT_MS}ms" +
+                    " - falling back to the app-side PUBLIC display (touch may be unavailable; check whether the system froze Shizuku)",
             )
         }
-        // 双屏启动器：GL 合成器（dock 屏 + 应用屏）→ 编码 Surface
+        // Dual-display launcher: GL composer (dock display + app display) -> encoder Surface
         val ok =
             VirtualLauncher.attach(
                 context,
@@ -87,9 +87,9 @@ class HiddenDisplaySource(
 
     private companion object {
         /**
-         * 等 UserService 就绪的上限。取值权衡：太短会误判「不可用」而回退公屏（丢触摸），
-         * 太长会推迟首帧。车机侧对屏幕流 SETUP→激活有看门狗，但 RECORD 已完成、
-         * 视频数据口也已连上，这里多等 3s 不影响会话存活。
+         * Upper bound on waiting for the UserService. Trade-off: too short misjudges it as unavailable and falls back to the public display (touch lost),
+         * too long delays the first frame. The head unit has a watchdog on screen-stream SETUP -> activation, but RECORD is already done and
+         * the video data port is connected, so waiting 3s more does not endanger the session.
          */
         const val USER_SERVICE_WAIT_MS = 3_000L
     }

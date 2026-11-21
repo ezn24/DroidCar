@@ -9,8 +9,8 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 /**
- * 链路通道：一个读线程 + 一个节奏线程驱动 [Iap2LinkEngine]，向会话层暴露
- * 阻塞式的 sendControl/recvControl 与 awaitReady。
+ * Link channel: one reader thread plus one pacer thread drive an [Iap2LinkEngine] and expose
+ * blocking sendControl/recvControl and awaitReady to the session layer.
  */
 class Iap2LinkChannel(
     private val stream: DuplexStream,
@@ -21,8 +21,8 @@ class Iap2LinkChannel(
      */
     val adapterMode: Boolean = AdapterMode.active,
     /**
-     * 真车蓝牙链路：随机初始序号 + 响应对端 marker 重协商（见 [Iap2LinkEngine]）。
-     * 默认 false 让单测/重放保持固定序号 99；转接盒沿用实测过的 99，不随机。
+     * Car Bluetooth link: random initial sequence plus renegotiation on the peer's marker (see
+     * [Iap2LinkEngine]). Defaults to false so unit tests and replays keep the fixed sequence 99;
      */
     carLink: Boolean = false,
     private val log: (String) -> Unit = {},
@@ -47,11 +47,11 @@ class Iap2LinkChannel(
     private var terminated = false
     private var readySignalled = false
 
-    /** 原始字节转储预算（每方向每连接），真车字节级对照用。 */
+    /** Raw byte dump budget (per direction per connection), for byte-level comparison with real cars. */
     private var rxDumpBudget = RAW_DUMP_LIMIT
     private var txDumpBudget = RAW_DUMP_LIMIT_TX
 
-    /** 逐帧摘要日志预算（每方向每连接）。 */
+    /** Per-frame summary log budget (per direction per connection). */
     private var rxFrameLogs = 0
     private var txFrameLogs = 0
 
@@ -60,17 +60,17 @@ class Iap2LinkChannel(
     init {
         engine.onPeerSynchronizationAdopted = { sync ->
             log(
-                "LINK: 采纳对端会话表 maxOutgoing=${sync.maxOutgoing} maxLen=${sync.maxLength} " +
+                "LINK: adopted peer session table maxOutgoing=${sync.maxOutgoing} maxLen=${sync.maxLength} " +
                     "sessions=" + sync.sessions.joinToString { "${it.id}/k${it.kind}/v${it.version}" },
             )
         }
         engine.onUnknownSessionData = { sessionId, size ->
-            log("LINK: 丢弃未知会话 $sessionId 的数据帧（$size 字节）")
+            log("LINK: dropped data frame for unknown session $sessionId ($size bytes)")
         }
         engine.onAdapterEvent = { line -> log("ADAPTER: link $line") }
         engine.onPeerRenegotiation = { line -> log("LINK: $line") }
         engine.onFrameReceived = { control, sequence, ack, sessionId, size ->
-            // 真车调试关键观测：车机在识别阶段是否回帧、回什么（静默分歧全靠它定位）
+            // Key observation for car debugging: whether and what the head unit replies during identification (silent divergences are located with this)
             if (rxFrameLogs < FRAME_LOG_LIMIT) {
                 rxFrameLogs++
                 log(
@@ -98,16 +98,16 @@ class Iap2LinkChannel(
         }
     }
 
-    /** 等待链路协商完成（会话 10 可写）。 */
+    /** Waits for link negotiation to finish (session 10 writable). */
     fun awaitReady(timeoutMillis: Long): Boolean {
         if (!readyLatch.await(timeoutMillis, TimeUnit.MILLISECONDS)) return false
         return !terminated
     }
 
-    /** 对端协商的最大控制载荷（已扣除帧头与校验和），协商前为 null。 */
+    /** Max control payload negotiated by the peer (header and checksum already subtracted); null before negotiation. */
     fun peerMaxControlPayload(): Int? = synchronized(lock) { engine.peerSynchronization?.maxLength?.minus(Iap2LinkEngine.HEADER_BYTES + 1) }
 
-    /** 排入一个完整控制载荷；链路已死返回 false。窗口满时内部积压，由 ACK 驱动发出。 */
+    /** Queues one complete control payload; returns false if the link is dead. When the window is full it backs up internally and is sent as ACKs arrive. */
     fun sendControl(
         bytes: ByteArray,
         awaitAck: Boolean = true,
@@ -120,7 +120,28 @@ class Iap2LinkChannel(
         }
     }
 
-    /** 取下一个控制载荷；超时或链路结束返回 null。 */
+    /** Queues one file-transfer datagram (now-playing artwork); false if the link is dead or has no such session. */
+    fun sendFileTransfer(bytes: ByteArray): Boolean {
+        synchronized(lock) {
+            if (terminated) return false
+            val accepted = engine.sendFileTransfer(bytes, nowMillis())
+            drainOutputLocked()
+            return accepted
+        }
+    }
+
+    /** Largest file-transfer datagram one link packet can carry. */
+    fun maxFileTransferDatagram(): Int = synchronized(lock) { engine.maxSessionPayload() }
+
+    /**
+     * Head-unit datagrams on the file-transfer session. Called on the link reader thread with the channel lock held:
+     * the handler must not block or send synchronously (post the work elsewhere).
+     */
+    fun setFileTransferHandler(handler: ((ByteArray) -> Unit)?) {
+        synchronized(lock) { engine.onFileTransferData = handler }
+    }
+
+    /** Takes the next control payload; returns null on timeout or link end. */
     fun recvControl(timeoutMillis: Long): ByteArray? {
         if (timeoutMillis == 0L && terminated && controls.isEmpty()) return null
         val polled =
@@ -137,7 +158,7 @@ class Iap2LinkChannel(
         finish(null)
     }
 
-    // ---- 内部 ----
+    // ---- internals ----
 
     private fun runReader() {
         try {
@@ -184,8 +205,8 @@ class Iap2LinkChannel(
     }
 
     /**
-     * 原始字节抓包（真车字节级对照的唯一手段）：每方向仅转储前
-     * [RAW_DUMP_LIMIT] 字节，防止长期会话日志爆炸。
+     * Raw byte capture (the only means of byte-level comparison with real cars): only the first
+     * [RAW_DUMP_LIMIT] bytes per direction are dumped, so long sessions do not flood the log.
      */
     private fun dumpInbound(bytes: ByteArray) {
         if (bytes.isEmpty() || rxDumpBudget <= 0) return
@@ -223,7 +244,7 @@ class Iap2LinkChannel(
         }
     }
 
-    /** 持锁调用：抽取引擎事件并搬运输出。 */
+    /** Call with the lock held: pulls engine events and moves output. */
     private fun processEventsLocked() {
         while (true) {
             when (val event = engine.pollEvent() ?: return) {
@@ -276,7 +297,7 @@ class Iap2LinkChannel(
     private fun finishLocked(failure: IOException?) {
         if (terminated) return
         terminated = true
-        controls.offer(POISON) // 哨兵：唤醒阻塞的接收方（LBQ 不接受 null）
+        controls.offer(POISON) // sentinel: wakes a blocked receiver (LBQ does not accept null)
         readyLatch.countDown()
         lock.notifyAll()
         runCatching { stream.close() }
@@ -294,17 +315,17 @@ class Iap2LinkChannel(
     private companion object {
         const val PACER_POLL_MILLIS = 20L
 
-        /** 原始字节转储预算：rx 需覆盖车机全部协商帧（Audi 实测约 140B），给 512B 余量。 */
-        // 预算按字节计。曾为 512/256：一次完整 bring-up 都盖不住（0x1D01 单帧即 565B），
-        // 提取重放 fixture（tools/extract_car_fixtures.py）会缺尾部——提到 4096 覆盖
-        // 整个识别/MFi/凭据交换，长会话靠预算封顶防日志爆炸
+        /** Raw byte dump budget: rx must cover all of the head unit's negotiation frames (Audi measured ~140B), with margin. */
+        // Budget is counted in bytes. It used to be 512/256, which could not cover one full bring-up
+        // (the 0x1D01 frame alone is 565B), so replay fixtures extracted via tools/extract_car_fixtures.py
+        // lost their tails. Raised to 4096 to cover identification, MFi and credential exchange; the cap keeps long sessions from flooding the log.
         const val RAW_DUMP_LIMIT = 4096
         const val RAW_DUMP_LIMIT_TX = 4096
 
-        /** 逐帧摘要日志上限（每方向每连接）。 */
+        /** Per-frame summary log cap (per direction per connection). */
         const val FRAME_LOG_LIMIT = 40
 
-        /** 链路终结哨兵；真实控制载荷至少包含一段 CSM 帧，不会为空。 */
+        /** Link-termination sentinel; a real control payload contains at least one CSM frame, so it is never empty. */
         val POISON = ByteArray(0)
     }
 }

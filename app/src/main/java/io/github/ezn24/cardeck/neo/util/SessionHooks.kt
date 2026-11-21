@@ -8,13 +8,13 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 连接成功 / 断开时发出用户自定义的 Intent（2026-11-18 用户要求，MacroDroid「发送 Intent」式）。
+ * Emit user-defined Intents on connect / disconnect (user request 2026-11-18, MacroDroid "send Intent" style).
  *
- * 每个时机一组 [HookIntent]，逐个按「目标」发出：广播 / 启动 Activity / 启动服务。字段与 MacroDroid
- * 对齐：Action、包名、类名、Data、MIME、Categories、带类型的 Extras。统一附加 extra
- * `cardeck_event` = `connected` / `disconnected`。
+ * Each timing has a list of [HookIntent]s, fired one by one by "target": broadcast / start Activity / start Service. Fields align with
+ * MacroDroid: Action, package name, class name, Data, MIME, Categories, typed Extras. An extra
+ * `cardeck_event` = `connected` / `disconnected` is always added.
  *
- * 断开只在发过「连接」之后发一次（会话收尾有 onEnded / disconnect 两条路径，避免重复）。
+ * Disconnect fires only once after a "connect" was fired (session teardown has two paths, onEnded / disconnect; avoids duplicates).
  */
 object SessionHooks {
     private const val PREFS = "session_hooks"
@@ -22,7 +22,7 @@ object SessionHooks {
     const val EVENT_DISCONNECTED = "disconnected"
     const val EXTRA_EVENT = "cardeck_event"
 
-    /** 新格式存在「事件名_list」键下（JSON 数组）；旧版单行文本存在「事件名」键下，首次读取时迁移。 */
+    /** The new format lives under the "eventname_list" key (JSON array); the old single-line text lives under the "eventname" key and is migrated on first read. */
     private fun listKey(event: String) = "${event}_list"
 
     enum class Target { BROADCAST, ACTIVITY, SERVICE }
@@ -46,7 +46,7 @@ object SessionHooks {
         val extras: List<Extra> = emptyList(),
         val enabled: Boolean = true,
     ) {
-        /** 列表里显示的一行摘要。 */
+        /** One-line summary shown in the list. */
         fun summary(): String =
             when {
                 action.isNotBlank() -> action
@@ -58,7 +58,7 @@ object SessionHooks {
 
     @Volatile private var connectedFired = false
 
-    // ---- 存取 ----
+    // ---- Storage ----
 
     fun load(
         context: Context,
@@ -66,7 +66,7 @@ object SessionHooks {
     ): List<HookIntent> {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         prefs.getString(listKey(event), null)?.let { return runCatching { decode(it) }.getOrDefault(emptyList()) }
-        // 旧版：单行 action 名或 intent: URI
+        // Old format: a single-line action name or an intent: URI
         val legacy = prefs.getString(event, "").orEmpty().trim()
         val migrated = if (legacy.isBlank()) emptyList() else listOfNotNull(fromLegacy(legacy))
         save(context, event, migrated)
@@ -86,11 +86,13 @@ object SessionHooks {
             .apply()
     }
 
-    // ---- 会话钩子 ----
+    // ---- Session hooks ----
 
     /**
-     * 两个钩子都在后台发：调用点分别是推流起步回调（车机看门狗计时中）与断开（可能在主线程），
-     * 读偏好、启动别的 App 都不该占这些线程。没配置时只多一次内存里的偏好读取。
+     * Both hooks fire in the background: the call sites are the stream-start callback (head unit watchdog timing) and disconnect
+     * (possibly on the main thread);
+     * reading preferences and launching other apps must not occupy those threads. With nothing configured it costs only one in-memory
+     * preference read.
      */
     fun onConnected(context: Context) {
         connectedFired = true
@@ -112,7 +114,7 @@ object SessionHooks {
         load(context, event).filter { it.enabled }.forEach { send(context, it, event) }
     }
 
-    /** 发出一个 Intent，返回结果说明（测试按钮显示用）。任意线程可调。 */
+    /** Fire one Intent and return a result description (shown by the test button). Callable from any thread. */
     fun send(
         context: Context,
         hook: HookIntent,
@@ -142,7 +144,7 @@ object SessionHooks {
                     }
                 }
             }.getOrElse { "${it.javaClass.simpleName}: ${it.message}" }
-        SessionController.appendLog("HOOK: $event → ${hook.target} ${hook.summary()} → $result")
+        SessionController.appendLog("HOOK: $event -> ${hook.target} ${hook.summary()} -> $result")
         return result
     }
 
@@ -183,7 +185,7 @@ object SessionHooks {
         return intent
     }
 
-    // ---- JSON（纯函数，有单测） ----
+    // ---- JSON (pure functions, unit-tested) ----
 
     fun encode(intents: List<HookIntent>): String =
         JSONArray()
@@ -242,7 +244,7 @@ object SessionHooks {
         }
     }
 
-    /** 旧版单行文本 → 结构化：intent: URI 拆字段（extras 只保留字符串值），否则当 action 名。 */
+    /** Old single-line text -> structured: an intent: URI is split into fields (extras keep string values only), otherwise treated as an action name. */
     private fun fromLegacy(spec: String): HookIntent? =
         if (spec.startsWith("intent:") || spec.startsWith("#Intent;")) {
             runCatching {

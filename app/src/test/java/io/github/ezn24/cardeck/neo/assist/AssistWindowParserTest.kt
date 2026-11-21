@@ -45,7 +45,7 @@ class AssistWindowParserTest {
 
     @Test
     fun geminiFloatyActivityOnCarDisplayIsFound() {
-        // 2026-11-15 S24 Ultra 实测原文（节选）：Gemini 浮层是 BASE_APPLICATION，开在车机屏 43
+        // 2026-11-15 S24 Ultra measured original text (excerpt): the Gemini overlay is BASE_APPLICATION, opened on car screen 43
         val dump =
             """
   Window #1 Window{a5fe2f u0 com.google.android.googlequicksearchbox/com.google.android.apps.search.assistant.surfaces.voice.robin.ui.floaty.activity.FloatyActivity}:

@@ -1,23 +1,23 @@
 package io.github.ezn24.cardeck.neo.net
 
 /**
- * 解析 `cmd wifi list-networks` 的输出（纯函数，单测覆盖）。
+ * Parses the output of `cmd wifi list-networks` (pure function, unit-tested).
  *
- * 真实格式（空格对齐、**无制表符**，SSID 可含空格；同一网络按安全类型可能多行）：
+ * Real format (space-aligned, **no tabs**, SSID may contain spaces; one network may span several rows per security type):
  * ```
  * Network Id      SSID                         Security type
  * 0            2-502                            wpa2-psk
- * 1            李志华的iPhone                    wpa3-sae
+ * 1            MyPhone                           wpa3-sae
  * ```
- * 解析规则：首段 = netId，末段 = 安全类型，中间全部拼回 SSID。
+ * Parsing rule: first token = netId, last token = security type, everything in between is rejoined as the SSID.
  *
- * 已知边界：SSID 内含连续多个空格时会被压成一个——车机热点名极少如此；
- * 此时宁可漏判（不提示用户）也不误删其它网络。
+ * Known limit: consecutive spaces inside an SSID are squeezed into one; car hotspot names rarely have them,
+ * and in that case we would rather miss a match (no prompt to the user) than delete another network by mistake.
  */
 object WifiSavedNetworks {
     /**
-     * 返回 SSID 精确匹配的 netId 列表（去重；未匹配返回空）。
-     * 调用方只在列表非空时才可能执行 `forget-network`。
+     * Returns the netId list whose SSID matches exactly (deduplicated; empty when nothing matches).
+     * Callers may only run `forget-network` when the list is non-empty.
      */
     fun idsOf(
         listNetworksOutput: String,
@@ -28,7 +28,7 @@ object WifiSavedNetworks {
             .drop(1)
             .mapNotNull { line ->
                 val parts = line.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
-                // 至少 netId + SSID + security 三段
+                // At least netId + SSID + security, three tokens
                 if (parts.size < 3) return@mapNotNull null
                 val id = parts.first().toIntOrNull() ?: return@mapNotNull null
                 val name = parts.subList(1, parts.size - 1).joinToString(" ")

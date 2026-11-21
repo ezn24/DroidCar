@@ -3,15 +3,15 @@ package io.github.ezn24.cardeck.neo.bt
 import android.content.Context
 
 /**
- * 「目标车机」选择偏好（2026-10-16）：
+ * "Target head unit" selection preference (2026-10-16):
  *
- * 用户可能配对了多台 CarPlay 车机（真车 + 测试台），未指定目标时两条链路都按
- * 「任一已配对设备」处理——出站客户端逐个尝试、入站服务端来者不拒，连到哪台
- * 取决于谁先应答（不确定）。选定目标后**只对该设备**发起连接、也只接受该设备
- * 的连入，避免误连非目标车机（典型：家里两台车的其中一台）。
+ * The user may have paired several CarPlay head units (a real car + a test bench). With no target set, both links treat
+ * "any paired device" as a candidate: the outbound client tries each one and the inbound server accepts anyone, so which
+ * unit connects depends on who answers first (non-deterministic). Once a target is chosen we connect **only to that device**
+ * and accept only its incoming connection, avoiding a wrong head unit (typical: one of two cars at home).
  *
- * 存地址 + 名称快照：地址是判定依据（大小写不敏感比对），名称仅用于 UI 展示
- * （设备可能改名，展示以快照为准，不用时重新选择即可）。
+ * Stores address + name snapshot: the address is the criterion (case-insensitive compare), the name is only for UI display
+ * (a device may be renamed; the display uses the snapshot, just pick again if needed).
  */
 object TargetDevicePrefs {
     private const val PREFS = "target_device"
@@ -23,7 +23,7 @@ object TargetDevicePrefs {
         val name: String,
     )
 
-    /** null = 未指定（自动：出站尝试全部候选、入站接受任一设备）。 */
+    /** null = not set (auto: outbound tries all candidates, inbound accepts any device). */
     fun get(context: Context): Target? {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val address = prefs.getString(KEY_ADDRESS, null)?.takeIf { it.isNotBlank() } ?: return null

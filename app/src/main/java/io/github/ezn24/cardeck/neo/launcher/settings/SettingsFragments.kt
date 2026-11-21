@@ -24,8 +24,8 @@ import io.github.ezn24.cardeck.neo.ui.UiStrings
 import io.github.ezn24.cardeck.neo.util.Bg
 
 /**
- * 车机设置内容面板（Fragment 化）：车机 SettingsActivity 双栏右栏、
- * 手机侧二级菜单页共用同一套面板实例，逻辑零拷贝。
+ * Head-unit settings content panels (as Fragments): the right pane of the head-unit SettingsActivity two-pane and
+ * the phone-side secondary menu pages share the same panel instances, with zero logic duplication.
  */
 class DesktopPanelFragment : SettingsPanelFragment() {
     private var countText: TextView? = null
@@ -220,9 +220,10 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
 
 class OrientationPanelFragment : SettingsPanelFragment() {
     /**
-     * 系统侧真正开着覆盖的包集合（面板打开时后台查一次，行绑定只做内存查表——
-     * `dumpsys platform_compat` 单次约 30ms/36KB，绝不可每行一次）。
-     * 打开面板/清除残留后刷新；行内开关点击就地更新，避免重查。
+     * Set of packages for which the system side really has the override on (queried once in the background when the panel opens, rows only
+     * do in-memory lookups -
+     * a single `dumpsys platform_compat` is about 30ms/36KB, never one per row).
+     * Refreshed when the panel opens / after clearing leftovers; row switch clicks update in place to avoid re-querying.
      */
     private var systemOn: Set<String> = emptySet()
     private var systemStateLoaded = false
@@ -230,11 +231,12 @@ class OrientationPanelFragment : SettingsPanelFragment() {
     private lateinit var panelView: View
 
     /**
-     * 本机是否支持「强制横屏」——null = 探测中。
+     * Whether this device supports "force landscape" - null = probing.
      *
-     * 两个 ChangeId 是 OEM 定制项（AOSP 标准表里没有）：荣耀 Android 15 注册了，
-     * 红米 Android 13 没注册。不支持时整列置灰并给出原因，否则用户会反复点开关、
-     * 每次只得到失败提示（2026-10-18 实测）。
+     * The two ChangeIds are OEM-specific (absent from the AOSP standard table): Honor Android 15 registers them,
+     * Redmi Android 13 does not. When unsupported the whole column is greyed out with the reason, otherwise users would keep tapping the
+     * switch
+     * and only get a failure hint each time (measured 2026-10-18).
      */
     private var supported: Boolean? = null
 
@@ -247,9 +249,10 @@ class OrientationPanelFragment : SettingsPanelFragment() {
     override fun onViewCreated(view: View) {
         panelView = view
         listAdapter = OrientationAdapter()
-        // 应用清单就绪后重算横幅（首帧 apps 为空，全部会被误判成「不在列表」）
+        // Recompute the banner once the app list is ready (on the first frame apps is empty and everything would be misjudged as "not in
+        // the list")
         setupAppList(view, R.id.oriList, R.id.oriListIndex, listAdapter) { updateOrphanBanner() }
-        // 能力探测：一次 dumpsys（约 30ms，结果进程内缓存），与系统状态查询并行
+        // Capability probe: one dumpsys (about 30ms, cached in-process), in parallel with the system-state query
         Bg.run("orientation-capability") {
             val ok = AppOrientationCompat.changeIdsRegistered()
             activity?.runOnUiThread {
@@ -272,10 +275,11 @@ class OrientationPanelFragment : SettingsPanelFragment() {
     }
 
     /**
-     * 按能力探测结果调整面板：不支持时显示横幅、整列变暗且不可点。
+     * Adjusts the panel according to the capability probe: when unsupported, show a banner and make the whole column dim and non-clickable.
      *
-     * 置灰而不是隐藏列表：用户能看到「这台机器做不到」，而不是面对一个消失的功能
-     * 猜测原因。横幅文案说明是 ROM 缺项、换机型才能生效（避免误以为是 Shizuku 问题）。
+     * Grey out rather than hide the list: users see "this device cannot do it" instead of facing a vanished feature
+     * and guessing why. The banner text explains it is a missing ROM item that only another device model fixes (to avoid mistaking it for
+     * a Shizuku problem).
      */
     private fun applyCapabilityState() {
         if (!::panelView.isInitialized) return
@@ -296,21 +300,22 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                 .text(R.string.ui_118) +
             "当前 Android ${android.os.Build.VERSION.RELEASE}" +
             "（SDK ${android.os.Build.VERSION.SDK_INT}），开关置灰不可用。"
-        // 整列变暗表达「不可操作」；点击事件在 OriHolder 里按 supported 拦截
+        // A dimmed column conveys "not operable"; click events are intercepted in OriHolder by supported
         list?.alpha = 0.38f
         index?.alpha = 0.38f
     }
 
     /**
-     * 面板外残留（清单里点不到、系统侧却开着覆盖的键）横幅：点击弹窗确认后清理。
-     * 包括两类：已卸载应用（覆盖只在 rawOverrides 可见）、以及历史脏数据里的
-     * `包/组件` 键——这些在应用列表里都没有对应行，行内小字覆盖不到。
+     * Banner for out-of-panel leftovers (keys unreachable in the list but with the override still on): tap to confirm in a dialog, then
+     * clean up.
+     * Covers two kinds: uninstalled apps (override visible only in rawOverrides) and `package/component`
+     * keys from historical dirty data - neither has a row in the app list, so the in-row small text cannot reach them.
      */
     private fun updateOrphanBanner() {
         if (!::panelView.isInitialized) return
         val banner = panelView.findViewById<TextView>(R.id.oriOrphanBanner) ?: return
-        // 应用清单未就绪时先不判定：apps 为空会让所有已开启覆盖都「看起来像列表外残留」
-        // （列表真正装载后 onAppsReady 会再调一次）
+        // Do not judge before the app list is ready: an empty apps would make every enabled override "look like an out-of-list leftover"
+        // (onAppsReady calls this again once the list is really loaded)
         if (apps.isEmpty()) return
         val known = apps.map { it.component.packageName }.toSet()
         val orphans = systemOn.filter { it !in known }.sorted()
@@ -319,7 +324,7 @@ class OrientationPanelFragment : SettingsPanelFragment() {
             return
         }
         banner.visibility = View.VISIBLE
-        // 组件键（含 /）很长：显示时截到包名部分，完整键留给弹窗
+        // Component keys (containing /) are long: show only the package-name part, keep the full key for the dialog
         val summary =
             orphans.take(3).joinToString("、") { it.substringBefore('/') } +
                 if (orphans.size > 3) " 等 ${orphans.size} 个" else ""
@@ -386,31 +391,33 @@ class OrientationPanelFragment : SettingsPanelFragment() {
             val iconPx = (30 * resources.displayMetrics.density).toInt()
             icon.setImageBitmap(AppIcons.rounded(entry.icon, iconPx))
             name.text = entry.label
-            // 界面勾选状态即事实源：点击 = 取反当前显示状态（不重新读偏好，
-            // 避免读值失真导致方向算反——实测「取消」会变成再次「启用」）
+            // The checked state on screen is the source of truth: click = invert the displayed state (do not re-read the preference,
+            // to avoid a distorted read flipping the direction - measured: "cancel" turned into "enable" again)
             shown = AppOrientationCompat.isEnabled(requireContext(), pkg())
             refresh(shown)
 
             row.setOnClickListener {
-                // 面板顶部已探测到本机不支持（ROM 未注册 ChangeId）：直接忽略点击，
-                // 不再发起注定失败的 shell 往返，也不用 toast 反复打扰。
+                // The panel top already detected this device as unsupported (ROM did not register the ChangeId): ignore the click directly,
+                // do not start a shell round trip doomed to fail, and do not nag with toasts.
                 if (supported == false) return@setOnClickListener
-                // **异步**：setEnabled 内部是 2 次 shell（各 4s 超时，最坏 8s），
-                // 直接同步调用会把点击回调所在的主线程卡到 ANR。
+                // **Async**: setEnabled does 2 shell calls inside (4s timeout each, 8s worst case);
+                // calling it synchronously would block the main thread running the click callback into an ANR.
                 val target = !shown
                 shown = target
-                refresh(shown) // 立即回显（乐观更新），失败时回滚
+                refresh(shown) // Echo immediately (optimistic update), roll back on failure
                 AppOrientationCompat.setEnabledAsync(requireContext(), pkg(), target) { result ->
                     if (!isAdded || isDetached) return@setEnabledAsync
                     when (result) {
                         AppOrientationCompat.WriteResult.OK -> {
-                            // 就地更新系统侧缓存（写入已同步完成，无需重查 dumpsys）
+                            // Update the system-side cache in place (the write has completed synchronously, no need to re-query dumpsys)
                             systemOn = if (target) systemOn + pkg() else systemOn - pkg()
                             refresh(target)
-                            // am compat 写入即生效：系统当场杀掉目标应用，返回时按新方向重启
-                            // （2026-10-15 实测：enable/disable 后 pid 立即消失）。旧的「查活 +
-                            // 询问是否结束」流程问的是已被系统杀掉的应用，pidof 又与击杀竞态、
-                            // 提示时对时错（「未在运行」误导），整体移除、如实告知即可。
+                            // am compat takes effect on write: the system kills the target app on the spot and it restarts with the new
+                            // orientation on return
+                            // (measured 2026-10-15: pid vanishes right after enable/disable). The old "check alive +
+                            // ask whether to end it" flow asked about an app the system had already killed, and pidof races with the kill,
+                            // so the prompt was sometimes right and sometimes wrong ("not running" misled); removed entirely, just inform
+                            // honestly.
                             hostToast(
                                 UiStrings.format(
                                     R.string.orientation_saved,
@@ -452,10 +459,10 @@ class OrientationPanelFragment : SettingsPanelFragment() {
         private fun pkg() = entry.component.packageName
 
         /**
-         * 勾选框 + 系统侧状态小字。三种状态：
-         *   勾选开 + 系统开 → 灰字「已开启横屏（会话期间生效）」（正常）
-         *   勾选关 + 系统开 → 红字高亮「系统残留：横屏仍在生效，点击清除」（异常，可点清除）
-         *   其它            → 隐藏（勾选框本身已表达偏好，不制造噪音）
+         * Checkbox + system-side state small text. Three states:
+         *   checked on + system on  -> grey text "landscape enabled (effective during the session)" (normal)
+         *  checked off + system on -> red highlighted text "system leftover: landscape still active, tap to clear" (abnormal, tap to clear)
+         *   otherwise               -> hidden (the checkbox itself conveys the preference, no extra noise)
          */
         private fun refresh(enabled: Boolean) {
             check.setImageResource(
@@ -480,7 +487,8 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                     hint.setTextColor(SettingsRows.color(requireContext(), R.attr.panelDanger))
                     hint.visibility = View.VISIBLE
                     hint.isClickable = true
-                    // 只清系统侧覆盖、不动偏好（偏好本来就是关的）；弹窗提示会重启应用
+                    // Clears only the system-side override, not the preference (the preference is already off); the dialog warns the app
+                    // will restart
                     hint.setOnClickListener {
                         val host = activity ?: return@setOnClickListener
                         DarkMessageDialog.show(
@@ -547,8 +555,8 @@ class DockPanelFragment : SettingsPanelFragment() {
         val scrimValue = view.findViewById<TextView>(R.id.dockScrimValue)
         val blurSeek = view.findViewById<SeekBar>(R.id.dockBlurSeek)
         val blurValue = view.findViewById<TextView>(R.id.dockBlurValue)
-        // 栏宽度（50%–100%，步进 5；**下次连接起效**——与上方 scrim/blur 的
-        // 实时生效不同：dock 虚拟屏的像素尺寸/密度按会话建立时的偏好创建）
+        // Bar width (50%-100%, step 5; **takes effect on the next connection** - unlike the live scrim/blur above:
+        // the dock virtual display's pixel size / density are created from the preference at session setup)
         val widthSeek = view.findViewById<SeekBar>(R.id.dockWidthSeek)
         val widthValue = view.findViewById<TextView>(R.id.dockWidthValue)
         val savedWidth = DockPrefs.widthPercent(requireContext())
@@ -779,9 +787,9 @@ class DefaultMapPanelFragment : SettingsPanelFragment() {
 }
 
 /**
- * 「显示」面板：流分辨率缩放（30%–160%，下次连接起效）+ 目标帧率（30/60，
- * 运行中实时切换）。英雄卡展示的是会话运行时生效值（SessionController 快照），
- * 与本页偏好值相区别。
+ * "Display" panel: stream resolution scale (30%-160%, takes effect next connection) + target frame rate (30/60,
+ * switchable live at runtime). The hero card shows the session's runtime effective values (SessionController snapshot),
+ * distinct from this page's preference values.
  */
 class DisplayPanelFragment : SettingsPanelFragment() {
     override fun onCreateView(
@@ -790,7 +798,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         savedInstanceState: Bundle?,
     ): View = inflater.inflate(R.layout.fragment_panel_display, container, false)
 
-    /** 「通知 App」：多选名单（空 = 全部）。应用列表冷扫描在后台。 */
+    /** "Notification apps": multi-select list (empty = all). The cold app-list scan runs in the background. */
     private fun bindNotificationApps(row: TextView) {
         val ctx = requireContext()
 
@@ -820,8 +828,8 @@ class DisplayPanelFragment : SettingsPanelFragment() {
     }
 
     /**
-     * 通知 App 多选：与「选择其他已安装应用」（地图选择器）同一套版面——搜索框 + 圆角图标列表，
-     * 行尾是勾选框而非单选圈；「全部 App」= 清空名单（不过滤），「完成」保存。
+     * Notification-app multi-select: same layout as "choose another installed app" (the map picker) - search box + rounded icon list,
+     * with a checkbox at the row end instead of a radio; "All apps" = clear the list (no filtering), "Done" saves.
      */
     private fun showNotificationAppsPicker(
         candidates: List<VirtualLauncher.AppEntry>,
@@ -833,7 +841,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         val search = body.findViewById<android.widget.EditText>(R.id.mapPickerSearch)
         val empty = body.findViewById<View>(R.id.mapPickerEmpty)
         val selected = DisplayPrefs.notificationApps(ctx).toMutableSet()
-        // 已选的排在前面，方便核对
+        // Selected ones first, for easy checking
         val all = candidates.sortedBy { if (it.component.packageName in selected) 0 else 1 }
         var filtered = all
 
@@ -978,7 +986,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             }
         }
 
-        // 窄屏仪表盘版面（下次连接生效，只对窄横屏生效）：左右分屏 / Dock 在底部
+        // Narrow-screen dashboard layout (takes effect next connection, narrow landscape only): side-by-side / Dock at bottom
         val layoutKeys =
             listOf(
                 io.github.ezn24.cardeck.neo.render.DashLayout.PREF_SIDE,
@@ -1010,16 +1018,6 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             R.string.dashboard_layout_note,
             ctx.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE).getBoolean("dashboardPanesSwapped", false),
         ) { VirtualLauncher.setDashboardPanesSwapped(ctx, it) }
-        bindDisplayToggle(
-            view.findViewById(R.id.displayAssistiveDot),
-            R.string.assistive_dot,
-            R.string.assistive_dot_note,
-            io.github.ezn24.cardeck.neo.launcher.AssistiveDot
-                .enabled(ctx),
-        ) {
-            io.github.ezn24.cardeck.neo.launcher.AssistiveDot
-                .setEnabled(ctx, it)
-        }
         run {
             val dot = io.github.ezn24.cardeck.neo.launcher.AssistiveDot
             val seek = view.findViewById<SeekBar>(R.id.assistiveDotSizeSeek)
@@ -1055,12 +1053,6 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             io.github.ezn24.cardeck.neo.launcher.ChatMode
                 .setEnabled(ctx, it)
         }
-        bindDisplayToggle(
-            view.findViewById(R.id.displayCarNotifications),
-            R.string.show_car_notifications,
-            R.string.car_notifications_note,
-            DisplayPrefs.showCarNotifications(ctx),
-        ) { DisplayPrefs.setShowCarNotifications(ctx, it) }
         bindNotificationApps(view.findViewById(R.id.displayNotificationApps))
         bindDisplayToggle(
             view.findViewById(R.id.displayAssistOverlay),
@@ -1093,7 +1085,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         val fps30 = view.findViewById<TextView>(R.id.btnFps30)
         val fps60 = view.findViewById<TextView>(R.id.btnFps60)
 
-        // 连接时真息屏（物理面板断电）：默认开；会话中切换立即生效
+        // Real screen-off on connect (physical panel powered down): default off; toggling mid-session takes effect immediately
         val screenOffOn = view.findViewById<TextView>(R.id.btnScreenOffOn)
         val screenOffOff = view.findViewById<TextView>(R.id.btnScreenOffOff)
         var screenOffEnabled = DisplayPrefs.screenOffOnConnect(ctx)
@@ -1134,7 +1126,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
             screenOffEnabled = enabled
             DisplayPrefs.setScreenOffOnConnect(ctx, enabled)
             refreshScreenOff(enabled)
-            // 车机屏上就能操作：立即收放，不必等下次连接
+            // Operable on the head-unit screen: collect/release immediately, no need to wait for the next connection
             SessionController.applyScreenOffPreference(enabled)
             hostToast(
                 if (enabled) {
@@ -1150,7 +1142,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         screenOffOn.setOnClickListener { applyScreenOff(true) }
         screenOffOff.setOnClickListener { applyScreenOff(false) }
 
-        // 上车自动连接（车机蓝牙 ACL 连上时自动拉起会话）：默认开
+        // Auto-connect when getting in the car (start a session automatically when the head-unit Bluetooth ACL connects): default on
         val autoConnectOn = view.findViewById<TextView>(R.id.btnAutoConnectOn)
         val autoConnectOff = view.findViewById<TextView>(R.id.btnAutoConnectOff)
         var autoConnectEnabled = AutoConnectPrefs.enabled(ctx)
@@ -1205,7 +1197,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         autoConnectOn.setOnClickListener { applyAutoConnect(true) }
         autoConnectOff.setOnClickListener { applyAutoConnect(false) }
 
-        // HID 原始日志（键位校准）：默认关；打开后每帧 hidSendReport 写一行 HID-RAW
+        // Raw HID log (key-mapping calibration): default off; when on, every hidSendReport frame writes a HID-RAW line
         val hidRawOn = view.findViewById<TextView>(R.id.btnHidRawOn)
         val hidRawOff = view.findViewById<TextView>(R.id.btnHidRawOff)
         var hidRawEnabled = DisplayPrefs.hidRawLog(ctx)
@@ -1260,7 +1252,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         hidRawOn.setOnClickListener { applyHidRaw(true) }
         hidRawOff.setOnClickListener { applyHidRaw(false) }
 
-        // 滑条 progress（0..26）→ 百分比（30..160，步进 5）
+        // Slider progress (0..26) -> percent (30..160, step 5)
         fun progressOf(percent: Int) = (percent - DisplayPrefs.SCALE_MIN) / DisplayPrefs.SCALE_STEP
 
         fun percentOf(progress: Int) = DisplayPrefs.SCALE_MIN + progress * DisplayPrefs.SCALE_STEP
@@ -1308,7 +1300,8 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         )
 
         fun refreshFps(active30: Boolean) {
-            // 未选中片用暗色底（与容器同色）而非 null 背景，避免背景重置内边距
+            // Unselected tiles use a dark base (same color as the container) rather than a null background, to avoid the background
+            // resetting the padding
             fps30.setBackgroundResource(
                 if (active30) R.drawable.bg_segment_sel else R.drawable.bg_segment,
             )
@@ -1354,7 +1347,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         fps30.setOnClickListener { applyFps(30) }
         fps60.setOnClickListener { applyFps(60) }
 
-        // 触摸注入节流（0=关闭，步进 8ms）：缓解「交互滞后但帧率正常」的事件堆积
+        // Touch-injection throttle (0 = off, step 8ms): eases event pile-up when "interaction lags but frame rate is normal"
         val throttleSeek = view.findViewById<SeekBar>(R.id.throttleSeek)
         val throttleValue = view.findViewById<TextView>(R.id.throttleValue)
 

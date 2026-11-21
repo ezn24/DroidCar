@@ -3,12 +3,12 @@ package io.github.ezn24.cardeck.neo.airplay
 import java.io.ByteArrayOutputStream
 
 /**
- * Apple 二进制 plist（bplist00）最小解析器：覆盖 /info 能力清单用到的类型
- * （null/bool/int/real/data/ASCII/UTF-16 字符串/UID/数组/字典）。
- * 返回值映射：Map<String,Any?> / List<Any?> / String / Long / Double / Boolean / ByteArray / null。
+ * Minimal Apple binary plist (bplist00) parser: covers the types used by the /info capability list
+ * (null/bool/int/real/data/ASCII/UTF-16 string/UID/array/dictionary).
+ * Return mapping: Map<String,Any?> / List<Any?> / String / Long / Double / Boolean / ByteArray / null.
  */
 object BinaryPlist {
-    // ---- 编码：Map<String,Any?>/List/String/Long/Int/Boolean/Double/ByteArray ----
+    // ---- Encoding: Map<String,Any?>/List/String/Long/Int/Boolean/Double/ByteArray ----
 
     fun encode(value: Any?): ByteArray {
         val objects = ArrayList<ByteArray>()
@@ -36,17 +36,17 @@ object BinaryPlist {
         writeUint(out, objects.size.toLong(), 8)
         writeUint(out, rootRef.toLong(), 8)
         writeUint(out, tableOffset.toLong(), 8)
-        // 根对象必须位于字节 8：本编码器先递归编码子对象、最后才追加根容器，
-        // 默认根在末尾。CarPlay 210.81 一类的老车机**不查 trailer 的 topObject，
-        // 直接读偏移 8**（catplay 上游 9ad3a7e「fix recent encoder regression with
-        // CarPlay 210.81 that hardcodes expected offset of the root object」）。
-        // Apple 的编码器本来也是根在前，这里按同一布局重排以匹配真实 iPhone。
+        // The root object must sit at byte 8. This encoder encodes child objects recursively and appends the root container last,
+        // so the root is at the end by default. Old head units such as CarPlay 210.81 **do not read the trailer topObject
+        // and read offset 8 directly** (catplay upstream 9ad3a7e "fix recent encoder regression with
+        // CarPlay 210.81 that hardcodes expected offset of the root object").
+        // Apple's encoder also puts the root first; we rearrange to the same layout to match a real iPhone.
         return makeRootFirst(out.toByteArray())
     }
 
     /**
-     * 把根对象整体移到偏移 8，并修正偏移表（catplay `make_root_first` 同算法）。
-     * 输入必须是本类刚生成的合法 bplist（根是最后一个对象），异常布局原样返回。
+     * Moves the whole root object to offset 8 and fixes the offset table (same algorithm as catplay `make_root_first`).
+     * Input must be a valid bplist just produced by this class (root is the last object); other layouts are returned unchanged.
      */
     private fun makeRootFirst(data: ByteArray): ByteArray {
         if (data.size < 41 || !data.copyOfRange(0, 8).contentEquals("bplist00".toByteArray(Charsets.US_ASCII))) {
@@ -69,7 +69,7 @@ object BinaryPlist {
         val rootStart = readUint(data, entry(root), width).toInt()
         if (rootStart !in 8 until table) return data
         if (rootStart == 8) return data
-        // 根之后（到偏移表之前）属于根对象的字节块；其余对象都排在它前面。
+        // Bytes belonging to the root object (after the root, up to the offset table); all other objects precede it.
         var rootEnd = table
         for (index in 0 until count) {
             val offset = readUint(data, entry(index), width).toInt()
@@ -79,7 +79,7 @@ object BinaryPlist {
         val rootLen = rootEnd - rootStart
         if (rootLen <= 0) return data
         val out = data.copyOf()
-        // data[8..rootEnd) 右旋 rootLen：等价于把根块搬到最前、其余对象顺延。
+        // Rotating data[8..rootEnd) right by rootLen is equivalent to moving the root block to the front and shifting the other objects back.
         val tailLen = rootEnd - 8 - rootLen
         System.arraycopy(data, rootStart, out, 8, rootLen)
         System.arraycopy(data, 8, out, 8 + rootLen, tailLen)
@@ -108,7 +108,7 @@ object BinaryPlist {
         }
     }
 
-    /** 预遍历：引用宽度必须按最终对象总数（含容器自身）确定。 */
+    /** Pre-pass: the reference width must be chosen from the final total object count (including the containers themselves). */
     private fun countObjects(value: Any?): Int =
         when (value) {
             is List<*> -> 1 + value.sumOf { countObjects(it) }
@@ -143,7 +143,7 @@ object BinaryPlist {
                     withLength(0xD0, refsToBytes(keyRefs + valueRefs, total), map.size)
                 }
 
-                else -> throw IllegalArgumentException("不支持的 plist 类型 ${value.javaClass.simpleName}")
+                else -> throw IllegalArgumentException("unsupported plist type ${value.javaClass.simpleName}")
             }
         objects += bytes
         return objects.size - 1
@@ -159,12 +159,12 @@ object BinaryPlist {
     }
 
     /**
-     * 整数按 **有符号** 范围选宽度（bplist 规范：整数是有符号的，读取端按符号扩展）。
+     * Integers choose their width from the **signed** range (bplist spec: integers are signed, readers sign-extend).
      *
-     * 曾按无符号阈值选宽度：35449（0x8A79）被写成 2 字节，Apple 侧按 int16 读成
-     * -30087。整型端口（timingPort/eventPort/dataPort）一旦落到 32768..65535 就会
-     * 变成负值——接收端可能直接拒绝或绑定到错误端口。单测 `SessionSetupBodyTest`
-     * 即由此发现。
+     * It used to choose by unsigned thresholds: 35449 (0x8A79) was written as 2 bytes, which Apple reads as int16, i.e.
+     * -30087. Once an integer port (timingPort/eventPort/dataPort) lands in 32768..65535 it
+     * becomes negative, and the receiver may reject it or bind the wrong port. Unit test `SessionSetupBodyTest`
+     * found this.
      */
     private fun encodeInt(value: Long): ByteArray {
         val size =
@@ -236,33 +236,33 @@ object BinaryPlist {
             else -> 3
         }
 
-    // ---- 解析 ----
+    // ---- Parsing ----
 
-    /** 解析结果 + 恢复说明（发生过裁剪时 note 非空，正常解析为 null）。 */
+    /** Parse result + recovery note (note is non-null when trimming happened, null for a normal parse). */
     class ParseResult(
         val value: Any?,
         val note: String?,
     )
 
     /**
-     * 容错解析：先按标准布局解析；失败时依次裁掉尾部 1~8 字节重试。
+     * Tolerant parsing: parse by the standard layout first; on failure, retry trimming 1~8 trailing bytes in turn.
      *
-     * 车机的 RTSP 报文有时在 `Content-Length` 之外还带尾随字节（CRLF / 填充），
-     * bplist 的 trailer 是**从末尾倒数 32 字节**定位的，多一个字节就整体错位——
-     * 表现为「body 明明是合法 bplist00 却解析失败」。裁尾重试能把这种报文救回来，
-     * 且失败时抛出的是原始异常的详细信息（trailer 摘要已带在 message 里）。
+     * RTSP messages from head units sometimes carry trailing bytes beyond `Content-Length` (CRLF / padding),
+     * and the bplist trailer is located **32 bytes from the end**, so one extra byte shifts everything,
+     * showing up as "the body is a valid bplist00 yet parsing fails". Trim-and-retry rescues such messages,
+     * and on failure the exception thrown is the original one with full detail (the trailer summary is already in its message).
      */
     fun parseRecovered(bytes: ByteArray): ParseResult {
         val first = runCatching { parse(bytes) }
         first.getOrNull()?.let { return ParseResult(it, null) }
         if (first.isSuccess) return ParseResult(null, null)
-        val failure = first.exceptionOrNull() ?: IllegalArgumentException("解析失败")
+        val failure = first.exceptionOrNull() ?: IllegalArgumentException("parse failed")
         if (bytes.size >= 48) {
             for (trim in 1..8) {
                 if (bytes.size - trim < 40) break
                 val attempt = runCatching { parse(bytes.copyOfRange(0, bytes.size - trim)) }
                 if (attempt.isSuccess) {
-                    return ParseResult(attempt.getOrThrow(), "尾部多 $trim 字节（裁掉后解析成功）")
+                    return ParseResult(attempt.getOrThrow(), "$trim extra trailing bytes (parsed after trimming)")
                 }
             }
         }
@@ -271,15 +271,15 @@ object BinaryPlist {
     }
 
     fun parse(bytes: ByteArray): Any? {
-        if (bytes.size < 40) throw IllegalArgumentException("plist 太短（${bytes.size} 字节）")
+        if (bytes.size < 40) throw IllegalArgumentException("plist too short (${bytes.size} bytes)")
         val magic = "bplist00".toByteArray(Charsets.US_ASCII)
         if (!bytes.copyOfRange(0, 8).contentEquals(magic)) {
             throw IllegalArgumentException(
-                "不是 bplist00（首 8 字节 " + bytes.take(8).joinToString(" ") { "%02x".format(it) } + "）",
+                "not bplist00 (first 8 bytes " + bytes.take(8).joinToString(" ") { "%02x".format(it) } + ")",
             )
         }
 
-        // 尾部 32 字节 trailer：unused(6) offsetIntSize(1) objectRefSize(1) numObjects(8) topObject(8) offsetTableOffset(8)
+        // 32-byte trailer at the end: unused(6) offsetIntSize(1) objectRefSize(1) numObjects(8) topObject(8) offsetTableOffset(8)
         val offsetIntSize = u8(bytes[bytes.size - 26])
         val objectRefSize = u8(bytes[bytes.size - 25])
         val numObjects = readUint(bytes, bytes.size - 24, 8)
@@ -289,16 +289,16 @@ object BinaryPlist {
             "trailer{offsetIntSize=$offsetIntSize objectRefSize=$objectRefSize numObjects=$numObjects " +
                 "topObject=$topObject offsetTableOffset=$offsetTableOffset body=${bytes.size}B}"
         if (offsetIntSize !in 1..8 || objectRefSize !in 1..8) {
-            throw IllegalArgumentException("trailer 字段不合法 $trailer")
+            throw IllegalArgumentException("invalid trailer fields $trailer")
         }
         if (numObjects <= 0 || numObjects > MAX_OBJECTS) {
-            throw IllegalArgumentException("对象数非法 $trailer")
+            throw IllegalArgumentException("invalid object count $trailer")
         }
-        if (topObject >= numObjects) throw IllegalArgumentException("根对象下标越界 $trailer")
+        if (topObject >= numObjects) throw IllegalArgumentException("root object index out of range $trailer")
         if (offsetTableOffset < 9 ||
             offsetTableOffset + numObjects * offsetIntSize > bytes.size - 32
         ) {
-            throw IllegalArgumentException("偏移表越界 $trailer")
+            throw IllegalArgumentException("offset table out of range $trailer")
         }
 
         val count = numObjects.toInt()
@@ -312,11 +312,11 @@ object BinaryPlist {
         } catch (error: IllegalArgumentException) {
             throw error
         } catch (error: IndexOutOfBoundsException) {
-            throw IllegalArgumentException("读取越界（$trailer，${error.message}）")
+            throw IllegalArgumentException("read out of range ($trailer, ${error.message})")
         } catch (error: NegativeArraySizeException) {
-            throw IllegalArgumentException("长度字段为负（$trailer）")
+            throw IllegalArgumentException("negative length field ($trailer)")
         } catch (error: OutOfMemoryError) {
-            throw IllegalArgumentException("长度字段过大（$trailer）")
+            throw IllegalArgumentException("length field too large ($trailer)")
         }
     }
 
@@ -337,11 +337,11 @@ object BinaryPlist {
                     else -> null
                 }
 
-            // 整数一律按**无符号**解读：接收端（车机）会把位图/微秒/采样率写进
-            // 2 字节 int，值超过 32767 时按有符号读会变成负数（实测 44100 → -21436、
-            // 35000us → -30536、0x8854 → -30636）。位图字段一旦被符号扩展，高 16 位
-            // 全部变成 1，任何 >bit15 的格式位都会「看起来被声明」——协商就会挑到
-            // 车机根本不支持的格式。
+            // Integers are always read as **unsigned**: the receiver (head unit) writes bitmaps/microseconds/sample rates into
+            // 2-byte ints, and values above 32767 read as signed become negative (measured: 44100 -> -21436,
+            // 35000us -> -30536, 0x8854 -> -30636). Once a bitmap field is sign-extended its upper 16 bits
+            // all become 1, so any format bit above bit15 "looks declared" and negotiation picks a
+            // format the head unit does not support at all.
             0x1 -> readUint(bytes, offset + 1, 1 shl info)
 
             0x2 ->
@@ -351,7 +351,7 @@ object BinaryPlist {
                     else -> null
                 }
 
-            0x3 -> // 日期：CFAbsoluteTime（2001-01-01 起算的秒数），按 Double 原样返回
+            0x3 -> // date: CFAbsoluteTime (seconds since 2001-01-01), returned as a Double as-is
                 Double.fromBits(readUint(bytes, offset + 1, 8))
 
             0x4 -> { // data
@@ -359,26 +359,26 @@ object BinaryPlist {
                 bytes.copyOfRange(start, start + count)
             }
 
-            0x5 -> { // ASCII 字符串
+            0x5 -> { // ASCII string
                 val (count, start) = elementCount(bytes, offset, info)
                 String(bytes, start, count, Charsets.US_ASCII)
             }
 
-            0x6 -> { // UTF-16BE 字符串
+            0x6 -> { // UTF-16BE string
                 val (count, start) = elementCount(bytes, offset, info)
                 String(bytes, start, count * 2, Charsets.UTF_16BE)
             }
 
-            0x7 -> { // UTF-8 字符串（bplist 0x7 号类型，部分编码器会写）
+            0x7 -> { // UTF-8 string (bplist type 0x7; some encoders write it)
                 val (count, start) = elementCount(bytes, offset, info)
                 String(bytes, start, count, Charsets.UTF_8)
             }
 
-            // UID：长度由 info 决定（info+1 字节），**不是** refSize——按 refSize 读会在
-            // refSize>1 时多吃掉后续字节，把整条 plist 的对象指针读歪。
+            // UID: the length is determined by info (info+1 bytes), **not** refSize; reading by refSize would
+            // consume extra following bytes when refSize>1 and skew every object pointer in the plist.
             0x8 -> readUint(bytes, offset + 1, info + 1)
 
-            0xB -> { // UUID（16 字节定长）
+            0xB -> { // UUID (fixed 16 bytes)
                 val size = info + 1
                 bytes.copyOfRange(offset + 1, minOf(offset + 1 + size, bytes.size))
             }
@@ -411,7 +411,7 @@ object BinaryPlist {
         }
     }
 
-    /** 集合/字符串/数据长度：info<0xF 时长度就是 info；否则长度存在随后的 int 对象里。 */
+    /** Collection/string/data length: when info<0xF the length is info itself; otherwise it is stored in the following int object. */
     private fun elementCount(
         bytes: ByteArray,
         offset: Int,
@@ -419,25 +419,25 @@ object BinaryPlist {
     ): Pair<Int, Int> {
         if (info != 0xF) return info to offset + 1
         if (offset + 1 >= bytes.size) {
-            throw IllegalArgumentException("长度字节缺失（offset=$offset body=${bytes.size}B）")
+            throw IllegalArgumentException("length byte missing (offset=$offset body=${bytes.size}B)")
         }
         val intMarker = u8(bytes[offset + 1])
         if (intMarker ushr 4 != 0x1) {
             throw IllegalArgumentException(
-                "期望长度 int 对象，得到 0x${intMarker.toString(16)}（offset=$offset " +
-                    "上下文=" +
+                "expected a length int object, got 0x${intMarker.toString(16)} (offset=$offset " +
+                    "context=" +
                     bytes
                         .copyOfRange(offset, minOf(offset + 8, bytes.size))
-                        .joinToString(" ") { "%02x".format(it) } + "）",
+                        .joinToString(" ") { "%02x".format(it) } + ")",
             )
         }
         val intSize = 1 shl (intMarker and 0xF)
-        // 扩展长度必须按**无符号**读：DiPlay 发 182B 的 data 时写 0xB6，按有符号读成
-        // -74，copyOfRange(51, -23) 直接抛 IAE——整条 iAPSendMessage 命令会被当
-        // 「无法识别」丢弃（2026-10-20 实测定位，与整数负号扩展是同一族 bug）
+        // The extended length must be read as **unsigned**: when DiPlay sends a 182B data it writes 0xB6, which read as signed is
+        // -74, and copyOfRange(51, -23) throws IAE directly, so the whole iAPSendMessage command is dropped as
+        // "unrecognized" (located 2026-10-20; same family of bug as integer sign extension).
         val count = readUint(bytes, offset + 2, intSize)
         if (count < 0 || count > MAX_OBJECTS) {
-            throw IllegalArgumentException("长度字段非法（count=$count offset=$offset）")
+            throw IllegalArgumentException("invalid length field (count=$count offset=$offset)")
         }
         return count.toInt() to offset + 2 + intSize
     }
@@ -449,11 +449,11 @@ object BinaryPlist {
         offset: Int,
         size: Int,
     ): Long {
-        if (size < 0 || size > 8) throw IllegalArgumentException("读取宽度非法（size=$size offset=$offset）")
+        if (size < 0 || size > 8) throw IllegalArgumentException("invalid read width (size=$size offset=$offset)")
         if (offset < 0 || offset + size > bytes.size) {
             throw IllegalArgumentException(
-                "读取越界（offset=$offset size=$size body=${bytes.size}B）——" +
-                    "trailer 与报文实际长度不一致时会出现",
+                "read out of range (offset=$offset size=$size body=${bytes.size}B) - " +
+                    "happens when the trailer disagrees with the actual message length",
             )
         }
         var value = 0L

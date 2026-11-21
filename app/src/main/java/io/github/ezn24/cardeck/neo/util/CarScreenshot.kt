@@ -10,10 +10,11 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 车机画面截图：取合成器推给车机的那一帧，存成 PNG 到「下载/CarDeck」（与日志导出同目录）。
+ * Car screenshot: takes the frame the compositor pushes to the head unit and saves it as PNG in "Download/CarDeck" (same folder as log
+ * export).
  *
- * 触发：手机「诊断」页按钮，或（截 Gemini 这类一闪而过的画面时）
- * `adb shell am broadcast -a io.github.ezn24.cardeck.neo.CAPTURE_CAR -p io.github.ezn24.cardeck.neo`。
+ * Trigger: the phone "Diagnostics" page button, or (to capture fleeting screens such as Gemini)
+ * `adb shell am broadcast -a io.github.ezn24.cardeck.neo.CAPTURE_CAR -p io.github.ezn24.cardeck.neo`.
  */
 object CarScreenshot {
     data class Result(
@@ -24,7 +25,7 @@ object CarScreenshot {
 
     private val RELATIVE_DIR = "${Environment.DIRECTORY_DOWNLOADS}/CarDeck"
 
-    /** 异步截图；[onDone] 在后台线程回调（null = 未连接或保存失败）。 */
+    /** Asynchronous capture; [onDone] is called on a background thread (null = not connected or save failed). */
     fun capture(
         context: Context,
         onDone: (Result?) -> Unit,
@@ -56,7 +57,7 @@ object CarScreenshot {
                 ?: return null
         return try {
             resolver.openOutputStream(uri)?.use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
-                ?: throw IllegalStateException("openOutputStream 返回 null")
+                ?: throw IllegalStateException("openOutputStream returned null")
             resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
             Result("/storage/emulated/0/$RELATIVE_DIR/$fileName", bitmap.width, bitmap.height)
         } catch (_: Exception) {
@@ -69,8 +70,8 @@ object CarScreenshot {
 }
 
 /**
- * adb 触发截图（`am broadcast`）。接收器要求 DUMP 权限：shell 持有，普通应用拿不到，
- * 其它应用无法借它偷截车机画面。
+ * Capture via adb (`am broadcast`). The receiver requires the DUMP permission: held by shell, not by ordinary apps,
+ * so other apps cannot use it to steal the car screen.
  */
 class CarScreenshotReceiver : android.content.BroadcastReceiver() {
     override fun onReceive(
@@ -78,7 +79,23 @@ class CarScreenshotReceiver : android.content.BroadcastReceiver() {
         intent: android.content.Intent,
     ) {
         val pending = goAsync()
-        // 同一把 DUMP 权限锁：adb 导出日志（release 包不可 run-as，排障只能靠这条）
+        // Same DUMP permission lock: adb log export (release builds cannot run-as, so this is the only troubleshooting path)
+        // Same DUMP permission lock: write the navigation apps' visible texts to the log (mapping new map layouts)
+        if (intent.action == ACTION_DUMP_NAV_UI) {
+            val log: (String) -> Unit = { line ->
+                io.github.ezn24.cardeck.neo.SessionController
+                    .appendLog(line)
+            }
+            io.github.ezn24.cardeck.neo.nav.MapsNotificationSource
+                .dumpToLog(log)
+            val running =
+                io.github.ezn24.cardeck.neo.nav.NavAccessibilityService
+                    .dump()
+            if (!running) log("NAV-DUMP: accessibility service not running (enable it in system accessibility settings)")
+            pending.resultData = if (running) "ok" else "accessibility service not running"
+            pending.finish()
+            return
+        }
         if (intent.action == ACTION_EXPORT_LOG) {
             Bg.run("adb-export-log") {
                 val scope = if (intent.getBooleanExtra("all", false)) LogExporter.Scope.ALL else LogExporter.Scope.CURRENT_SESSION
@@ -90,9 +107,9 @@ class CarScreenshotReceiver : android.content.BroadcastReceiver() {
         CarScreenshot.capture(context) { result ->
             io.github.ezn24.cardeck.neo.SessionController.appendLog(
                 if (result != null) {
-                    "SCREENSHOT: 车机画面 ${result.width}x${result.height} → ${result.path}"
+                    "SCREENSHOT: car frame ${result.width}x${result.height} -> ${result.path}"
                 } else {
-                    "SCREENSHOT: 截图失败（未连接车机或保存失败）"
+                    "SCREENSHOT: capture failed (car not connected or save failed)"
                 },
             )
             pending.resultData = result?.path ?: "failed"
@@ -102,3 +119,4 @@ class CarScreenshotReceiver : android.content.BroadcastReceiver() {
 }
 
 private const val ACTION_EXPORT_LOG = "io.github.ezn24.cardeck.neo.EXPORT_LOG"
+private const val ACTION_DUMP_NAV_UI = "io.github.ezn24.cardeck.neo.DUMP_NAV_UI"

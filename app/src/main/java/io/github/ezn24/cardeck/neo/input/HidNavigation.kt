@@ -3,23 +3,24 @@ package io.github.ezn24.cardeck.neo.input
 import android.view.KeyEvent
 
 /**
- * 车机「导航类」HID（iDrive 旋钮 / 四向拨杆 / 确认键）→ Android 方向键。
+ * Head-unit "navigation" HID (iDrive knob / four-way stick / confirm key) -> Android D-pad keys.
  *
- * 与 [ConsumerKeys] 的分工：
- *  - Consumer 页（0x0C）= 媒体键 → `AudioManager.dispatchMediaKeyEvent`，全局生效、不需要焦点；
- *  - Generic Desktop 页（0x01）的 Wheel(0x38)/Hat(0x39) = 旋钮/方向 → **DPAD_***，
- *    必须注入虚拟屏、由焦点系统处理（`CarInputBridge.injectNavigationKey`）。
+ * Division of labor with [ConsumerKeys]:
+ *  - Consumer page (0x0C) = media keys -> `AudioManager.dispatchMediaKeyEvent`, global, needs no focus;
+ *  - Generic Desktop page (0x01) Wheel(0x38)/Hat(0x39) = knob/direction -> **DPAD_***,
+ *    must be injected into the virtual display and handled by the focus system (`CarInputBridge.injectNavigationKey`).
  *
- * **不按车机型号写死**：先用 HID 描述符判定（有 Wheel/Hat 且不是 Digitizer 才算导航设备），
- * 描述符缺失时才按报文长度兜底（2~4 字节、非 5 字节触摸）。
+ * **Not hard-coded per head-unit model**: decide from the HID descriptor first (Wheel/Hat present and not a
+ * Digitizer makes a navigation device),
+ * and fall back to report length only when the descriptor is missing (2~4 bytes, not the 5-byte touch).
  *
- * 报文布局（宝马 iD8.5 实测校准用：[rawLogEnabled] 打开后日志里有原始 hex）：
- *  - 末字节按**有符号**解析为旋钮步进（顺时针为正）；
- *  - 前面的字节按位图解析按钮：bit0=确认、1=上、2=下、3=左、4=右、5=返回。
- *  - 描述符声明了 Hat switch 时改用「低 4 位 = 8 向帽」语义。
+ * Report layout (calibrated against a BMW iD8.5 field test; with [rawLogEnabled] on, the log carries the raw hex):
+ *  - The last byte is parsed as a **signed** knob step (clockwise positive);
+ *  - the preceding bytes are parsed as a button bitmap: bit0=confirm, 1=up, 2=down, 3=left, 4=right, 5=back.
+ *  - When the descriptor declares a Hat switch, use the "low 4 bits = 8-way hat" semantics instead.
  */
 object HidNavigation {
-    /** 原始报文日志开关（设置 → 显示 →「HID 原始日志」）。 */
+    /** Raw report log switch (Settings -> Display -> "HID raw log"). */
     @Volatile
     var rawLogEnabled: Boolean = false
 
@@ -29,13 +30,13 @@ object HidNavigation {
     private const val USAGE_WHEEL = 0x38
     private const val USAGE_HAT_SWITCH = 0x39
 
-    /** 单次报告最多走几步（旋钮快拧时避免一次注入几十个按键把 UI 打死）。 */
+    /** Maximum steps per report (so a fast knob turn does not inject dozens of keys at once and choke the UI). */
     private const val MAX_STEPS = 5
 
     private val lastButtonMask = HashMap<String, Int>()
     private val lastHat = HashMap<String, Int>()
 
-    /** 报告对应的设备是否是导航类（有 Wheel/Hat、且不是触摸屏）。 */
+    /** Whether the report's device is a navigation device (has Wheel/Hat and is not a touch screen). */
     fun isNavigationDevice(descriptor: ByteArray?): Boolean {
         if (descriptor == null || descriptor.isEmpty()) return false
         if (hasPage(descriptor, PAGE_DIGITIZER)) return false
@@ -44,9 +45,9 @@ object HidNavigation {
     }
 
     /**
-     * 处理一帧导航报告，返回需要注入的按键序列（0 个或多个）。
+     * Handles one navigation report and returns the key sequence to inject (zero or more).
      *
-     * @param uuid HID 设备 uuid（同一 uuid 的边沿状态单独维护）
+     * @param uuid HID device uuid (edge state is kept separately per uuid)
      */
     fun handle(
         uuid: String,
@@ -70,7 +71,7 @@ object HidNavigation {
         }
     }
 
-    /** 8 向帽：0=上 1=右上 2=右 3=右下 4=下 5=左下 6=左 7=左上，其余=松开。 */
+    /** 8-way hat: 0=up 1=up-right 2=right 3=down-right 4=down 5=down-left 6=left 7=up-left, anything else = released. */
     private fun parseHat(
         uuid: String,
         value: Int,
@@ -91,7 +92,7 @@ object HidNavigation {
         }
     }
 
-    /** 末字节=有符号步进，前面的字节=按钮位图（边沿触发）。 */
+    /** Last byte = signed step, preceding bytes = button bitmap (edge triggered). */
     private fun parseWheelAndButtons(
         uuid: String,
         report: ByteArray,
@@ -125,10 +126,10 @@ object HidNavigation {
     private fun Int?.orZero(): Int = this ?: 0
 
     /**
-     * 描述符里是否出现某个 Usage Page。
-     * 只做「条目扫描」：UsagePage 是全局项（prefix `0000 0101`? 实际 bTag=0x0），
-     * 这里按「任何 1~2 字节数据项的值等于该页」宽松匹配——误判只影响分流，
-     * 不会把触摸屏当旋钮（Digitizer 页优先排除）。
+     * Whether a Usage Page appears in the descriptor.
+     * Only an "item scan": UsagePage is a global item (bTag=0x0),
+     * and here any 1~2 byte data item whose value equals the page is matched loosely; a false positive only affects routing
+     * and never turns a touch screen into a knob (the Digitizer page is excluded first).
      */
     private fun hasPage(
         descriptor: ByteArray,
@@ -157,7 +158,7 @@ object HidNavigation {
         return false
     }
 
-    /** 描述符里是否出现某个 Usage（局部项 bTag=0x0，1/2 字节）。 */
+    /** Whether a Usage appears in the descriptor (local item bTag=0x0, 1/2 bytes). */
     private fun hasUsage(
         descriptor: ByteArray,
         usage: Int,
@@ -185,15 +186,15 @@ object HidNavigation {
         return false
     }
 
-    /** 键盘键的可读名（日志用）。 */
+    /** Readable key name (for logs). */
     fun nameOf(keyCode: Int): String =
         when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> "上"
-            KeyEvent.KEYCODE_DPAD_DOWN -> "下"
-            KeyEvent.KEYCODE_DPAD_LEFT -> "左"
-            KeyEvent.KEYCODE_DPAD_RIGHT -> "右"
-            KeyEvent.KEYCODE_DPAD_CENTER -> "确认"
-            KeyEvent.KEYCODE_BACK -> "返回"
+            KeyEvent.KEYCODE_DPAD_UP -> "up"
+            KeyEvent.KEYCODE_DPAD_DOWN -> "down"
+            KeyEvent.KEYCODE_DPAD_LEFT -> "left"
+            KeyEvent.KEYCODE_DPAD_RIGHT -> "right"
+            KeyEvent.KEYCODE_DPAD_CENTER -> "confirm"
+            KeyEvent.KEYCODE_BACK -> "back"
             else -> "$keyCode"
         }
 }

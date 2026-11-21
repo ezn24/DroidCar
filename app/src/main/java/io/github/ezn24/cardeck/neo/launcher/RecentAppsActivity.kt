@@ -21,11 +21,13 @@ import io.github.ezn24.cardeck.neo.ui.WallpaperStore
 import io.github.ezn24.cardeck.neo.util.Bg
 
 /**
- * 背景应用管理（车机侧）。2026-11-17 改成 CarPlay 主画面同一套视觉：与桌面同一张壁纸
- * 切片、4 列大图标 + 名称；图标左上角「−」关闭（iOS 编辑态同款），点图标切换过去；
- * 顶栏：返回 · 标题 · 「全部关闭」胶囊。
+ * Background app management (head-unit side). Changed 2026-11-17 to the same visual as the CarPlay home screen: same wallpaper
+ * slice as the desktop, 4-column large icons + names; a "-" at the icon's top-left closes it (like iOS edit mode), tapping the icon
+ * switches to it;
+ * top bar: back - title - "close all" capsule.
  *
- * 只展示本次连接开过的应用（[VirtualLauncher.sessionApps]），图标/标签和 shell 查询全在后台。
+ * Shows only apps opened during this connection ([VirtualLauncher.sessionApps]); icons / labels and shell queries all run in the
+ * background.
  */
 class RecentAppsActivity : AppCompatActivity() {
     private data class Entry(
@@ -53,7 +55,7 @@ class RecentAppsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         val root = FrameLayout(this).apply { setBackgroundColor(0xFF090B12.toInt()) }
         addWallpaper(root)
-        // 壁纸上压一层暗幕，保证图标与文字可读（与桌面观感一致、略深一点区分「管理态」）
+        // Dim the wallpaper so icons and text stay readable (matches the desktop look, a bit darker to mark the "manage state")
         root.addView(View(this).apply { setBackgroundColor(0x59000000) }, FrameLayout.LayoutParams(-1, -1))
 
         val column =
@@ -92,7 +94,7 @@ class RecentAppsActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(this) { leave() }
     }
 
-    /** 顶栏：圆形返回 · 标题（居中）· 全部关闭胶囊。 */
+    /** Top bar: round back button - title (centered) - close-all capsule. */
     private fun buildHeader(): View {
         val header = FrameLayout(this)
         header.addView(
@@ -133,7 +135,7 @@ class RecentAppsActivity : AppCompatActivity() {
         return header
     }
 
-    /** 与桌面同一张壁纸切片（整幅画布 aspectFill，按 dock 位置偏移露出应用区那一块）。 */
+    /** Same wallpaper slice as the desktop (whole canvas aspectFill, offset by the dock position to reveal the app area). */
     private fun addWallpaper(root: FrameLayout) {
         val scale = VirtualLauncher.gridScale()
         val canvasWidth = (VirtualLauncher.streamWidthPx * scale).toInt()
@@ -212,7 +214,7 @@ class RecentAppsActivity : AppCompatActivity() {
         }
     }
 
-    /** 4 列图标格：格宽 = 内容宽 / 4，图标占格宽 ~46%（与桌面网格同观感）。 */
+    /** 4-column icon grid: cell width = content width / 4, icon takes ~46% of the cell width (same look as the desktop grid). */
     private fun render() {
         grid.removeAllViews()
         empty.visibility = if (entries.isEmpty()) View.VISIBLE else View.GONE
@@ -239,7 +241,7 @@ class RecentAppsActivity : AppCompatActivity() {
                 contentDescription = getString(R.string.recent_open_app, entry.title)
                 setOnClickListener { if (!busy) open(entry) }
             }
-        // 图标 + 左上角关闭徽标（徽标向外溢出一半，压在图标角上）
+        // Icon + close badge at the top-left (the badge overflows outward by half, sitting on the icon corner)
         val iconFrame = FrameLayout(this).apply { clipChildren = false }
         val inset = badge / 3
         iconFrame.addView(

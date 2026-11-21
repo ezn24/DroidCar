@@ -4,8 +4,8 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * 车型重放 fixture 加载器（JSONL）。目录默认 gitignore——新鲜克隆无 fixture 时
- * 测试自动跳过（见各 Replay 测试的目录扫描），本地提取后即为回归闸门。
+ * Car-model replay fixture loader (JSONL). The directory is gitignored by default -- on a fresh clone with no fixtures
+ * the tests skip automatically (see the directory scan in each Replay test); once extracted locally it becomes a regression gate.
  */
 class CarFixture(
     val name: String,
@@ -18,20 +18,20 @@ class CarFixture(
         val durationMs: Long,
         val rx: ByteArray,
         val recordedTx: ByteArray,
-        /** RAW 预算截断过尾部残帧（已在提取时裁齐）。 */
+        /** Trailing partial frames truncated by the RAW budget (already trimmed at extraction). */
         val rxTruncated: Boolean,
-        /** 完整识别帧（0x1D01）幸存——true 才能做识别阶段的全量断言。 */
+        /** The complete identification frame (0x1D01) survives -- only true allows full assertions on the identification phase. */
         val rxHasIdent: Boolean,
     )
 
     val btRounds = ArrayList<BtRound>()
-    val tunnelRx = ArrayList<Pair<Int, ByteArray>>() // 消息号 → CSM 体
+    val tunnelRx = ArrayList<Pair<Int, ByteArray>>() // message ID -> CSM body
     val tunnelTxIds = ArrayList<Int>()
 
     companion object {
         fun loadDirectory(): List<CarFixture> {
-            // src/test/resources 在 Gradle 测试运行时是 classpath；从位置反推源码目录
-            // （动态 fixture 不打进 jar，按文件系统读最直接）
+            // src/test/resources is on the classpath during Gradle test runs; derive the source directory from the location
+            // (dynamic fixtures are not packed into the jar, reading from the filesystem is the most direct)
             val roots =
                 listOf(
                     File("src/test/resources/carplay/fixtures"),
@@ -44,7 +44,7 @@ class CarFixture(
                 .sortedBy { it.name }
                 .mapNotNull { file ->
                     runCatching { parse(file) }.getOrElse {
-                        println("REPLAY: fixture 解析失败 ${file.name}: $it")
+                        println("REPLAY: fixture parse failed ${file.name}: $it")
                         null
                     }
                 }

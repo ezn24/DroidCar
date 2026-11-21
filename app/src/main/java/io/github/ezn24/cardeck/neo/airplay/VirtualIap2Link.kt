@@ -1,49 +1,53 @@
 package io.github.ezn24.cardeck.neo.airplay
 
 import android.content.Context
+import io.github.ezn24.cardeck.neo.iap2.ArtworkTransfer
 import io.github.ezn24.cardeck.neo.iap2.Iap2Csm
 import io.github.ezn24.cardeck.neo.iap2.Iap2LinkEngine
 import io.github.ezn24.cardeck.neo.iap2.Iap2MessageIds
 import io.github.ezn24.cardeck.neo.iap2.MfiLengthMemory
+import io.github.ezn24.cardeck.neo.iap2.NowPlayingUpdate
 import io.github.ezn24.cardeck.neo.iap2.ReceiverProfile
 import io.github.ezn24.cardeck.neo.input.ConsumerKeys
 import io.github.ezn24.cardeck.neo.input.HidNavigation
+import io.github.ezn24.cardeck.neo.media.CarNowPlaying
+import io.github.ezn24.cardeck.neo.nav.CarRouteGuidance
 import java.security.SecureRandom
 import java.util.TimeZone
 import java.util.UUID
 
 /**
- * 事件通道上的虚拟 iAP2 链路（AirPlay 会话之上的「WiFi 隧道」），一条实现服务三种形态：
+ * Virtual iAP2 link on the event channel (the "WiFi tunnel" above the AirPlay session); one implementation serves three forms:
  *
- *  - **DiPlay（type-130 隧道）**：出站写隧道 TCP；链路协商用「回显先行」语义
- *    （对端引擎硬性期望，见 [Iap2LinkEngine.echoFirst]）；
- *  - **Audi MIB3（事件通道 + 控制通道 POST）**：真机时序（AADisplay 以 Frida 挂
- *    越狱 iPhone mediaserverd 抓包确认）——**屏幕流 SETUP 成功后由手机主动发一次
- *    DETECT（经控制通道 POST /command 的 iAPSendMessage）→ 车机回 SYN（事件通道）
- *    → 手机回 SYN|ACK（控制通道）**，随后控制会话整段重跑：0x1D00 → 0x1D01 →
- *    0x1D02+0xAA00 →（0xAA06 → 0xAA00）→ 0xAA02 挑战 20B → 0xAA03 → 0xAA05 →
- *    手机突发消息 → 应答车机订阅。**只回显空 ACK 的话 MIB3 约 10~12 秒整链拆除**
- *    （本仓库 2026-10-19 两轮实车日志 10.2s 复现，此前误判为心跳缺失）；
- *  - **旧事件形态 / 明文会话**：marker 一问一答回显（保持历史行为）。
+ *  - **DiPlay (type-130 tunnel)**: outbound writes go to the tunnel TCP; link negotiation uses "echo first" semantics
+ *    (a hard expectation of the peer engine, see [Iap2LinkEngine.echoFirst]);
+ *  - **Audi MIB3 (event channel + control-channel POST)**: real-device sequence (AADisplay captured it by hooking
+ *    mediaserverd on a jailbroken iPhone with Frida): **after the screen-stream SETUP succeeds the phone sends one
+ *    DETECT itself (iAPSendMessage via control-channel POST /command) -> head unit replies SYN (event channel)
+ *    -> phone replies SYN|ACK (control channel)**, then the whole control session is rerun: 0x1D00 -> 0x1D01 ->
+ *    0x1D02+0xAA00 -> (0xAA06 -> 0xAA00) -> 0xAA02 challenge 20B -> 0xAA03 -> 0xAA05 ->
+ *    phone burst messages -> answer the head unit's subscriptions. **If we only echo empty ACKs, MIB3 tears the whole link down after ~10-12 s**
+ *    (reproduced at 10.2 s in two real-car logs of this repo on 2026-10-19; it was previously misdiagnosed as missing heartbeats);
+ *  - **Old event form / plaintext session**: marker question-and-answer echo (historical behavior kept).
  *
- * 车机→手机的链路字节统一从事件通道 iAPSendMessage 进来（[onCarBytes]）；
- * 手机→车机按形态分流（隧道 TCP / 控制通道 POST <-- 默认）。**方向不能对调**：
- * 出站写在事件通道上车机不读（Frida 结论；2026-10-20 Honda HFT 实测复现——
- * 出站改到事件通道后，车机 20 分钟内一条 FF5A 同步包都没回，只按 1Hz 重发 marker）。
+ * Link bytes from head unit to phone all arrive through event-channel iAPSendMessage ([onCarBytes]);
+ * phone to head unit is routed by form (tunnel TCP / control-channel POST <-- default). **The directions must not be swapped**:
+ * the head unit does not read outbound writes on the event channel (Frida finding; reproduced on Honda HFT 2026-10-20:
+ * after moving outbound to the event channel, the head unit sent not a single FF5A sync packet in 20 minutes, only resending the marker at 1 Hz).
  */
 class VirtualIap2Link(
     private val log: (String) -> Unit,
-    /** 事件通道 iAPSendMessage 出站（旧形态兜底）。 */
+    /** Event-channel iAPSendMessage outbound (fallback for the old form). */
     private val sendEventIap: (ByteArray) -> Boolean,
-    /** 控制通道 iAPSendMessage 出站（MIB3 手机侧帧的唯一正确通道）。 */
+    /** Control-channel iAPSendMessage outbound (the only correct channel for MIB3 phone-side frames). */
     private val sendControlIap: (ByteArray) -> Unit,
-    /** DiPlay type-130 隧道写入口（每次出站动态取用，可为 null）。 */
+    /** DiPlay type-130 tunnel write entry (looked up dynamically on every outbound; may be null). */
     private val tunnelWriter: () -> AirPlayClient.IapTunnelClient?,
-    /** 节拍线程存活条件（宿主控制连接未关）。 */
+    /** Pacer-thread liveness condition (host control connection not closed). */
     private val alive: () -> Boolean,
-    /** MFi 长度记忆的持久化上下文；null = 进程内记忆（单测）。 */
+    /** Persistence context for the MFi length memory; null = in-process memory (unit tests). */
     private val mfiContext: Context? = null,
-    /** 时钟（单测可注入）。 */
+    /** Clock (injectable in unit tests). */
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
     private val lock = Any()
@@ -53,31 +57,31 @@ class VirtualIap2Link(
     private var eaCount = 0
     private var started = false
 
-    // ---- DiPlay 隧道路径状态 ----
+    // ---- DiPlay tunnel path state ----
     private var tunnelCsmStarted = false
     private var tunnelIdentified = false
 
-    /** 同步回显待投递（隧道门闸：回显真正写进隧道 TCP 后才允许发 0x1D00）。 */
+    /** Pending delivery of the sync echo (tunnel gate: 0x1D00 may only be sent after the echo is actually written to the tunnel TCP). */
     private var pendingEchoFlush = false
     private var tunnelEchoDelivered = false
 
-    // ---- MIB3 路径状态 ----
+    // ---- MIB3 path state ----
     private var mib3Armed = false
 
     /**
-     * 车机链路代际（枚举与判定收口在 [ReceiverProfile]，判定依据随 PROFILE/IAPLINK
-     * 日志输出）。
+     * Head-unit link generation (enum and classification live in [ReceiverProfile]; the basis is printed in the PROFILE/IAPLINK
+     * logs).
      *
-     * **2026-10-23 二次定谳：marker 协商不再按代际分派**——所有车机都必须完成链路
-     * 协商（车机 marker = 它在等我们的会话表，1Hz 无限重发；不回应则链路永远到不了
-     * NORMAL，RECORD 后 ~10s 被车机拆链：0.1.9 实测 10.17s、0.1.17 实测 10.18s）。
-     * 此前 0.1.16/0.1.17 曾对 CLASSIC_MIB3 忽略 marker，依据是「0.1.9 忽略 marker
-     * 时奥迪照常进入」——该论断被 0.1.9 自己的日志（10.17s 拆链）与 0.1.17 车主日志
-     * 推翻。当年「协商挂起车机 UI 卡原界面」的真因是协商完成后缺 modesChanged 重申
-     * （见 [onControlSessionComplete]）。
+     * **Second ruling 2026-10-23: marker negotiation is no longer dispatched by generation**. Every head unit must complete link
+     * negotiation (the head unit marker means it is waiting for our session table and is resent endlessly at 1 Hz; without a reply the link never reaches
+     * NORMAL and the head unit tears it down ~10 s after RECORD: measured 10.17 s on 0.1.9, 10.18 s on 0.1.17).
+     * Versions 0.1.16/0.1.17 had ignored markers for CLASSIC_MIB3 on the claim that "Audi proceeds normally when 0.1.9 ignores markers";
+     * that claim was disproved by 0.1.9's own log (10.17 s teardown) and by the 0.1.17 owner log.
+     * The real cause of the earlier "negotiation hangs the head unit UI on the old screen" was the missing modesChanged re-assertion after negotiation completed
+     * (see [onControlSessionComplete]).
      *
-     * 代际现在仅用于日志与未来分派，marker 策略统一：按阈值升级协商（Honda HFT 的
-     * 媒体键载体在建链后的 0x6802 里，奥迪的切屏前提是链路 NORMAL + 资源重声明）。
+     * The generation is now used only for logging and future dispatch; the marker policy is uniform: upgrade to negotiation by threshold (on Honda HFT the
+     * media-key carrier is in 0x6802 after the link is up, and on Audi the screen switch requires link NORMAL + resource re-declaration).
      */
     private var generation: ReceiverProfile.LinkGeneration = ReceiverProfile.LinkGeneration.EVENT_LINK
     private var mib3SynAckQueued = false
@@ -90,56 +94,56 @@ class VirtualIap2Link(
     private var mib3ControlSessionNotified = false
 
     /**
-     * 事件通道链路模式（2026-10-20 Honda HFT 实测新增）。
+     * Event-channel link mode (added after the Honda HFT measurement on 2026-10-20).
      *
-     * 车机在**事件通道**上以发起方姿态反复发 SYN marker（`FF 55 02 00 EE 10`，
-     * 每秒一次、连续上百次），等的是我们对它回一个 marker 才会继续发同步包。
-     * 而 [armMib3] 的 detect 走的是**控制通道**——车机看不到，于是永远重发。
+     * The head unit repeatedly sends SYN markers (`FF 55 02 00 EE 10`) on the **event channel** acting as initiator,
+     * once per second, hundreds of times in a row, and only continues with sync packets once we answer with a marker.
+     * But [armMib3]'s detect goes over the **control channel**, which the head unit cannot see, so it keeps resending forever.
      *
-     * 连续第 [EVENT_LINK_MARKER_THRESHOLD] 个 marker 起判定它确实在等回应，
-     * 切到本模式：出入站都走事件通道，marker 应答 + 同步包协商即可建链。
-     * 链路建立后车机才会发 0x5000（NowPlaying 订阅）、0x6800（StartHID）、
-     * 0x6802（HID 报告 = 方向盘/面板媒体键）——切歌按键的载体就在这里。
+     * Starting from the [EVENT_LINK_MARKER_THRESHOLD]-th consecutive marker we judge that it is really waiting for a reply
+     * and switch to this mode: both directions use the event channel, and marker reply + sync-packet negotiation builds the link.
+     * Only after the link is up does the head unit send 0x5000 (NowPlaying subscription), 0x6800 (StartHID),
+     * 0x6802 (HID report = steering wheel/panel media keys); the track-change keys are carried there.
      */
     private var eventLinkArmed = false
     private var eventLinkMarkers = 0
     private var eventCsmStarted = false
 
     /**
-     * 控制通道协商轮次（2026-10-20 Honda HFT 定案后新增）。
+     * Control-channel negotiation rounds (added after the Honda HFT verdict on 2026-10-20).
      *
-     * 车机的 marker 从**事件通道入站**，但它的 iAP2 栈只从**控制通道**（RTSP
-     * POST /command 的 iAPSendMessage）读我们发的字节——项目原有 Frida 结论就写着
-     * 「写在事件通道上时车机根本不读」。r5/r6 把出站也挪到事件通道后，车机连一条
-     * FF5A 同步包都不回、1Hz 重发 marker 到天亮，正是这一条被踩中。
+     * The head unit's marker arrives **inbound on the event channel**, but its iAP2 stack only reads our bytes from the **control channel** (RTSP
+     * POST /command iAPSendMessage); the project's original Frida finding says
+     * "the head unit does not read writes on the event channel". After r5/r6 moved outbound to the event channel as well, the head unit did not reply with even one
+     * FF5A sync packet and resent the marker at 1 Hz until dawn; this is exactly that mistake.
      *
-     * 现在出站回归控制通道：每轮 [armMib3] / [restartControlNegotiation] 发一次
-     * 「marker + 本表会话表」，引擎内部按 500ms/1s 重发；[CONTROL_SYN_ROUND_MILLIS]
-     * 无进展就进入下一轮，最多 [MAX_CONTROL_SYN_ROUNDS] 轮，之后停在 NEGOTIATING
-     * 静默等待（不再打点，避免把车机栈刷懵）。
+     * Outbound is back on the control channel: every round, [armMib3] / [restartControlNegotiation] sends once
+     * "marker + our session table", and the engine resends internally at 500ms/1s; if [CONTROL_SYN_ROUND_MILLIS] passes
+     * without progress we move to the next round, at most [MAX_CONTROL_SYN_ROUNDS] rounds, then stay in NEGOTIATING
+     * and wait silently (no more pokes, to avoid confusing the head unit stack).
      */
     private var controlSynRounds = 0
     private var controlSynRoundStartedAtMs = 0L
     private var controlSynGaveUp = false
 
-    /** 未处理的控制会话消息计数（媒体键排查的观测点，见 [maybeRespondControlCsmLocked]）。 */
+    /** Count of unhandled control-session messages (observation point for media-key debugging, see [maybeRespondControlCsmLocked]). */
     private var unknownCsmIds = 0
 
-    /** 上一次记录过的链路状态（只在对日志里出现一次状态迁移）。 */
+    /** Last link state that was logged (so each state transition appears once in the log). */
     private var lastLinkState = Iap2LinkEngine.State.IDLE
 
-    // ---- 车机 HID 媒体键（0x6802）状态 ----
-    /** 上一次报文里按下的 Usage 集合（用于判定「新按下」，松开后自动清空）。 */
+    // ---- Head-unit HID media key (0x6802) state ----
+    /** Set of Usages pressed in the previous report (to detect "newly pressed"; cleared automatically on release). */
     private var lastHidUsages: Set<Int> = emptySet()
 
-    /** 当前这批按键的起始时刻（连续同一按键超过 [HID_HOLD_REPEAT_MILLIS] 才允许连发）。 */
+    /** Start time of the current batch of key presses (auto-repeat is only allowed after the same key is held longer than [HID_HOLD_REPEAT_MILLIS]). */
     private var hidHoldStartedAtMs = 0L
 
-    /** 已打印的参数明细帧数（只打前几帧，之后按需打动作）。 */
+    /** Number of frames whose parameter details were printed (only the first few; afterwards actions are logged as needed). */
     private var hidReportFrames = 0
 
-    // ---- MIB3 隧道 MFi 挑战（按车机持久化记忆；与蓝牙链路**独立记**——同一台车
-    // 两条链路的认证后端可能不同，实测 MMI 3315 蓝牙认 32B 而 Frida 隧道是 20B） ----
+    // ---- MIB3 tunnel MFi challenge (remembered per head unit; recorded **independently** of the Bluetooth link: on the same car
+    // the authentication backends of the two links may differ; measured on MMI 3315, Bluetooth accepts 32B while the Frida tunnel uses 20B) ----
     private var mfiIdentity: String? = null
     private var mfiMemory = MfiLengthMemory.Entry()
     private var mfiOrder: List<Int> = emptyList()
@@ -151,6 +155,7 @@ class VirtualIap2Link(
 
     init {
         engine.onEaData = { bytes -> handleEaData(bytes) }
+        engine.onFileTransferData = { bytes -> CarNowPlaying.post { artworkTransfer.onDatagram(bytes) } }
         engine.onSynchronizationEchoSent = { pendingEchoFlush = true }
         Thread(
             {
@@ -173,7 +178,7 @@ class VirtualIap2Link(
         }
     }
 
-    /** 事件形态启动：服务端待命（收到 marker 回 marker，等车机 SYN）。 */
+    /** Event-form start: server stands by (reply marker to marker, wait for the head unit SYN). */
     fun begin() {
         synchronized(lock) {
             if (started) return
@@ -183,14 +188,14 @@ class VirtualIap2Link(
     }
 
     /**
-     * MIB3 布防（屏幕流 SETUP 成功后调用，且仅一次）：主动向**控制通道**发一次 DETECT。
-     * 必须等 SETUP 完成后再发——早发会在 SETUP 交换期间被冲掉（Frida 结论）；此后
-     * 车机的 marker 都是探测重发，真机（MIB3）回一次 SYN 就不再重发。
+     * MIB3 arming (called after the screen-stream SETUP succeeds, once only): proactively send one DETECT on the **control channel**.
+     * It must wait until SETUP completes (sent earlier it gets flushed during the SETUP exchange; Frida finding); after that
+     * the head unit's markers are probe resends, and a real MIB3 stops resending once it replies with one SYN.
      *
-     * 注意这里**只发裸 marker**：MIB3 的时序是「它回 SYN → 我们回 SYN|ACK」，
-     * 提前把会话表拍过去反而会打乱它的状态机（见 [Iap2LinkEngine.startResponder]
-     * 的实测记录）。车机若像 Honda HFT 那样反复重发 marker，才由
-     * [startControlRoundLocked] 升级成「marker + 本表会话表」并重试。
+     * Note: **only a bare marker** is sent here: the MIB3 sequence is "it replies SYN -> we reply SYN|ACK",
+     * and pushing the session table early only disturbs its state machine (see the measurements at [Iap2LinkEngine.startResponder]).
+     * If the head unit keeps resending markers like Honda HFT does, only then does
+     * [startControlRoundLocked] upgrade to "marker + our session table" and retry.
      */
     fun armMib3() {
         synchronized(lock) {
@@ -198,25 +203,25 @@ class VirtualIap2Link(
             if (mib3Armed) return
             mib3Armed = true
             sendControlIap(Iap2LinkEngine.MARKER)
-            log("IAPLINK: MIB3 detect 已发（控制通道 iAPSendMessage，代际=$generation）——等待车机")
+            log("IAPLINK: MIB3 detect sent (control-channel iAPSendMessage, generation=$generation) - waiting for the head unit")
         }
     }
 
     /**
-     * 显式声明车机链路代际（布防前后均可，幂等）。代际现仅用于日志与未来分派，
-     * marker 协商策略全代际统一（2026-10-23 二次定谳，见 [generation] 文档）。
+     * Explicitly declares the head-unit link generation (before or after arming, idempotent). The generation is now used only for logging and future dispatch;
+     * the marker negotiation policy is uniform across generations (second ruling 2026-10-23, see the [generation] docs).
      */
     fun setGeneration(generation: ReceiverProfile.LinkGeneration) {
         synchronized(lock) {
             if (this.generation == generation) return
             this.generation = generation
-            log("IAPLINK: 链路代际 → $generation")
+            log("IAPLINK: link generation -> $generation")
         }
     }
 
     /**
-     * 调试/特殊形态用：强制开启一轮控制通道协商（正常路径由车机 marker 触发）。
-     * 一经调用，后续 marker 按协商态处理。
+     * For debugging/special forms: force one control-channel negotiation round (the normal path is triggered by the head unit marker).
+     * Once called, later markers are handled in the negotiating state.
      */
     fun forceControlNegotiation(reason: String) {
         synchronized(lock) {
@@ -227,18 +232,18 @@ class VirtualIap2Link(
     }
 
     /**
-     * MIB3 控制会话完成回调（auth+burst 发出时触发一次）：宿主应在此之后按
-     * AADisplay r17 验证过的时序重申 modesChanged 资源声明（+1.5s 首发、
-     * +4/+12/+30s 重申）。**082446 定谳**：协商/MFi/订阅全部成功但只在会话
-     * 建立早期声明过一次资源 → 车机全程健康却永不切到 CarPlay 画面——第二控制
-     * 会话把车机的资源仲裁重置了一遍，旧声明已失效，它在等一份新的。
-     * 注意不得在 0xAA00/0xAA05 进行中声明（与 iAP POST 抢控制通道会把奥迪搞死，
-     * AADisplay 注释原话），必须等 burst 完成。
+     * MIB3 control-session-complete callback (fires once when auth+burst are sent): afterwards the host should re-assert the modesChanged resource declaration
+     * with the timing verified by AADisplay r17 (+1.5s first send,
+     * +4/+12/+30s re-assertions). **Ruling from 082446**: negotiation/MFi/subscriptions all succeeded but resources were declared only once
+     * early in the session -> the head unit stayed healthy yet never switched to the CarPlay picture: the second control
+     * session reset the head unit's resource arbitration, the old declaration was void, and it was waiting for a new one.
+     * Do not declare while 0xAA00/0xAA05 are in flight (competing with iAP POSTs for the control channel kills the Audi,
+     * per the AADisplay comment); wait until the burst completes.
      */
     var onControlSessionComplete: (() -> Unit)? = null
 
     /**
-     * 开一轮控制通道协商：marker + 本表同步包（会话 10/11/12），刷新引擎重发节拍。
+     * Starts one control-channel negotiation round: marker + our sync packet (sessions 10/11/12), refreshing the engine resend cadence.
      */
     private fun startControlRoundLocked(reason: String) {
         val now = nowMillis()
@@ -246,16 +251,16 @@ class VirtualIap2Link(
         controlSynRoundStartedAtMs = now
         engine.initiate(now)
         log(
-            "IAPLINK: 控制通道 marker + 本表同步包（第 $controlSynRounds/$MAX_CONTROL_SYN_ROUNDS 轮，$reason）" +
-                "——等车机同步包（FF5A）",
+            "IAPLINK: control-channel marker + our sync packet (round $controlSynRounds/$MAX_CONTROL_SYN_ROUNDS, $reason)" +
+                " - waiting for the head unit sync packet (FF5A)",
         )
         drainLocked()
     }
 
-    /** 车机链路字节入口（事件通道 iAPSendMessage 的 data）。 */
+    /** Entry point for head-unit link bytes (the data of event-channel iAPSendMessage). */
     fun onCarBytes(bytes: ByteArray) {
         synchronized(lock) {
-            // 隧道存在时切换「回显先行」协商语义（DiPlay 对端引擎硬性期望）
+            // With a tunnel present, switch to "echo first" negotiation semantics (a hard expectation of the DiPlay peer engine)
             engine.echoFirst = tunnelWriter() != null
             val isMarker =
                 bytes.size == 6 &&
@@ -266,22 +271,22 @@ class VirtualIap2Link(
                     mib3MarkerIgnores++
                     val now = nowMillis()
                     when (generation) {
-                        // 2026-10-23 定谳：**所有代际都必须完成链路协商**。曾按「奥迪忽略
-                        // marker」分派（0.1.16/0.1.17），被车主 0.1.17 日志证伪——车机 marker
-                        // 以 1Hz **无限重发**（远超旧注释的「2~5 个后静默」），链路永远到不了
-                        // NORMAL，RECORD 后 10.18s 车机拆掉整条会话（0.1.9 同款 10.17s）。
-                        // 协商完成本身无副作用（082446 全程健康），缺的是协商完成后的
-                        // modesChanged 重申（见 onControlSessionComplete）。
+                        // Ruling 2026-10-23: **every generation must complete link negotiation**. We used to dispatch on "Audi ignores
+                        // marker" (0.1.16/0.1.17), which the 0.1.17 owner log disproved: the head unit marker
+                        // is resent **endlessly** at 1 Hz (far beyond the old comment's "goes silent after 2~5"), the link never reaches
+                        // NORMAL, and 10.18 s after RECORD the head unit tears down the whole session (same 10.17 s as 0.1.9).
+                        // Completing negotiation has no side effects (082446 stayed healthy throughout); what was missing is the
+                        // modesChanged re-assertion after negotiation completes (see onControlSessionComplete).
                         ReceiverProfile.LinkGeneration.CLASSIC_MIB3,
                         ReceiverProfile.LinkGeneration.EVENT_LINK,
                         -> {
                             if (!eventLinkArmed && mib3MarkerIgnores >= EVENT_LINK_MARKER_THRESHOLD) {
                                 eventLinkArmed = true
                                 log(
-                                    "IAPLINK: 车机连续发 SYN marker ×$mib3MarkerIgnores" +
-                                        "（它在等我们的会话表）→ 控制通道补发协商轮次",
+                                    "IAPLINK: head unit sent consecutive SYN markers x$mib3MarkerIgnores" +
+                                        " (it is waiting for our session table) -> resend negotiation round on the control channel",
                                 )
-                                startControlRoundLocked("车机 marker 重发")
+                                startControlRoundLocked("head unit marker resent")
                             } else if (eventLinkArmed) {
                                 eventLinkMarkers++
                                 if (engine.state != Iap2LinkEngine.State.NORMAL && !controlSynGaveUp) {
@@ -292,35 +297,38 @@ class VirtualIap2Link(
                                             controlSynGaveUp = true
                                             engine.stopNegotiationRetries()
                                             log(
-                                                "IAPLINK: 控制通道 $MAX_CONTROL_SYN_ROUNDS 轮协商无应答——停止自动重发，" +
-                                                    "链路停在 ${engine.state}（车机若发 0x1D01 会自动继续）",
+                                                "IAPLINK: no reply after $MAX_CONTROL_SYN_ROUNDS control-channel negotiation rounds, " +
+                                                    "stopping auto resend; " +
+                                                    "link stays at ${engine.state} (continues automatically if the head unit sends 0x1D01)",
                                             )
                                         }
 
-                                        else -> startControlRoundLocked("上一轮 ${CONTROL_SYN_ROUND_MILLIS}ms 无应答")
+                                        else -> startControlRoundLocked("no reply in the previous ${CONTROL_SYN_ROUND_MILLIS}ms round")
                                     }
                                 }
-                                // 引擎节拍线程也会重发，这里把待发字节立刻冲出去
+                                // The engine pacer thread also resends; flush pending bytes immediately here
                                 drainLocked()
                                 if (eventLinkMarkers <= 3 || eventLinkMarkers % 20 == 0) {
                                     log(
-                                        "IAPLINK: 车机 marker（#$eventLinkMarkers）链路状态=${engine.state}" +
-                                            "（控制通道第 $controlSynRounds 轮）",
+                                        "IAPLINK: head unit marker (#$eventLinkMarkers) link state=${engine.state}" +
+                                            " (control-channel round $controlSynRounds)",
                                     )
                                 }
                                 return
                             } else if (mib3MarkerIgnores <= 3) {
-                                log("IAPLINK: 车机 marker（#$mib3MarkerIgnores）——凑够 $EVENT_LINK_MARKER_THRESHOLD 个后补发协商")
+                                log(
+                                    "IAPLINK: head unit marker (#$mib3MarkerIgnores) - resending negotiation once $EVENT_LINK_MARKER_THRESHOLD have accumulated",
+                                )
                             }
                         }
                     }
                 } else {
-                    // 布防前（屏幕 SETUP 未完成）：不回应——真机在 SETUP 前不 detect，
-                    // 事件通道上的回显对 MIB3 无意义（它只认控制通道）；旧明文接收端
-                    // 不走此链路语义
+                    // Before arming (screen SETUP not yet complete): do not respond. A real device does not detect before SETUP,
+                    // and an echo on the event channel is meaningless to MIB3 (it only honors the control channel); old plaintext receivers
+                    // do not use these link semantics
                     if (mib3DeferredLogs < 2) {
                         mib3DeferredLogs++
-                        log("IAPLINK: SETUP 前的车机 marker 暂不回应（布防后主动 detect）")
+                        log("IAPLINK: head unit marker before SETUP not answered yet (detect proactively after arming)")
                     }
                     return
                 }
@@ -331,12 +339,12 @@ class VirtualIap2Link(
     }
 
     /**
-     * 链路字节出站：隧道 TCP（DiPlay）→ 控制通道 POST /command（MIB3 / Honda HFT）→
-     * 事件通道（旧明文形态兜底）。
+     * Outbound link bytes: tunnel TCP (DiPlay) -> control-channel POST /command (MIB3 / Honda HFT) ->
+     * event channel (fallback for the old plaintext form).
      *
-     * **分工是固定的**：车机的链路字节从事件通道 `iAPSendMessage` **入站**，我们的
-     * 出站字节只能写控制通道——写在事件通道上时车机不读（Frida 结论，2026-10-20
-     * Honda HFT 再次实测：出站挪到事件通道后，车机 20 分钟里一条 FF5A 都没回）。
+     * **The split is fixed**: head-unit link bytes come **in** on event-channel `iAPSendMessage`, and our
+     * outbound bytes may only be written to the control channel; the head unit does not read writes on the event channel (Frida finding, 2026-10-20
+     * reproduced on Honda HFT: after moving outbound to the event channel, the head unit sent not a single FF5A in 20 minutes).
      */
     private fun sendLinkBytes(bytes: ByteArray) {
         if (bytes.isEmpty()) return
@@ -350,8 +358,8 @@ class VirtualIap2Link(
     }
 
     /**
-     * 引擎出站字节落盘：SYN|ACK 真正投递到对应通道后才允许启动 CSM——
-     * 对端引擎未见到 SYN|ACK 前收到裸 ACK 会直接 die（DiPlay 实测）。
+     * Engine outbound bytes landing: the CSM may only start after SYN|ACK has actually been delivered to the matching channel;
+     * a peer engine that receives a bare ACK before seeing SYN|ACK dies immediately (measured on DiPlay).
      */
     private fun flushOutputLocked() {
         val out = engine.takeOutput()
@@ -364,17 +372,17 @@ class VirtualIap2Link(
                     pendingEchoFlush = false
                     if (!tunnelEchoDelivered) {
                         tunnelEchoDelivered = true
-                        log("IAPLINK: ✓ 同步回显已写入隧道（链路协商完成，发送端 CSM 就绪）")
+                        log("IAPLINK: ✓ sync echo written to the tunnel (link negotiation done, sender CSM ready)")
                     }
                 }
             }
 
             eventLinkArmed -> {
-                // 入站事件通道 / 出站控制通道：应答、同步包、CSM 一律写控制通道
+                // Inbound on the event channel / outbound on the control channel: replies, sync packets and CSM all go to the control channel
                 sendControlIap(out)
                 if (pendingEchoFlush) {
                     pendingEchoFlush = false
-                    log("IAPLINK: ✓ SYN|ACK 已投递控制通道——链路协商完成，启动控制会话")
+                    log("IAPLINK: ✓ SYN|ACK delivered on the control channel - link negotiation done, starting the control session")
                 }
             }
 
@@ -383,7 +391,7 @@ class VirtualIap2Link(
                 if (pendingEchoFlush) {
                     pendingEchoFlush = false
                     mib3SynAckQueued = true
-                    log("IAPLINK: ✓ MIB3 SYN|ACK 已投递控制通道——等待链路确认后启动 CSM")
+                    log("IAPLINK: ✓ MIB3 SYN|ACK delivered on the control channel - waiting for link confirmation before starting CSM")
                 }
             }
 
@@ -402,42 +410,42 @@ class VirtualIap2Link(
                     handleFrameLocked(event.bytes)
 
                 is Iap2LinkEngine.Event.Dead -> {
-                    log("IAPLINK: 虚拟链路终止 - ${event.reason ?: "EOF"}")
+                    log("IAPLINK: virtual link terminated - ${event.reason ?: "EOF"}")
                     return
                 }
             }
         }
         noteLinkStateLocked()
-        // 先冲刷（回显必须先行送达对端），再启动 CSM；超时换档可能新排队帧，最后再冲一次
+        // Flush first (the echo must reach the peer first), then start the CSM; a timeout step-down may queue new frames, so flush once more at the end
         flushOutputLocked()
         maybeStartControlCsmLocked()
         checkMfiTimeoutLocked()
         flushOutputLocked()
     }
 
-    /** 链路状态迁移只在日志里出现一次（IDLE→NEGOTIATING→NORMAL 是按键通路是否打通的分水岭）。 */
+    /** Link state transitions are logged only once (IDLE->NEGOTIATING->NORMAL is the dividing line for whether the key path works). */
     private fun noteLinkStateLocked() {
         val state = engine.state
         if (state == lastLinkState) return
         lastLinkState = state
-        log("IAPLINK: 链路状态 → $state（NORMAL 才可能收到车机 0x6800/0x6802 媒体键）")
+        log("IAPLINK: link state -> $state (only NORMAL can receive the head unit's 0x6800/0x6802 media keys)")
     }
 
-    /** MFi 挑战静默超时：记入该车机的记忆并换下一档重试（节拍线程每 200ms 驱动一次）。 */
+    /** MFi challenge silent timeout: record it in the head unit's memory and retry with the next length (driven every 200ms by the pacer thread). */
     private fun checkMfiTimeoutLocked() {
         val identity = mfiIdentity ?: return
         if (mfiFinished || mfiCurrentLength == 0) return
         if (nowMillis() - mfiChallengeSentAtMs < mfiWindowMillis) return
         val failed = mfiCurrentLength
         MfiLengthMemory.recordSilent(mfiContext, identity, failed)
-        log("IAPLINK: 隧道 MFi ${failed}B 静默 ${mfiWindowMillis}ms——记入记忆，换下一档重试")
+        log("IAPLINK: tunnel MFi ${failed}B silent for ${mfiWindowMillis}ms - recorded in memory, retrying with the next length")
         mfiCurrentLength = 0
         startNextMfiChallengeLocked()
     }
 
     /**
-     * 下一档 MFi 挑战（顺序=按车机记忆重排，冷启动基线 20B 优先——Frida 真机值）。
-     * 全部档位无应答时与蓝牙路径同语义：跳过校验直接 0xAA05，由车机后续行为判定。
+     * Next MFi challenge (order = reordered by the head unit's memory; cold-start baseline prefers 20B, the Frida real-device value).
+     * When every length goes unanswered, same semantics as the Bluetooth path: skip verification and go straight to 0xAA05, judged by later head unit behavior.
      */
     private fun startNextMfiChallengeLocked() {
         val identity = mfiIdentity ?: return
@@ -446,14 +454,16 @@ class VirtualIap2Link(
             mfiOrder = MfiLengthMemory.orderAttempts(TUNNEL_MFI_BASELINE, mfiMemory)
             if (!mfiMemory.isEmpty) {
                 log(
-                    "IAPLINK: 隧道 MFi 按车机记忆：${MfiLengthMemory.describe(mfiMemory)}" +
-                        " → 本轮顺序 ${mfiOrder.joinToString("/")}B",
+                    "IAPLINK: tunnel MFi per head unit memory: ${MfiLengthMemory.describe(mfiMemory)}" +
+                        " -> order this round ${mfiOrder.joinToString("/")}B",
                 )
             }
         }
         mfiPosition += 1
         if (mfiPosition >= mfiOrder.size) {
-            log("IAPLINK: 隧道 MFi 挑战全部无应答——跳过校验直接 0xaa05（由车机后续行为判定）")
+            log(
+                "IAPLINK: tunnel MFi challenges all unanswered - skipping verification, straight to 0xaa05 (judged by later head unit behavior)",
+            )
             mfiFinished = true
             mib3AuthStage = 4
             sendCsmLocked(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
@@ -472,13 +482,13 @@ class VirtualIap2Link(
         val challenge = ByteArray(mfiCurrentLength).also { SecureRandom().nextBytes(it) }
         sendCsmLocked(Iap2MessageIds.MFI_REQUEST_CHALLENGE, Iap2Csm.param(0, challenge))
         mib3AuthStage = 3
-        log("IAPLINK: 隧道 tx=0xaa02 challenge=${mfiCurrentLength}B（第 ${mfiPosition + 1} 次，窗口 ${mfiWindowMillis}ms）")
+        log("IAPLINK: tunnel tx=0xaa02 challenge=${mfiCurrentLength}B (attempt ${mfiPosition + 1}, window ${mfiWindowMillis}ms)")
     }
 
     /**
-     * 控制会话启动（隧道/MIB3 两形态）：链路 NORMAL 且 SYN|ACK 已投递后，主动发
-     * 0x1D00 StartIdentification。缺此步时对端控制端 5 分钟窗口超时即拆掉整条链路
-     * （DiPlay 2026-10-11 实测根因；MIB3 的拆除窗口短得多，~10s）。
+     * Control-session start (tunnel/MIB3 forms): once the link is NORMAL and SYN|ACK has been delivered, proactively send
+     * 0x1D00 StartIdentification. Without this step the peer control endpoint times out after a 5-minute window and tears the whole link down
+     * (root cause measured on DiPlay 2026-10-11; MIB3's teardown window is much shorter, ~10 s).
      */
     private fun maybeStartControlCsmLocked() {
         if (engine.state != Iap2LinkEngine.State.NORMAL) return
@@ -487,7 +497,7 @@ class VirtualIap2Link(
             if (tunnelCsmStarted || !tunnelEchoDelivered) return
             tunnelCsmStarted = true
         } else if (eventLinkArmed) {
-            // 车机发起方形态：出站走控制通道，只要已采纳对端会话表即可开工
+            // Head-unit-initiated form: outbound goes over the control channel; it is enough that the peer session table has been adopted
             if (eventCsmStarted || engine.peerSynchronization == null) return
             eventCsmStarted = true
         } else {
@@ -497,7 +507,7 @@ class VirtualIap2Link(
         sendCsmLocked(Iap2MessageIds.START_IDENTIFICATION)
     }
 
-    /** 链路上的 CSM 发送（进入引擎 backlog，由引擎按发送窗口 flush）。 */
+    /** Sending CSM on the link (enters the engine backlog; the engine flushes by send window). */
     private fun sendCsmLocked(
         messageId: Int,
         body: ByteArray = ByteArray(0),
@@ -505,35 +515,66 @@ class VirtualIap2Link(
         val frame = Iap2Csm.encode(messageId, body)
         val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L)
         log(
-            "IAPLINK: 隧道 tx 0x${messageId.toString(16)} " +
+            "IAPLINK: tunnel tx 0x${messageId.toString(16)} " +
                 "(${Iap2MessageIds.nameOf(messageId)}) ${frame.size}B ok=$ok",
         )
     }
 
-    /** 直接投递完整 CSM 帧（Frida 抓的逐字节常量，勿重新编码）。 */
-    private fun sendRawCsmLocked(frame: ByteArray) {
+    /** A now-playing update from the media feed thread; false once this link is closed. */
+    private fun sendNowPlayingUpdate(frame: ByteArray): Boolean =
+        synchronized(lock) {
+            if (closed) return@synchronized false
+            sendRawCsmLocked(frame).also { drainLocked() }
+        }
+
+    /** Artwork for this link's now-playing subscription (iAP2 file-transfer session of the tunnel link). */
+    private val artworkTransfer =
+        ArtworkTransfer(
+            send = { datagram ->
+                synchronized(lock) {
+                    if (closed) return@synchronized false
+                    engine.sendFileTransfer(datagram, nowMillis()).also { drainLocked() }
+                }
+            },
+            maxDatagram = { synchronized(lock) { engine.maxSessionPayload() } },
+            log = { line -> log(line) },
+        )
+
+    /** The AirPlay session that owns this link is closing: stop feeding it. */
+    fun close() {
+        synchronized(lock) { closed = true }
+        CarNowPlaying.unsubscribe(NOW_PLAYING_LINK, "AirPlay session closed")
+        CarRouteGuidance.unsubscribe(NOW_PLAYING_LINK, "AirPlay session closed")
+    }
+
+    @Volatile
+    private var closed = false
+
+    /** Delivers a complete CSM frame directly (byte-exact constants captured with Frida; do not re-encode). */
+    private fun sendRawCsmLocked(frame: ByteArray): Boolean {
         val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L)
-        // CSM 帧布局：FF 5A [len:2] [msgId:2] …——消息号在 [4..5]，[2..3] 是载荷长度。
-        // 曾误取 [2..3]，日志把 0xFFFA 打成 0x32、0xFFF0 打成 0x0E、0x4158 打成 0x64
-        // （长度值），排查时极易被带偏（2026-10-23 实际误导过一轮）。
+        // CSM frame layout: FF 5A [len:2] [msgId:2] ... - the message ID is at [4..5], [2..3] is the payload length.
+        // It was once read from [2..3], so the log printed 0xFFFA as 0x32, 0xFFF0 as 0x0E and 0x4158 as 0x64
+        // (the length values), which badly misled debugging (it actually did for one round on 2026-10-23).
         val messageId = ((frame[4].toInt() and 0xFF) shl 8) or (frame[5].toInt() and 0xFF)
         log(
-            "IAPLINK: 隧道 tx 0x${messageId.toString(16)} " +
+            "IAPLINK: tunnel tx 0x${messageId.toString(16)} " +
                 "(${Iap2MessageIds.nameOf(messageId)}) ${frame.size}B raw ok=$ok",
         )
+        return ok
     }
 
     /**
-     * 控制会话应答（隧道与 MIB3 共用识别/MFi 骨架，MIB3 另有突发与订阅应答）：
-     *   0x1D01 → 0x1D02 + 0xAA00；0xAA06 → 再发 0xAA00；
-     *   0xAA01 → 0xAA02 挑战（MIB3 20B / DiPlay 32B）；0xAA03 → 0xAA05（MIB3 随发突发）。
-     * 订阅（仅 MIB3）：0x4157→0x4158、0x4154→0x4155、0x4170→0x4171、0x5000→0x5001 空态。
-     * 0xEA02（requestAppLaunch）/0xA101（VehicleStatus）/0xFFFB（PASCD 定位样本 ~1Hz）
-     * 只链路 ACK（引擎自动）——**0xFFFB 漏 ACK 车机同样 ~10s 后关控制通道**（Frida 结论）。
+     * Control-session replies (tunnel and MIB3 share the identification/MFi skeleton; MIB3 additionally has the burst and subscription replies):
+     *   0x1D01 -> 0x1D02 + 0xAA00; 0xAA06 -> send 0xAA00 again;
+     *   0xAA01 -> 0xAA02 challenge (MIB3 20B / DiPlay 32B); 0xAA03 -> 0xAA05 (MIB3 sends the burst along with it).
+     * Subscriptions (MIB3 only): 0x4157->0x4158, 0x4154->0x4155, 0x4170->0x4171, 0x5000->0x5001 empty state.
+     * 0xEA02 (requestAppLaunch)/0xA101 (VehicleStatus)/0xFFFB (PASCD location samples ~1Hz)
+     * get link-level ACKs only (done automatically by the engine); **missing an ACK for 0xFFFB makes the head unit close the control channel after ~10 s as well** (Frida finding).
      */
     private fun maybeRespondControlCsmLocked(frame: Iap2Csm.Frame) {
         val onTunnel = tunnelWriter() != null
-        // 车机发起方形态复用 MIB3 那套识别/MFi 骨架（出站同样走控制通道）
+        // The head-unit-initiated form reuses the identification/MFi skeleton of MIB3 (outbound also goes over the control channel)
         val mib3 = (mib3Armed || eventLinkArmed) && !onTunnel
         if (!onTunnel && !mib3) return
         val ids = Iap2MessageIds
@@ -547,31 +588,31 @@ class VirtualIap2Link(
                         .parseParams(frame.body)
                         .associateBy { it.id }
                 log(
-                    "IAPLINK: 隧道 rx 0x1d01 接收端身份 " +
+                    "IAPLINK: tunnel rx 0x1d01 receiver identity " +
                         "name=${params[0]?.value?.decodeToString()?.trimEnd('\u0000')} " +
                         "model=${params[1]?.value?.decodeToString()?.trimEnd('\u0000')}",
                 )
-                // 参 6/7 = 车机声明「它会发 / 它可收」的消息清单。媒体键排查就靠这两行：
-                // 若 0x6800/0x6802 不在发送清单里，说明这台车机根本不用 iAP2 HID 送按键，
-                // 不必再在这条通路上耗（改查蓝牙/AVRCP 侧）。
+                // Params 6/7 = the message lists the head unit declares "it will send / it can receive". Media-key debugging relies on these two lines:
+                // if 0x6800/0x6802 are not in the send list, this head unit does not use iAP2 HID for key delivery at all,
+                // and there is no point spending more effort on this path (check the Bluetooth/AVRCP side instead).
                 params[6]?.value?.let { raw ->
                     val sends = u16List(raw)
                     log(
-                        "IAPLINK: 车机发送清单(${sends.size})=" +
+                        "IAPLINK: head unit send list(${sends.size})=" +
                             sends.joinToString(" ") { "0x%04x".format(it) } +
-                            " 含HID0x6800=${sends.contains(Iap2MessageIds.START_HID)}" +
-                            " 含0x6802=${sends.contains(Iap2MessageIds.ACCESSORY_HID_REPORT)}",
+                            " has HID0x6800=${sends.contains(Iap2MessageIds.START_HID)}" +
+                            " has 0x6802=${sends.contains(Iap2MessageIds.ACCESSORY_HID_REPORT)}",
                     )
                 }
                 params[7]?.value?.let { raw ->
                     val receives = u16List(raw)
                     log(
-                        "IAPLINK: 车机可收清单(${receives.size})=" +
+                        "IAPLINK: head unit receive list(${receives.size})=" +
                             receives.joinToString(" ") { "0x%04x".format(it) },
                     )
                 }
                 if (mib3) {
-                    // 记忆键 = 车机身份 + " tunnel"：与蓝牙链路的记忆互不污染
+                    // Memory key = head unit identity + " tunnel": kept separate from the Bluetooth link's memory so they do not pollute each other
                     mfiIdentity = mfiIdentityOf(params) + " tunnel"
                 }
                 sendCsmLocked(ids.IDENTIFICATION_ACCEPTED)
@@ -583,23 +624,23 @@ class VirtualIap2Link(
                 if (!mib3 || mib3AuthStage != 1) return
                 sendCsmLocked(ids.MFI_REQUEST_CERTIFICATE)
                 mib3AuthStage = 2
-                log("IAPLINK: MIB3 0xaa06（auth serial）→ 再发 0xaa00")
+                log("IAPLINK: MIB3 0xaa06 (auth serial) -> sending 0xaa00 again")
             }
 
             ids.MFI_AUTHENTICATION_FAILED -> {
                 if (!mib3 || mfiFinished) return
                 mfiIdentity?.let { MfiLengthMemory.recordRejected(mfiContext, it, mfiCurrentLength) }
-                log("IAPLINK: 隧道 MFi ${mfiCurrentLength}B 被拒（0xaa04）——记入记忆，换下一档")
+                log("IAPLINK: tunnel MFi ${mfiCurrentLength}B rejected (0xaa04) - recorded in memory, next length")
                 mfiCurrentLength = 0
                 startNextMfiChallengeLocked()
             }
 
             ids.MFI_CERTIFICATE -> {
                 if (mib3) {
-                    // 长度按车机记忆（冷启动 20B 优先，Frida 真机值；详见 startNextMfiChallengeLocked）
+                    // Length follows the head unit's memory (cold start prefers 20B, the Frida real-device value; see startNextMfiChallengeLocked)
                     startNextMfiChallengeLocked()
                 } else {
-                    // DiPlay CARLINKIT 身份只接受精确 32B（长度不符直接断链）
+                    // The DiPlay CARLINKIT identity only accepts exactly 32B (a wrong length drops the link immediately)
                     val challenge =
                         ByteArray(32).also { SecureRandom().nextBytes(it) }
                     sendCsmLocked(ids.MFI_REQUEST_CHALLENGE, Iap2Csm.param(0, challenge))
@@ -610,7 +651,7 @@ class VirtualIap2Link(
             ids.MFI_RESPONSE -> {
                 if (mib3) {
                     mfiIdentity?.let { MfiLengthMemory.recordSuccess(mfiContext, it, mfiCurrentLength) }
-                    log("IAPLINK: 隧道 rx=0xaa03 签名 ${frame.body.size}B（${mfiCurrentLength}B 挑战成功，已记忆）")
+                    log("IAPLINK: tunnel rx=0xaa03 signature ${frame.body.size}B (${mfiCurrentLength}B challenge succeeded, remembered)")
                     mfiCurrentLength = 0
                     mfiFinished = true
                 }
@@ -619,14 +660,14 @@ class VirtualIap2Link(
                     mib3AuthStage = 4
                     sendMib3BurstLocked()
                 } else {
-                    log("IAPLINK: 隧道 MFi 完成——等待对端订阅（随后其标记隧道就绪）")
+                    log("IAPLINK: tunnel MFi done - waiting for the peer subscriptions (it then marks the tunnel ready)")
                 }
             }
 
             START_COMMUNICATIONS_UPDATES -> {
                 if (!mib3) return
                 sendRawCsmLocked(MIB3_COMMUNICATIONS_UPDATE_IDLE)
-                log("IAPLINK: MIB3 0x4157 → 0x4158（空态）")
+                log("IAPLINK: MIB3 0x4157 -> 0x4158 (empty state)")
             }
 
             START_CALL_STATE_UPDATES -> {
@@ -635,7 +676,7 @@ class VirtualIap2Link(
                     CALL_STATE_UPDATE,
                     Iap2Csm.param(0x0002, byteArrayOf(0)),
                 )
-                log("IAPLINK: MIB3 0x4154 → 0x4155（无通话）")
+                log("IAPLINK: MIB3 0x4154 -> 0x4155 (no call)")
             }
 
             START_LIST_UPDATES -> {
@@ -647,49 +688,72 @@ class VirtualIap2Link(
                         Iap2Csm.param(0x0005, byteArrayOf(0)) +
                         Iap2Csm.param(0x0007, byteArrayOf(0, 0)),
                 )
-                log("IAPLINK: MIB3 0x4170 → 0x4171（空列表）")
+                log("IAPLINK: MIB3 0x4170 -> 0x4171 (empty list)")
             }
 
             Iap2MessageIds.START_NOW_PLAYING_UPDATES -> {
-                if (!mib3) return
-                sendRawCsmLocked(MIB3_NOW_PLAYING_UPDATE_IDLE)
-                // 仪表盘歌词/媒体卡的数据通路（0x5001 + file-transfer 封面）后续接
-                // MediaSessionsState——空态应答是 MIB3 存活的前置，先落这版。
-                log("IAPLINK: MIB3 0x5000 → 0x5001（空态）——仪表盘媒体数据待接")
+                // MIB3: the reply is a prerequisite for staying alive. It keeps the captured iPhone attribute set
+                // (NowPlayingUpdate.Request.DEFAULT): with nothing playing it encodes to MIB3_NOW_PLAYING_UPDATE_IDLE
+                // byte for byte (unit test), so the bring-up reply is unchanged. Tunnel receivers (WinPlay subscribes
+                // here; its Bluetooth link is released right after RECORD) get the attributes they asked for.
+                val first =
+                    CarNowPlaying.subscribe(
+                        NOW_PLAYING_LINK,
+                        frame.body,
+                        fixedRequest = if (mib3) NowPlayingUpdate.Request.DEFAULT else null,
+                        artworkTransfer = artworkTransfer,
+                    ) { update -> sendNowPlayingUpdate(update) }
+                sendRawCsmLocked(first)
+                log("IAPLINK: 0x5000 -> 0x5001 (now playing, ${if (mib3) "MIB3" else "tunnel"})")
+            }
+
+            Iap2MessageIds.STOP_NOW_PLAYING_UPDATES -> {
+                CarNowPlaying.unsubscribe(NOW_PLAYING_LINK, "head unit sent 0x5002")
+            }
+
+            Iap2MessageIds.START_ROUTE_GUIDANCE_UPDATES -> {
+                val initial =
+                    CarRouteGuidance.subscribe(NOW_PLAYING_LINK, frame.body) { update -> sendNowPlayingUpdate(update) }
+                // MIB3's bring-up was captured with no 0x5201 reply here: keep it that way until there is a route
+                if (!mib3) initial.forEach { sendRawCsmLocked(it) }
+            }
+
+            Iap2MessageIds.STOP_ROUTE_GUIDANCE_UPDATES -> {
+                CarRouteGuidance.unsubscribe(NOW_PLAYING_LINK, "head unit sent 0x5203")
             }
 
             ids.START_HID -> {
-                // 车机声明「我要开始发 HID 报告了」，通常带描述符（决定报告字节语义）
+                // The head unit declares "I am about to send HID reports", usually with a descriptor (which determines the report byte semantics)
                 val params = Iap2Csm.parseParams(frame.body)
                 val descriptor = params.map { it.value }.firstOrNull { it.size > 8 }
                 if (descriptor != null) {
                     hidDescriptor = descriptor
                     log(
-                        "IAPLINK: 车机 0x6800 StartHID 描述符 ${descriptor.size}B hex=" +
+                        "IAPLINK: head unit 0x6800 StartHID descriptor ${descriptor.size}B hex=" +
                             descriptor.joinToString(" ") { "%02x".format(it) }.take(120),
                     )
                 } else {
-                    log("IAPLINK: 车机 0x6800 StartHID（无描述符）参数=${params.map { it.id }}")
+                    log("IAPLINK: head unit 0x6800 StartHID (no descriptor) params=${params.map { it.id }}")
                 }
             }
 
             ids.ACCESSORY_HID_REPORT -> {
-                // 方向盘/面板媒体键。
+                // Steering wheel / panel media keys.
                 //
-                // 2026-10-20 本田 HFT 实测帧（11B）：
+                // Frame measured on Honda HFT 2026-10-20 (11B):
                 //   00 06 00 00 00 03 | 00 05 00 01 04
-                //   param id=0 值 00 03（报告类型/描述，恒定）← 之前被当成报告值
-                //   param id=1 值 04（真正的 HID 报文）
-                // 旧代码取「第一个 1~8 字节的 param」→ 永远拿到 00 03，位图里一位都不置，
-                // 于是日志一直打 `usage=无 keyCode=0`，按键到了却点不出任何动作。
+                //   param id=0 value 00 03 (report type/description, constant) <- previously mistaken for the report value
+                //   param id=1 value 04 (the real HID report)
+                // The old code took "the first param of 1~8 bytes" -> always got 00 03 and set no bit in the bitmap,
+                // so the log kept printing `usage=none keyCode=0`: keys arrived but triggered no action.
                 val params = Iap2Csm.parseParams(frame.body)
                 val report = hidReportFromParams(params)
-                // 导航类设备（iDrive 旋钮/四向拨杆）：Generic Desktop 页的 Wheel/Hat，
-                // 走 DPAD 注入（需要虚拟屏焦点），不能当媒体键全局分发。
+                // Navigation devices (iDrive knob / four-way stick): Wheel/Hat on the Generic Desktop page,
+                // injected as DPAD (needs virtual display focus); must not be dispatched globally as media keys.
                 if (report != null && HidNavigation.isNavigationDevice(hidDescriptor)) {
                     val navKeys = HidNavigation.handle("iap2-hid", hidDescriptor, report)
                     if (navKeys.isNotEmpty()) {
-                        log("IAPLINK: 旋钮/导航键 " + navKeys.joinToString("+") { HidNavigation.nameOf(it) })
+                        log("IAPLINK: knob/navigation key " + navKeys.joinToString("+") { HidNavigation.nameOf(it) })
                         navKeys.forEach { onNavKey?.invoke(it) }
                     }
                 } else {
@@ -698,16 +762,16 @@ class VirtualIap2Link(
                         when {
                             report == null -> emptyList()
                             keyMap != null -> keyMap.usagesFor(report)
-                            // 无描述符：退化为「单字节即 Usage ID」
+                            // No descriptor: fall back to "a single byte is the Usage ID"
                             else -> listOf(report[0].toInt() and 0xFF).filter { it != 0 }
                         }
                     if (hidReportFrames < HID_REPORT_VERBOSE_FRAMES) {
                         hidReportFrames++
                         log(
-                            "IAPLINK: 车机 0x6802 params=" +
+                            "IAPLINK: head unit 0x6802 params=" +
                                 params.joinToString(",") { "${it.id}=" + it.value.joinToString("") { b -> "%02x".format(b) } } +
-                                " 报告=" + (report?.joinToString(" ") { "%02x".format(it) } ?: "空") +
-                                " 位图=" + (keyMap?.isArray?.let { if (it) "Array" else "Variable" } ?: "无描述符"),
+                                " report=" + (report?.joinToString(" ") { "%02x".format(it) } ?: "empty") +
+                                " bitmap=" + (keyMap?.isArray?.let { if (it) "Array" else "Variable" } ?: "no descriptor"),
                         )
                     }
                     fireHidKeysLocked(usages)
@@ -715,14 +779,14 @@ class VirtualIap2Link(
             }
 
             else -> {
-                // 未处理的消息也留痕：车机若用非常规 ID 下发媒体键/按键，这里能第一时间
-                // 在日志里看到对应消息号（切歌按键排查的关键观测点）。
-                // 带全量 hex：宝马 iD9 的 0xad00/0xad02/0xad03 家族既不在 Apple 公开表里，
-                // 也没有参考实现的命名——只能靠报文体结构反推它是不是输入（触摸/HID）通路。
+                // Unhandled messages are logged too: if the head unit delivers media keys/buttons under an unusual ID, this is where
+                // the message ID shows up in the log first (key observation point when debugging track-change keys).
+                // Full hex included: BMW iD9's 0xad00/0xad02/0xad03 family is neither in Apple's public table
+                // nor named by any reference implementation, so the body structure is the only way to infer whether it is an input (touch/HID) path.
                 unknownCsmIds++
                 if (unknownCsmIds <= 20) {
                     log(
-                        "IAPLINK: 未处理的 CSM 0x${frame.messageId.toString(16)} " +
+                        "IAPLINK: unhandled CSM 0x${frame.messageId.toString(16)} " +
                             "(${Iap2MessageIds.nameOf(frame.messageId)}) ${frame.body.size}B hex=" +
                             frame.body.joinToString(" ") { "%02x".format(it) },
                     )
@@ -732,12 +796,12 @@ class VirtualIap2Link(
     }
 
     /**
-     * 把一批「本次按下的 Usage」转成 Android 媒体键注入。
+     * Converts a batch of "Usages pressed this time" into Android media key injections.
      *
-     * 车机的 HID 报告是**状态式**的：按住会以 ~10Hz 连推同一个位图，松开推 0x00。
-     * 因此只在「新出现」时触发一次（边沿触发），否则一次长按会跳掉几十首歌；
-     * 只有在同一按键持续按住超过 [HID_HOLD_REPEAT_MILLIS] 时才允许再触发，
-     * 保持方向盘长按「连续切歌」的手感。
+     * The head unit's HID reports are **state-based**: holding a key pushes the same bitmap at ~10Hz and releasing pushes 0x00.
+     * So we trigger only once when a key "newly appears" (edge-triggered), otherwise one long press would skip dozens of tracks;
+     * re-triggering is allowed only when the same key stays held longer than [HID_HOLD_REPEAT_MILLIS],
+     * preserving the steering wheel long-press "keep skipping" feel.
      */
     private fun fireHidKeysLocked(usages: List<Int>) {
         val now = nowMillis()
@@ -759,17 +823,17 @@ class VirtualIap2Link(
         for (usage in firing) {
             val keyCode = ConsumerKeys.keyCodeFor(usage)
             log(
-                "IAPLINK: 车机媒体键 ${ConsumerKeys.nameOf(usage)}(0x%02x) → keyCode=".format(usage) +
-                    (if (keyCode != 0) "$keyCode 已注入" else "无对应 Android 键（忽略）"),
+                "IAPLINK: head unit media key ${ConsumerKeys.nameOf(usage)}(0x%02x) -> keyCode=".format(usage) +
+                    (if (keyCode != 0) "$keyCode injected" else "no matching Android key (ignored)"),
             )
             if (keyCode != 0) onMediaKey?.invoke(keyCode)
         }
     }
 
     /**
-     * 0xAA05 后的突发（Frida：真机在认证成功后立即发这一批，先于车机的订阅请求）。
-     * 0xFFFA/0xFFF0/0x4158/0x5001 用逐字节常量——字段布局只存在于真机抓包里，
-     * 重新编码极易走样（对照 AADisplay WifiIap2Link 的 Frida 常量）。
+     * The burst after 0xAA05 (Frida: a real device sends this batch right after authentication succeeds, ahead of the head unit's subscription requests).
+     * 0xFFFA/0xFFF0/0x4158/0x5001 use byte-exact constants: their field layouts exist only in real-device captures,
+     * and re-encoding easily distorts them (compare the Frida constants in AADisplay WifiIap2Link).
      */
     private fun sendMib3BurstLocked() {
         val sessionId =
@@ -792,14 +856,14 @@ class VirtualIap2Link(
         )
         sendRawCsmLocked(MIB3_START_LOCATION_INFORMATION)
         sendRawCsmLocked(MIB3_GPRMC_DATA_STATUS)
-        log("IAPLINK: MIB3 突发已发（会话标识 $sessionId）——等待车机订阅")
+        log("IAPLINK: MIB3 burst sent (session id $sessionId) - waiting for the head unit subscriptions")
         if (!mib3ControlSessionNotified) {
             mib3ControlSessionNotified = true
             onControlSessionComplete?.invoke()
         }
     }
 
-    /** 0x4E0B：u64 秒 + s16 时区偏移(分) + u8 夏令时。 */
+    /** 0x4E0B: u64 seconds + s16 timezone offset (minutes) + u8 daylight saving. */
     private fun mib3DeviceTimeParams(): ByteArray {
         val now = System.currentTimeMillis()
         val zone = TimeZone.getDefault()
@@ -817,13 +881,13 @@ class VirtualIap2Link(
         return Iap2Csm.param(0, seconds) + Iap2Csm.param(1, tz) + Iap2Csm.param(2, byteArrayOf(dst.toByte()))
     }
 
-    /** 大端 u16 数组（识别信息里的消息 ID 清单）。 */
+    /** Big-endian u16 array (the message ID lists inside the identification info). */
     private fun u16List(bytes: ByteArray): List<Int> =
         (0 until bytes.size / 2).map {
             ((bytes[it * 2].toInt() and 0xFF) shl 8) or (bytes[it * 2 + 1].toInt() and 0xFF)
         }
 
-    /** 0x1D01 身份参数（name/model/manufacturer）→ 记忆键素材（NUL 去净、空档跳过）。 */
+    /** 0x1D01 identity params (name/model/manufacturer) -> memory key material (NULs fully stripped, empty slots skipped). */
     private fun mfiIdentityOf(params: Map<Int, Iap2Csm.Param>): String =
         listOf(0, 1, 2)
             .mapNotNull { id ->
@@ -848,83 +912,86 @@ class VirtualIap2Link(
             maybeRespondControlCsmLocked(frame)
         }
         if (frames.isEmpty() && frameCount <= 10) {
-            log("IAPLINK: rx ${bytes.size}B（非 CSM）hex=" + bytes.joinToString(" ") { "%02x".format(it) }.take(160))
+            log("IAPLINK: rx ${bytes.size}B (non-CSM) hex=" + bytes.joinToString(" ") { "%02x".format(it) }.take(160))
         }
     }
 
-    /** 引擎回调：EA 会话（2 号）数据帧——触摸 HID 的高概率载体。 */
+    /** Engine callback: EA session (no. 2) data frame, a likely carrier for touch HID. */
     var onEaData: ((ByteArray) -> Unit)? = null
 
     /**
-     * 引擎回调：iAP2 控制会话下发的 HID 报告解析出的 Android 媒体键。
+     * Engine callback: Android media keys parsed from HID reports delivered by the iAP2 control session.
      *
-     * 车机方向盘/面板的上一曲、下一曲在 CarPlay 里走 `0x6802 AccessoryHIDReport`，
-     * 只有 iAP2 链路真正建立后才会来（见 [eventLinkArmed]）。
+     * The head unit's steering wheel/panel previous/next keys travel as `0x6802 AccessoryHIDReport` in CarPlay,
+     * and only arrive once the iAP2 link is really established (see [eventLinkArmed]).
      */
     var onMediaKey: ((Int) -> Unit)? = null
 
-    /** 导航键（iDrive 旋钮/四向）：交给会话层注入虚拟屏（DPAD_*），不是全局媒体键。 */
+    /** Navigation keys (iDrive knob / four-way): handed to the session layer to inject into the virtual display (DPAD_*), not global media keys. */
     var onNavKey: ((Int) -> Unit)? = null
 
-    /** 车机在 0x6800 StartHID 里给出的 HID 描述符（解析报告用；null = 未提供）。 */
+    /** HID descriptor the head unit provides in 0x6800 StartHID (used to parse reports; null = not provided). */
     private var hidDescriptor: ByteArray? = null
 
     fun handleEaData(bytes: ByteArray) {
         eaCount++
         val hex = bytes.joinToString(" ") { "%02x".format(it) }
         if (eaCount <= 30 || eaCount % 100 == 0) {
-            log("IAPLINK: EA 数据 #$eaCount ${bytes.size}B hex=${hex.take(200)}")
+            log("IAPLINK: EA data #$eaCount ${bytes.size}B hex=${hex.take(200)}")
         }
         onEaData?.invoke(bytes)
     }
 
     companion object {
-        /** 隧道 MFi 冷启动基线（Frida 真机 20B 优先；顺序会被按车机记忆重排）。 */
+        /** Subscription name of this link in CarNowPlaying (the Bluetooth control session holds its own). */
+        const val NOW_PLAYING_LINK = "Wi-Fi tunnel"
+
+        /** Tunnel MFi cold-start baseline (Frida real-device value, 20B first; the order is reshuffled by the head unit memory). */
         val TUNNEL_MFI_BASELINE = listOf(20, 32, 16)
         val TUNNEL_MFI_WINDOWS = mapOf(20 to 6_000L, 32 to 3_000L, 16 to 3_000L)
         const val TUNNEL_MFI_SILENT_WINDOW_MS = 1_500L
 
         /**
-         * 车机在事件通道上连续发到第几个 SYN marker 才判定「它在等我们回 marker」。
-         * 真机（MIB3）在我们主动 detect 后就不再重发；Honda HFT 实测连发上百次，
-         * 取 2 既能避开 MIB3 的一次探测重发，又不会让车机白等太久。
+         * After how many consecutive SYN markers on the event channel we judge "it is waiting for our marker reply".
+         * A real device (MIB3) stops resending after our proactive detect; Honda HFT was measured sending hundreds of times;
+         * 2 avoids MIB3's one probe resend without making the head unit wait too long.
          */
         const val EVENT_LINK_MARKER_THRESHOLD = 2
 
         /**
-         * 控制通道协商：每轮多久无进展就重开下一轮，最多几轮。
-         * 车机 marker 是 1Hz，4s 一轮 ⇒ 每轮能收到 4 次重发机会；5 轮 ≈ 20s，
-         * 之后停手静默等待（它真发 0x1D01 仍会被正常处理）。
+         * Control-channel negotiation: how long without progress before opening the next round, and how many rounds at most.
+         * The head unit marker is 1 Hz and a round is 4 s => each round sees 4 resend chances; 5 rounds ~ 20 s,
+         * then stop and wait silently (if it does send 0x1D01 it is still processed normally).
          */
         const val CONTROL_SYN_ROUND_MILLIS = 4_000L
         const val MAX_CONTROL_SYN_ROUNDS = 5
 
         /**
-         * 0x6802 AccessoryHIDReport 的报文参数号。
+         * Parameter ID in the 0x6802 AccessoryHIDReport message.
          *
-         * 本田 HFT 实测：param 0 = 报告类型/描述（`00 03`，永远不变），
-         * param 1 = 真正的 HID 报文（如 `04` = 下一首）。取错参数号等于所有按键都解码成「无」。
+         * Measured on Honda HFT: param 0 = report type/description (`00 03`, never changes),
+         * param 1 = the real HID report (e.g. `04` = next track). A wrong param ID decodes every key as "none".
          */
         const val HID_REPORT_DATA_PARAM = 1
 
-        /** 参数明细只打前几帧（之后每帧都会触发按键动作，日志已足够）。 */
+        /** Parameter details are printed only for the first few frames (every later frame triggers a key action, so the log is already sufficient). */
         const val HID_REPORT_VERBOSE_FRAMES = 8
 
-        /** 同一按键持续按住多久才允许再次触发（模拟长按连发，短按绝不重复）。 */
+        /** How long the same key must stay held before it may trigger again (emulates long-press auto-repeat; a short press never repeats). */
         const val HID_HOLD_REPEAT_MILLIS = 1_500L
 
         /**
-         * 0x6802 的参数表 → HID 报文。
+         * 0x6802 param table -> HID report.
          *
-         * 优先取 param [HID_REPORT_DATA_PARAM]；缺省（个别车机只给一个参数）时退回
-         * 「最后一个 1~8 字节的参数」——注意**不能取第一个**：本田 HFT 的 param 0 恒为
-         * `00 03`（报告类型），当成报文值会让所有按键都解成「无」。
+         * Prefer param [HID_REPORT_DATA_PARAM]; if absent (some head units give only one parameter) fall back to
+         * "the last param of 1~8 bytes". Note that **the first one must not be taken**: on Honda HFT param 0 is always
+         * `00 03` (report type), and treating it as the report value makes every key decode as "none".
          */
         fun hidReportFromParams(params: List<Iap2Csm.Param>): ByteArray? =
             params.firstOrNull { it.id == HID_REPORT_DATA_PARAM }?.value?.takeIf { it.isNotEmpty() }
                 ?: params.lastOrNull { it.value.isNotEmpty() && it.value.size <= 8 }?.value
 
-        // ---- MIB3 消息号（无正式名/未入 Iap2MessageIds 的小集合） ----
+        // ---- MIB3 message IDs (a small set with no official names / not in Iap2MessageIds) ----
         const val MFI_AUTH_SERIAL = 0xAA06
         const val WIRELESS_SESSION_ID = 0x4E0C
         const val DEVICE_TIME = 0x4E0B
@@ -937,21 +1004,21 @@ class VirtualIap2Link(
         const val START_LIST_UPDATES = 0x4170
         const val LIST_UPDATE = 0x4171
 
-        /** ---- 以下为 Frida 抓包的逐字节常量（MIB3 真机 iPhone → Audi MMI）---- */
+        /** ---- Byte-exact constants below come from Frida captures (MIB3 real iPhone -> Audi MMI) ---- */
         private val HEX_DIGITS = "0123456789abcdef"
 
-        /** 0xFFFA StartLocationInformation。 */
+        /** 0xFFFA StartLocationInformation. */
         internal val MIB3_START_LOCATION_INFORMATION: ByteArray =
             hex(
                 "40400032fffa00080000000000140004000100088001000000fa" +
                     "0004000200088002000000fa000400040008800400000014",
             )
 
-        /** 0xFFF0 GPRMCDataStatusValuesNotification。 */
+        /** 0xFFF0 GPRMCDataStatusValuesNotification. */
         internal val MIB3_GPRMC_DATA_STATUS: ByteArray =
             hex("4040000efff00004000000040001")
 
-        /** 0x5001 NowPlayingUpdate 空态（无媒体/无播放）。 */
+        /** 0x5001 NowPlayingUpdate empty state (no media / not playing). */
         internal val MIB3_NOW_PLAYING_UPDATE_IDLE: ByteArray =
             hex(
                 "404000555001002a00000005000100000800040000000000050006000005000c0000" +
@@ -959,7 +1026,7 @@ class VirtualIap2Link(
                     "000500000500060000050007000005001000",
             )
 
-        /** 0x4158 CommunicationsUpdate 空态（无 SIM/无信号场景的可用占位）。 */
+        /** 0x4158 CommunicationsUpdate empty state (usable placeholder when there is no SIM / no signal). */
         internal val MIB3_COMMUNICATIONS_UPDATE_IDLE: ByteArray =
             hex(
                 "404000644158000500000100050001060005000200000e0004e697a053494de58da1" +

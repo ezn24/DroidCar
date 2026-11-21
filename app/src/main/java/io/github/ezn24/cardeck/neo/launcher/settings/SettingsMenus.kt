@@ -4,7 +4,10 @@ import androidx.fragment.app.Fragment
 import io.github.ezn24.cardeck.neo.R
 import io.github.ezn24.cardeck.neo.ui.UiStrings
 
-/** 车机设置菜单注册表：车机双栏与手机二级菜单共用（菜单项/标题/Fragment 工厂）。 */
+/**
+ * Head-unit settings menu registry: shared by the head-unit two-pane and the phone-side secondary menu (entries / titles / Fragment
+ * factories).
+ */
 object SettingsMenus {
     const val DESKTOP = 0
     const val SUPERSAMPLE = 1

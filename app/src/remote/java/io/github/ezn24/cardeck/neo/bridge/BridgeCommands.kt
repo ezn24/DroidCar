@@ -6,11 +6,12 @@ import io.github.ezn24.cardeck.neo.SessionController
 import org.json.JSONObject
 
 /**
- * 调试命令白名单（**绝不放开任意 shell/反射**——远程通道被劫持时的爆炸半径
- * 限定在这几个动作）。全部走既有公开 API，遵守「UI 线程禁 shell」约定。
+ * Debug command whitelist (**never open up arbitrary shell/reflection**: if the remote channel is hijacked, the blast radius
+ * is limited to these few actions). Everything goes through existing public APIs, obeying the "no shell on the UI thread" convention.
  *
- * 远程发起/断开连接时必须「悬浮窗提示 + 自动跳主界面」：用户此刻多半停在
- * 调试设置页（地址输入页），不跳走就看不到连接进度（2026-10-21 用户实测反馈）。
+ * When a remote connect/disconnect is initiated there must be an "overlay hint + automatic jump to the main screen": the user is most
+ * likely
+ * on the debug settings page (the address entry page) and would not see connection progress without leaving it (user feedback 2026-10-21).
  */
 object BridgeCommands {
     fun handle(
@@ -20,37 +21,40 @@ object BridgeCommands {
     ): JSONObject {
         val ctx =
             context?.applicationContext
-                ?: return fail("应用上下文未就绪")
+                ?: return fail("application context not ready")
         return when (name) {
             "ping" -> JSONObject().put("ok", true).put("detail", "pong ${System.currentTimeMillis()}")
 
             "get_state" ->
                 JSONObject()
                     .put("ok", true)
-                    .put("detail", SessionController.statusLine() + " 会话=${if (SessionController.isSessionRunning()) "运行中" else "停止"}")
+                    .put(
+                        "detail",
+                        SessionController.statusLine() + " session=${if (SessionController.isSessionRunning()) "running" else "stopped"}",
+                    )
 
             "start_connection" -> {
-                // 与手机上点「启动连接」等价：前置（Shizuku/蓝牙）不满足时日志会说明
+                // Equivalent to tapping "Start connection" on the phone: if prerequisites (Shizuku/Bluetooth) are unmet the log explains
                 SessionController.ensure(ctx)
                 SessionController.startConnection(ctx)
                 BridgeOverlay.show(ctx, "开发者发起连接——正在进入主界面，进度见英雄卡")
                 openMainUi(ctx)
-                JSONObject().put("ok", true).put("detail", "已发起连接（已跳转主界面）")
+                JSONObject().put("ok", true).put("detail", "connection started (jumped to the main screen)")
             }
 
             "stop_connection" -> {
                 SessionController.disconnect(ctx)
                 BridgeOverlay.show(ctx, "开发者已断开车机连接")
-                JSONObject().put("ok", true).put("detail", "已断开")
+                JSONObject().put("ok", true).put("detail", "disconnected")
             }
 
-            else -> fail("未知命令：$name")
+            else -> fail("unknown command: $name")
         }
     }
 
-    /** 把主界面带到前台（用户可能在调试设置页，看不到连接进度）。
-     *  后台启动 Activity 的限制对本应用豁免：悬浮窗权限（SYSTEM_ALERT_WINDOW）
-     *  持有者不受后台启动限制，而调试包必然申请该权限。 */
+    /** Bring the main screen to the foreground (the user may be on the debug settings page and cannot see connection progress).
+     *  The background-start restriction on Activities is exempt for this app: holders of the overlay permission (SYSTEM_ALERT_WINDOW)
+     *  are not bound by it, and the debug build necessarily requests that permission. */
     private fun openMainUi(ctx: Context) {
         val intent =
             Intent()

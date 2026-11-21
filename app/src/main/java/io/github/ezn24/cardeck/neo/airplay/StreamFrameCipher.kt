@@ -1,25 +1,25 @@
 package io.github.ezn24.cardeck.neo.airplay
 
 /**
- * 屏幕/音频流帧加密方式（AirPlay `et` 字段的三种形态）。
+ * Frame encryption for the screen/audio streams (the three forms of the AirPlay `et` field).
  *
- * catplay `ScreenFrameCodec::new` 的选择依据：
- *  - 走过 /pair-setup/pair-verify → ChaCha20-Poly1305（共享密钥派生）；
- *  - 只走过 /auth-setup（MFi-SAP）→ AES-128-CTR（会话密钥）；
- *  - 都没走（`et = NONE`，老车机 pre-HomeKit）→ **AES-128-CTR 且会话密钥全零**
- *    （catplay 注释："There was never support for unencrypted screen sessions.
- *     ET = None maps to AES session where session_key before derivation is all zeroes."）
+ * Selection logic of catplay `ScreenFrameCodec::new`:
+ *  - went through /pair-setup/pair-verify -> ChaCha20-Poly1305 (derived from the shared secret);
+ *  - went through /auth-setup (MFi-SAP) only -> AES-128-CTR (session key);
+ *  - neither (`et = NONE`, old pre-HomeKit head units) -> **AES-128-CTR with an all-zero session key**
+ *    (catplay comment: "There was never support for unencrypted screen sessions.
+ *     ET = None maps to AES session where session_key before derivation is all zeroes.")
  *
- * 2026-10-19 数据点：奥迪 4xxx（如 4851）可能属于第三类——对它强制
- * pair-setup 必然失败，而 catplay 先用明文 SETUP 起步、屏幕流走 AES 零密钥即可连上。
+ * Data point 2026-10-19: Audi 4xxx (e.g. 4851) may belong to the third kind: forcing
+ * pair-setup on it always fails, while catplay connects by starting with a plaintext SETUP and streaming the screen over AES with a zero key.
  */
 sealed class StreamFrameCipher {
-    /** 视频帧 ChaCha20-Poly1305 密封（16B tag），keepAlive/config 帧不加密。 */
+    /** ChaCha20-Poly1305 seal of video frames (16B tag); keepAlive/config frames are not encrypted. */
     class ChaCha(
         val key: ByteArray,
     ) : StreamFrameCipher()
 
-    /** 视频帧 AES-128-CTR 流式加密（无 tag，密钥流跨帧连续）。 */
+    /** Streaming AES-128-CTR encryption of video frames (no tag; keystream continues across frames). */
     class AesCtr(
         val key: ByteArray,
         val iv: ByteArray,
@@ -28,8 +28,8 @@ sealed class StreamFrameCipher {
 
 object AirPlayStreamKeys {
     /**
-     * ChaCha 流密钥：HKDF-SHA512(shared_secret, "DataStream-Salt<connId>", "DataStream-Output-Encryption-Key")。
-     * 与 catplay `create_chacha_ciphers` / 接收端 ScreenStream 的派生规则一致。
+     * ChaCha stream key: HKDF-SHA512(shared_secret, "DataStream-Salt<connId>", "DataStream-Output-Encryption-Key").
+     * Same derivation as catplay `create_chacha_ciphers` and the receiver's ScreenStream.
      */
     fun chachaStreamKey(
         sharedSecret: ByteArray,
@@ -41,13 +41,13 @@ object AirPlayStreamKeys {
             "DataStream-Output-Encryption-Key".toByteArray(Charsets.US_ASCII),
         )
 
-    /** `et=NONE` 时的会话密钥：16 字节全零（catplay ScreenFrameCodec::new 同款）。 */
+    /** Session key for `et=NONE`: 16 zero bytes (same as catplay ScreenFrameCodec::new). */
     val ZERO_SESSION_KEY: ByteArray = ByteArray(16)
 
     /**
-     * AES 流密钥/IV（catplay `derive_aes_stream_keys` 逐字节对齐）：
-     *   key = SHA512("AirPlayStreamKey" + connId(十进制) + sessionKey)[0..16]
-     *   iv  = SHA512("AirPlayStreamIV"  + connId(十进制) + sessionKey)[0..16]
+     * AES stream key/IV (byte-aligned with catplay `derive_aes_stream_keys`):
+     *   key = SHA512("AirPlayStreamKey" + connId(decimal) + sessionKey)[0..16]
+     *   iv  = SHA512("AirPlayStreamIV"  + connId(decimal) + sessionKey)[0..16]
      */
     fun aesStreamKeys(
         sessionKey: ByteArray,

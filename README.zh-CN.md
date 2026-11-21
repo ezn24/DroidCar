@@ -63,6 +63,7 @@ CarDeck Neo 是 [CarDeck](https://github.com/shaonialife/cardeck) 的界面改�
 - **车机画面截图**：在「诊断」页一键把当前车机画面存成 PNG（存到「下载/CarDeck」）。
 - **车机麦克风**：任何 App 开始录音（语音搜索、语音消息、Gemini 等）时，自动改用车机麦克风收音，结束后还原手机麦克风（已在 WinPlay 验证，真车待测）。
 - **辅助小白点**：车机画面最上层的小圆点，可拖动，点开有返回 / 主页 / 后台三键；在仪表盘时「返回」会发给最后操作的地图或音乐 App。大小可在 **车机设置 → 显示** 调整，深浅色跟随手机。
+- **手机快捷设置**：在手机主页的 **快捷设置** 可开关辅助小白点、仪表盘导航资讯及车机通知横幅。
 - **车机通知**：CarPlay 风格横幅，显示 App 图标，从上方滑入，可点 × 或往上滑关闭；可另外指定只显示哪些 App 的通知。
 - **平板版面**：WhatsApp、Telegram、LINE、Instagram、ChatGPT、YouTube 等在车机上改用平板双栏版面；Discord 以手机密度渲染，修正文字被截断。
 - **连接自动化**：连接成功 / 断开时发出自定义 Intent（类似 MacroDroid「发送 Intent」：广播 / Activity / 服务、Action、包名、Extras 等），可搭配 Tasker 使用。

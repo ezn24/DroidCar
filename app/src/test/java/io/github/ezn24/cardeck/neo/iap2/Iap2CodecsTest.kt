@@ -9,7 +9,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class Iap2CodecsTest {
-    // ---- 链路层 ----
+    // ---- Link layer ----
 
     @Test
     fun linkPacketChecksumSumsToZero() {
@@ -51,7 +51,7 @@ class Iap2CodecsTest {
         assertNull(Iap2LinkPacket.decode(bytes))
     }
 
-    // ---- CSM 分帧 ----
+    // ---- CSM framing ----
 
     @Test
     fun csmFrameHeaderIs4040LengthAndId() {
@@ -72,7 +72,7 @@ class Iap2CodecsTest {
         val stream = frameA + frameB
         val parser = Iap2Csm.Parser()
 
-        // 按字节喂入，模拟最极端的分片
+        // Feed byte by byte to simulate the most extreme fragmentation
         val frames = stream.flatMap { byte -> parser.offer(byteArrayOf(byte)) }
 
         assertEquals(2, frames.size)
@@ -89,7 +89,7 @@ class Iap2CodecsTest {
         assertEquals(0x4300, frames[0].messageId)
     }
 
-    // ---- TLV 参数体 ----
+    // ---- TLV parameter body ----
 
     @Test
     fun tlvParamsRoundTrip() {
