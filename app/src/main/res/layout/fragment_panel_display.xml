@@ -72,8 +72,6 @@
 
         <include android:id="@+id/displayChatMode" layout="@layout/item_display_toggle" />
 
-        <include android:id="@+id/displayAssistiveDot" layout="@layout/item_display_toggle" />
-
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -105,8 +103,6 @@
                 android:textColor="?attr/panelTextSecondary"
                 android:textSize="12sp" />
         </LinearLayout>
-
-        <include android:id="@+id/displayCarNotifications" layout="@layout/item_display_toggle" />
 
         <!-- 车机通知只显示哪些 App（独立名单；空 = 全部） -->
         <TextView

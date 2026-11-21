@@ -119,6 +119,7 @@
             <intent-filter>
                 <action android:name="io.github.ezn24.cardeck.neo.CAPTURE_CAR" />
                 <action android:name="io.github.ezn24.cardeck.neo.EXPORT_LOG" />
+                <action android:name="io.github.ezn24.cardeck.neo.DUMP_NAV_UI" />
             </intent-filter>
         </receiver>
 
@@ -149,6 +150,20 @@
 
         <!-- 通知监听（媒体会话枚举）：音乐卡需要「通知使用权」；
              Shizuku 在场时可由 cmd notification allow_listener 静默授权 -->
+        <!-- Turn-by-turn text of Waze / Amap for the head-unit cluster; enabled by the user in system settings -->
+        <service
+            android:name=".nav.NavAccessibilityService"
+            android:exported="false"
+            android:label="@string/nav_accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/nav_accessibility" />
+        </service>
+
         <service
             android:name=".media.MediaListenerService"
             android:exported="false"

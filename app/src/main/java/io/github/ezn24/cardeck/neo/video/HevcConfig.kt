@@ -3,22 +3,23 @@ package io.github.ezn24.cardeck.neo.video
 import java.io.ByteArrayOutputStream
 
 /**
- * HEVC（H.265）屏幕流的 VideoConfig 体：`[u32 BE 盒长]["hvcC"][HEVCDecoderConfigurationRecord]`。
+ * VideoConfig body of the HEVC (H.265) screen stream: `[u32 BE box length]["hvcC"][HEVCDecoderConfigurationRecord]`.
  *
- * 协议事实（CarPlayStation 接收端对照，GPL 只读，未抄代码）：接收端在 VideoConfig 体里**搜索
- * "hvcC" 四字符标记**定位记录，并看帧头偏移 6 的 0x08 位判断 HEVC；找不到标记就按 avcC 解析
- * （必然失败）。H.264 路径仍发裸 avcC，与真车已验证的形态一致。
- * 真车（下一代 CarPlay）上的 HEVC 形态未验证。
+ * Protocol facts (checked against the CarPlayStation receiver, GPL, read-only, no code copied): the receiver **searches the
+ * VideoConfig body for the four-character "hvcC" marker** to locate the record and checks the 0x08 bit at frame-header
+ * offset 6 to detect HEVC; with no marker it parses as avcC (which necessarily fails). The H.264 path still sends a
+ * bare avcC, matching the form verified on real cars.
+ * The HEVC form on real (next-generation CarPlay) cars is unverified.
  */
 internal object HevcConfig {
     const val NAL_VPS = 32
     const val NAL_SPS = 33
     const val NAL_PPS = 34
 
-    /** HEVC NAL 类型：NAL 头第一个字节的 bit1..6。 */
+    /** HEVC NAL type: bits 1..6 of the first NAL header byte. */
     fun nalType(firstByte: Byte): Int = (firstByte.toInt() ushr 1) and 0x3F
 
-    /** 去掉 emulation prevention 字节（00 00 03 → 00 00），用于读 SPS 里的定长字段。 */
+    /** Strips emulation prevention bytes (00 00 03 -> 00 00), for reading fixed-length fields in the SPS. */
     fun unescape(
         bytes: ByteArray,
         from: Int,
@@ -42,8 +43,8 @@ internal object HevcConfig {
     }
 
     /**
-     * 由 VPS/SPS/PPS（不含起始码）组装 hvcC 记录。profile/tier/level 取自 SPS 的
-     * profile_tier_level（NAL 头 2 字节 + 1 字节 vps_id/子层数之后的 12 字节）。
+     * Assembles an hvcC record from VPS/SPS/PPS (without start codes). profile/tier/level come from the SPS
+     * profile_tier_level (the 12 bytes after the 2-byte NAL header + 1 byte of vps_id/sub-layer count).
      */
     fun record(
         vps: ByteArray,
@@ -56,16 +57,16 @@ internal object HevcConfig {
         val temporalIdNested = sps[2].toInt() and 0x01
         val out = ByteArrayOutputStream(23 + vps.size + sps.size + pps.size + 15)
         out.write(1) // configurationVersion
-        out.write(ptl, 0, 12) // profile_space/tier/profile_idc、兼容标志 4B、约束标志 6B、level_idc
+        out.write(ptl, 0, 12) // profile_space/tier/profile_idc, compatibility flags 4B, constraint flags 6B, level_idc
         out.write(0xF0) // reserved 1111 + min_spatial_segmentation_idc = 0
         out.write(0x00)
         out.write(0xFC) // reserved + parallelismType = 0
-        out.write(0xFD) // reserved + chroma_format_idc = 1（4:2:0）
+        out.write(0xFD) // reserved + chroma_format_idc = 1 (4:2:0)
         out.write(0xF8) // reserved + bitDepthLumaMinus8 = 0
         out.write(0xF8) // reserved + bitDepthChromaMinus8 = 0
-        out.write(0x00) // avgFrameRate = 0（未指定）
+        out.write(0x00) // avgFrameRate = 0 (unspecified)
         out.write(0x00)
-        // constantFrameRate=0 | numTemporalLayers | temporalIdNested | lengthSizeMinusOne=3（4 字节长度前缀）
+        // constantFrameRate=0 | numTemporalLayers | temporalIdNested | lengthSizeMinusOne=3 (4-byte length prefix)
         out.write((((maxSubLayersMinus1 + 1) and 0x07) shl 3) or (temporalIdNested shl 2) or 0x03)
         out.write(3) // numOfArrays
         for ((type, nal) in listOf(NAL_VPS to vps, NAL_SPS to sps, NAL_PPS to pps)) {
@@ -79,7 +80,7 @@ internal object HevcConfig {
         return out.toByteArray()
     }
 
-    /** VideoConfig 体：`[u32 BE 盒长]["hvcC"][记录]`。 */
+    /** VideoConfig body: `[u32 BE box length]["hvcC"][record]`. */
     fun configBody(record: ByteArray): ByteArray {
         val size = 8 + record.size
         val out = ByteArrayOutputStream(size)

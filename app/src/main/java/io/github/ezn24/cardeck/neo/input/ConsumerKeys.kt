@@ -3,36 +3,36 @@ package io.github.ezn24.cardeck.neo.input
 import android.view.KeyEvent
 
 /**
- * 车机 Consumer Control HID 报告 → Android 媒体键。
+ * Head-unit Consumer Control HID report -> Android media keys.
  *
- * 车机/方向盘媒体键在 CarPlay 里走 HID 通路（不是 AirPlay 事件命令），设备通常是
- * `eso_playback`（奥迪 `/info` hidDevices[0]，uuid=0）。
+ * Head-unit/steering-wheel media keys travel the HID path in CarPlay (not AirPlay event commands); the device is usually
+ * `eso_playback` (Audi `/info` hidDevices[0], uuid=0).
  *
- * **报文字节是 Usage 数组的下标，不是 Usage ID**（2026-10-17 实测定谳）：
- * 奥迪描述符 `LogicalMin 0 / LogicalMax 8 + ReportSize 8 + ReportCount 1 +
- * Input(Data,Array,Abs)`，Usage 列表按序声明 9 项（0x0000、0xB0、0xB1、0xB3、0xB4、
- * 0xB5、0xB6、0xB9、0xBC）——Array 语义下 1 字节报告给出的是「第几项」。
- * 实测：按下「下一首」收到 0x05、按下「上一首」收到 0x06，分别对应 usages[5]=0xB5、
- * usages[6]=0xB6；若把字节直接当 Usage ID 会得到 0x05/0x06 → 无对应键（原先的 bug）。
+ * **The report byte is an index into the Usage array, not a Usage ID** (pinned down by a 2026-10-17 field test):
+ * the Audi descriptor is `LogicalMin 0 / LogicalMax 8 + ReportSize 8 + ReportCount 1 +
+ * Input(Data,Array,Abs)`, with 9 Usages declared in order (0x0000, 0xB0, 0xB1, 0xB3, 0xB4,
+ * 0xB5, 0xB6, 0xB9, 0xBC); under Array semantics the 1-byte report gives "which entry".
+ * Observed: pressing "next" yields 0x05 and "previous" yields 0x06, matching usages[5]=0xB5 and
+ * usages[6]=0xB6; treating the byte as a Usage ID gives 0x05/0x06, which map to no key (the original bug).
  *
- * 因此这里**解析设备自带的 HID 描述符**得到 Usage 数组顺序（不写死某一台车机），
- * 再按下标取值；描述符不可用时回退「字节即 Usage ID」的直读语义。
+ * So we **parse the device's own HID descriptor** for the Usage array order (nothing hard-coded for one head unit)
+ * and look up by index; when the descriptor is unavailable we fall back to the direct "byte is the Usage ID" reading.
  */
 object ConsumerKeys {
-    /** Consumer 页面（Generic Desktop 之外最常用的多媒体页）。 */
+    /** Consumer page (the most common multimedia page besides Generic Desktop). */
     private const val USAGE_PAGE_CONSUMER = 0x0C
 
     /**
-     * 一台 HID 设备的 Consumer 键映射。
+     * Consumer-key mapping of one HID device.
      *
-     * @param usages 按下标排列的 Usage ID（解析自描述符，保持声明顺序）
-     * @param isArray true=报文值是 usages 下标（标准 Array 语义）；false=值即 Usage ID
+     * @param usages Usage IDs by index (parsed from the descriptor, in declaration order)
+     * @param isArray true = the report value is a usages index (standard Array semantics); false = the value is the Usage ID
      */
     class KeyMap(
         val usages: List<Int>,
         val isArray: Boolean,
     ) {
-        /** 报告值 → Usage ID；0 或越界返回 null（0 = 无按键/释放）。 */
+        /** Report value -> Usage ID; 0 or out of range returns null (0 = no key/release). */
         fun usageFor(reportValue: Int): Int? {
             if (reportValue == 0) return null
             return if (isArray) {
@@ -43,16 +43,16 @@ object ConsumerKeys {
         }
 
         /**
-         * HID 报文 → 本次**按下**的 Usage 集合。
+         * HID report -> the set of Usages **pressed** this time.
          *
-         * 两种报告语义必须分开，混用会一个键都点不出来：
-         *  - Array（`81 00`）：字节值是 usages 下标，一次只可能有一个值；
-         *  - Variable / 位图（`81 02`）：**每个 usage 占 1 bit**，report 里按位展开。
+         * The two report semantics must be kept apart; mixing them makes no key work at all:
+         *  - Array (`81 00`): the byte value is a usages index, only one value at a time;
+         *  - Variable / bitmap (`81 02`): **each usage takes 1 bit**, expanded bitwise in the report.
          *
-         * 本田 HFT（Alpine 8A250-30A）的 StartHID 描述符正是位图：
-         * `… 75 01 95 05 09 B0 09 B1 09 B5 09 B6 09 B9 81 02 …` → 1 字节报告，
-         * bit0=播放(0xB0)、bit1=暂停(0xB1)、bit2=下一首(0xB5)、bit3=上一首(0xB6)、
-         * bit4=停止(0xB9)；报告 0x04 = 下一首、0x00 = 全部松开。
+         * The Honda HFT (Alpine 8A250-30A) StartHID descriptor is exactly a bitmap:
+         * `... 75 01 95 05 09 B0 09 B1 09 B5 09 B6 09 B9 81 02 ...` -> 1-byte report,
+         * bit0=play(0xB0), bit1=pause(0xB1), bit2=next(0xB5), bit3=previous(0xB6),
+         * bit4=stop(0xB9); report 0x04 = next, 0x00 = all released.
          */
         fun usagesFor(report: ByteArray): List<Int> {
             if (report.isEmpty()) return emptyList()
@@ -69,11 +69,11 @@ object ConsumerKeys {
     }
 
     /**
-     * 解析 HID 描述符里的 Consumer Usage 数组。
-     * 只取第一个「UsagePage=Consumer」的 Application Collection 内的 Usage 项；
-     * 描述符不含 Consumer 页时返回 null（该设备不是媒体键）。
+     * Parses the Consumer Usage array in a HID descriptor.
+     * Takes only the Usage items inside the first Application Collection with UsagePage=Consumer;
+     * returns null when the descriptor has no Consumer page (the device is not a media-key device).
      *
-     * 支持短条目编码（bSize: 0→0字节 / 1→1 / 2→2 / 3→4）。
+     * Supports short item encoding (bSize: 0 -> 0 bytes / 1 -> 1 / 2 -> 2 / 3 -> 4).
      */
     fun parseDescriptor(descriptor: ByteArray): KeyMap? {
         var index = 0
@@ -103,28 +103,28 @@ object ConsumerKeys {
             index += 1 + dataBytes
 
             when {
-                // 全局项：Usage Page
+                // Global item: Usage Page
                 type == 1 && tag == 0x0 -> {
                     page = value
                     if (value == USAGE_PAGE_CONSUMER) sawConsumerPage = true
                 }
-                // 全局项：Logical Maximum（Array 报告里用于界定下标范围）
+                // Global item: Logical Maximum (bounds the index range in Array reports)
                 type == 1 && tag == 0x2 -> Unit
-                // 局部项：Usage（1 或 2 字节）——收进当前 Consumer Application 的数组
+                // Local item: Usage (1 or 2 bytes), collected into the current Consumer Application's array
                 type == 2 && tag == 0x0 -> {
                     if (inConsumerApp && sawConsumerPage) usages += value
                 }
-                // 主项：Collection / EndCollection
+                // Main item: Collection / EndCollection
                 type == 0 && tag == 0xA -> {
-                    // 仅当当前页是 Consumer 且处于顶层 Application 时开启收集
+                    // Start collecting only when the current page is Consumer and we are in a top-level Application
                     if (!inConsumerApp && page == USAGE_PAGE_CONSUMER) inConsumerApp = true
                 }
                 type == 0 && tag == 0xC -> {
                     if (inConsumerApp) return KeyMap(usages, isArray)
                 }
-                // 主项：Input——bit1=0 表示 Array（值是下标），=1 表示 Variable（值是位图）。
-                // bit0=1 是 Constant（描述符尾部的补齐位，如 `75 03 95 01 81 03`），
-                // 不参与按键语义，不能让它覆盖前面的真实报告格式。
+                // Main item: Input. bit1=0 means Array (value is an index), =1 means Variable (value is a bitmap).
+                // bit0=1 is Constant (padding bits at the end of the descriptor, such as `75 03 95 01 81 03`),
+                // which does not take part in key semantics and must not overwrite the real report format seen earlier.
                 type == 0 && tag == 0x8 -> {
                     if ((value and 0x01) == 0) isArray = (value and 0x02) == 0
                 }
@@ -134,7 +134,7 @@ object ConsumerKeys {
         return null
     }
 
-    /** Usage ID → Android 媒体键；无对应键返回 0（如 Repeat）。 */
+    /** Usage ID -> Android media key; returns 0 when there is no matching key (e.g. Repeat). */
     fun keyCodeFor(usage: Int): Int =
         when (usage) {
             0xB0 -> KeyEvent.KEYCODE_MEDIA_PLAY
@@ -147,17 +147,17 @@ object ConsumerKeys {
             else -> 0
         }
 
-    /** 可读名称（日志用）。 */
+    /** Readable name (for logs). */
     fun nameOf(usage: Int): String =
         when (usage) {
-            0xB0 -> "播放"
-            0xB1 -> "暂停"
-            0xB3 -> "快进"
-            0xB4 -> "快退"
-            0xB5 -> "下一首"
-            0xB6 -> "上一首"
-            0xB9 -> "停止"
-            0xBC -> "循环"
-            else -> "未知(0x%02x)".format(usage)
+            0xB0 -> "Play"
+            0xB1 -> "Pause"
+            0xB3 -> "Fast forward"
+            0xB4 -> "Rewind"
+            0xB5 -> "Next"
+            0xB6 -> "Previous"
+            0xB9 -> "Stop"
+            0xBC -> "Repeat"
+            else -> "unknown(0x%02x)".format(usage)
         }
 }

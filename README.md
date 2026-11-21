@@ -63,6 +63,7 @@ The layout adapts to the head unit's resolution: wide screens split side by side
 - **Car screen capture**: one tap on the Diagnostics tab saves the current head-unit screen as a PNG (in Download/CarDeck).
 - **Car microphone**: when any app starts recording (voice search, voice messages, Gemini…), audio comes from the car's microphone instead, and the phone mic is restored afterwards (verified with WinPlay; not yet tested in a real car).
 - **Assistive dot**: a small draggable dot on top of the car screen with Back / Home / Recents. On the dashboard, Back goes to the map or music app you touched last. Size is adjustable in **Car settings → Display**; follows the phone's dark/light mode.
+- **Phone quick settings**: On the phone home screen, use **Quick settings** to toggle Assistive Dot, cluster navigation info and car notification banners.
 - **Car notifications**: CarPlay-style banners with the app icon that slide in from the top; dismiss with × or by swiping up. You can limit notifications to selected apps.
 - **Tablet layouts**: WhatsApp, Telegram, LINE, Instagram, ChatGPT, YouTube and others use their tablet layout on the car screen; Discord renders at the phone's density so text is no longer clipped.
 - **Connection automation**: send your own Intents when the car connects or disconnects (MacroDroid-style: broadcast / activity / service, action, package, extras…), e.g. for Tasker.

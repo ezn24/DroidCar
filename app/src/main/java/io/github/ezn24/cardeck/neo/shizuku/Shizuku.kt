@@ -14,17 +14,17 @@ import java.io.FileInputStream
 import java.util.concurrent.TimeUnit
 
 /**
- * Shizuku 网关 + shell 执行 + CarInput UserService 绑定。
- * 激活（无线调试，Android 11+，免 root）：开发者选项 → 无线调试 → 配对 → Shizuku App 点启动。
- * （移植自参考项目 android-auto）
+ * Shizuku gateway + shell execution + CarInput UserService binding.
+ * Activation (wireless debugging, Android 11+, no root): Developer options -> Wireless debugging -> pair -> tap Start in the Shizuku app.
+ * (Ported from the reference project android-auto)
  */
 object ShizukuGate {
     enum class State { NOT_INSTALLED, NOT_RUNNING, UNAUTHORIZED, READY }
 
-    /** Shizuku 授权请求码（授权结果回调按它过滤）。 */
+    /** Shizuku permission request code (the grant callback filters on it). */
     const val PERMISSION_REQUEST_CODE = 101
 
-    /** Shizuku App 包名（打开/检测共用）。 */
+    /** Shizuku app package name (shared by launch/detection). */
     const val PACKAGE_NAME = "moe.shizuku.privileged.api"
 
     fun state(context: Context): State {
@@ -77,10 +77,10 @@ object ShizukuGate {
     }
 
     /**
-     * 未就绪时的引导文案（纯函数，可单测）。
+     * Guidance text for the not-ready states (pure function, unit-testable).
      *
-     * 三种未就绪状态的**处置方式完全不同**（装/启动/授权），混成一句
-     * 「Shizuku 未就绪」用户无从下手——这是共享给朋友后最容易被问住的地方。
+     * The three not-ready states need **completely different actions** (install/start/authorize); a single
+     * "Shizuku not ready" leaves users stuck, which is the first thing friends get asked about once the app is shared.
      */
     internal fun guidanceOf(state: State): ShizukuGuidance =
         when (state) {
@@ -121,15 +121,15 @@ object ShizukuGate {
         }
 }
 
-/** Shizuku 未就绪时的引导内容（见 [ShizukuGate.guidanceOf]）。 */
+/** Guidance content when Shizuku is not ready (see [ShizukuGate.guidanceOf]). */
 internal data class ShizukuGuidance(
     val title: String,
     val message: String,
-    /** null = 本机没有可执行的主操作（未安装时无处可跳）。 */
+    /** null = no primary action available on this device (nowhere to jump when not installed). */
     val primaryLabel: String?,
 )
 
-/** 以 shell 身份执行命令（等同 adb shell）。Shizuku api 13 需经 IShizukuService binder 调 newProcess。 */
+/** Runs commands as the shell user (same as adb shell). Shizuku api 13 must call newProcess through the IShizukuService binder. */
 object Shell {
     class Result(
         val exitCode: Int,
@@ -138,15 +138,15 @@ object Shell {
         val ok: Boolean get() = exitCode == 0
     }
 
-    /** 主线程调用 `Shell.exec` 的累计次数（诊断用；见 [exec] 里的守卫）。 */
+    /** Cumulative count of `Shell.exec` calls made on the main thread (diagnostic; see the guard in [exec]). */
     @Volatile
     var mainThreadViolations: Int = 0
         private set
 
     /**
-     * 在主线程调用 shell 的告警出口（SessionController.appendLog）。
-     * 单条 shell 通常 100ms 量级、超时可达数秒，串几条就够 ANR——
-     * 这类问题只在真机上暴露（HKS 下 logcat 不可读），必须进文件日志。
+     * Warning sink for shell calls on the main thread (SessionController.appendLog).
+     * One shell command is typically ~100ms and can time out after seconds; a few in a row is enough for an ANR.
+     * This only shows up on real devices (logcat is unreadable under HKS), so it must go to the file log.
      */
     @Volatile
     var violationSink: ((String) -> Unit)? = null
@@ -155,19 +155,19 @@ object Shell {
         cmd: String,
         timeoutMs: Long = 6000L,
     ): Result {
-        // **UI 线程禁止 shell**：每次 exec 都是 Shizuku newProcess + 进程等待。
-        // 这里不强行拦截（会让原本可用的功能失效），但记录并告警——历史上
-        // 已有两次真机 ANR 源于此（detach 清理、横屏勾选框）。
+        // **No shell on the UI thread**: every exec is a Shizuku newProcess + process wait.
+        // We do not hard-block it here (that would break features that currently work), but we log a warning:
+        // two real-device ANRs in the past came from this (detach cleanup, the landscape checkbox).
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
             mainThreadViolations++
             violationSink?.invoke(
-                "SHELL: ⚠ 主线程调用 shell（第 $mainThreadViolations 次）cmd=${cmd.take(60)}" +
-                    "（$timeoutMs ms 上限）——应改用 Bg.run / 后台线程",
+                "SHELL: WARNING shell called on main thread (#$mainThreadViolations) cmd=${cmd.take(60)}" +
+                    " (${timeoutMs}ms limit) - use Bg.run / a background thread",
             )
         }
         val binder =
             rikka.shizuku.Shizuku.getBinder()
-                ?: return Result(-1, "Shizuku 未连接")
+                ?: return Result(-1, "Shizuku not connected")
         return try {
             val service = IShizukuService.Stub.asInterface(binder)
             val process = service.newProcess(arrayOf("sh", "-c", cmd), null, null)
@@ -201,25 +201,29 @@ object Shell {
                 }
             Result(exit, output)
         } catch (e: Exception) {
-            Result(-1, "命令执行失败：${e.message ?: e.javaClass.simpleName}")
+            Result(-1, "command execution failed: ${e.message ?: e.javaClass.simpleName}")
         }
     }
 }
 
-/** CarInput UserService 的绑定管理：绑定一次后所有触摸注入直连常驻 shell 进程（毫秒级）。 */
+/**
+ * CarInput UserService binding management: bind once, then all touch injection goes straight to the resident shell
+ * process (millisecond level).
+ */
 object CarInputClient {
     @Volatile
     var service: ICarInput? = null
         private set
 
     /**
-     * 等待 UserService 就绪（阻塞，**只能在后台线程调用**）。
+     * Waits for the UserService to be ready (blocking, **call only from a background thread**).
      *
-     * 会话刚激活时服务可能仍在 spawn——此时若立刻判定「受信屏不可用」而回退应用侧
-     * PUBLIC 屏，会白白丢掉受信屏的 IME/触摸优势，且回退路径对 UserService 依赖更重
-     * （2026-10-22 K60E：首次触摸就注入失败，日志里「三屏创建(回退)」）。
+     * Right after the session activates the service may still be spawning. Judging "trusted display unavailable" at that
+     * point and falling back to an app-side PUBLIC display needlessly gives up the trusted display's IME/touch advantages,
+     * and the fallback relies on the UserService even more (2026-10-22 K60E: first touch injection failed, log
+     * showed "three displays created (fallback)").
      *
-     * @return 就绪的 service；超时返回 null（调用方按原有回退逻辑处理）。
+     * @return the ready service; null on timeout (the caller applies its existing fallback logic).
      */
     fun awaitReady(
         context: Context,
@@ -246,11 +250,11 @@ object CarInputClient {
     @Volatile
     private var appContext: Context? = null
 
-    /** UserService 参数（unbind 时需同一实例）。 */
+    /** UserService arguments (unbind needs the same instance). */
     @Volatile
     private var userServiceArgs: rikka.shizuku.Shizuku.UserServiceArgs? = null
 
-    /** 诊断日志出口（接入文件日志，HKS 加密下 logcat 不可读）。 */
+    /** Diagnostic log sink (wired to the file log, since logcat is unreadable under HKS). */
     @Volatile
     var logSink: ((String) -> Unit)? = null
 
@@ -270,16 +274,17 @@ object CarInputClient {
     private var binderListenerAdded = false
 
     /**
-     * 回收旧版本残留的 UserService 进程，返回实际 kill 的数量（不足条件时 0）。
+     * Reaps leftover UserService processes of old versions; returns the number actually killed (0 if the preconditions are not met).
      *
-     * Shizuku 按「组件+进程名+版本(lastUpdateTime)」复用常驻 shell 进程——重装 APK 后
-     * 旧版本进程既不受 force-stop 影响、Shizuku 也不回收；而虚拟屏只有创建它的进程能
-     * 释放（releaseDisplay 只查本进程的 map），表现为「重启后检测到残留屏，点清理却
-     * 释放 0/N」。这里枚举 :car_input 进程，杀掉除当前绑定进程外的全部——旧进程只持有
-     * 残留屏，进程回收即屏随之释放（不打断触摸注入，当前会话屏属于绑定进程）。
-     * 配合 UserService 侧的过期自清（CarInputServiceImpl 的 stale self-reap）双保险。
+     * Shizuku reuses the resident shell process by "component + process name + version (lastUpdateTime)". After an APK
+     * reinstall the old-version process is unaffected by force-stop and Shizuku does not reap it, while a virtual display can
+     * only be released by the process that created it (releaseDisplay checks only its own map). The symptom is
+     * "leftover displays detected after restart, cleanup releases 0/N". Here we enumerate :car_input processes and kill all
+     * but the currently bound one: old processes hold only leftover displays, so reaping a process releases its displays
+     * (touch injection is not interrupted, the current session's displays belong to the bound process).
+     * Together with the UserService-side stale self-reap (CarInputServiceImpl) this is double insurance.
      *
-     * 阻塞调用（含 shell ps/kill），须在后台线程执行；绑定成功时自动触发一次。
+     * Blocking (shell ps/kill), run it on a background thread; triggered once automatically after a successful bind.
      */
     fun reapStaleUserServices(): Int {
         val bound = service ?: return 0
@@ -287,14 +292,14 @@ object CarInputClient {
             try {
                 bound.pid()
             } catch (t: Throwable) {
-                // 旧 dex 无 pid() 事务（正常不会发生：Shizuku 按版本复用，绑定的必是当前版本）
-                diag("reap 跳过：pid() 不可用（${t.javaClass.simpleName}）")
+                // Old dex has no pid() transaction (should not happen: Shizuku reuses by version, so the bound one is the current version)
+                diag("reap skipped: pid() unavailable (${t.javaClass.simpleName})")
                 return 0
             }
         val procName = (appContext?.packageName ?: return 0) + ":car_input"
         val ps = Shell.exec("ps -A -o PID,ARGS", 5_000L)
         if (!ps.ok) {
-            diag("reap 跳过：ps 失败（${ps.output.take(40)}）")
+            diag("reap skipped: ps failed (${ps.output.take(40)})")
             return 0
         }
         val stale =
@@ -307,26 +312,30 @@ object CarInputClient {
                 }.toList()
         if (stale.isEmpty()) return 0
         val killed = stale.count { pid -> Shell.exec("kill -9 $pid", 3_000L).ok }
-        // force：紧随 bind 的 1s 节流窗口会吞掉这条关键结果（排查时必查）
-        diag("已回收 $killed/${stale.size} 个旧版本 UserService 进程（其残留虚拟屏随之释放）", force = true)
+        // force: the 1s throttle window right after bind would swallow this key result (always check it when troubleshooting)
+        diag(
+            "reaped $killed/${stale.size} old-version UserService processes " +
+                "(their leftover virtual displays are released with them)",
+            force = true,
+        )
         return killed
     }
 
     /**
-     * 物理主屏断电/点亮（真息屏，同 scrcpy `-S`）。失败返回 false：
-     * ROM 未给 shell 相应权限，或 SDK 34+ 取不到 display token。
+     * Powers the physical main display off/on (true screen-off, like scrcpy `-S`). Returns false on failure:
+     * the ROM did not give the shell the needed permission, or no display token is obtainable on SDK 34+.
      */
     fun setPhysicalScreenPower(on: Boolean): Boolean =
         try {
             service?.setPhysicalScreenPower(on) ?: false
         } catch (t: Throwable) {
-            diag("setPhysicalScreenPower($on) 失败：${t.javaClass.simpleName} ${t.message}")
+            diag("setPhysicalScreenPower($on) failed: ${t.javaClass.simpleName} ${t.message}")
             false
         }
 
     /**
-     * 按键注入到指定 display（iDrive 旋钮 → 方向键/确认键）。
-     * 走 UserService 的 injectInputEvent（毫秒级）；失败时调用方回退 shell `input -d`。
+     * Injects a key into the given display (iDrive knob -> D-pad/confirm key).
+     * Goes through the UserService's injectInputEvent (millisecond level); on failure the caller falls back to shell `input -d`.
      */
     fun keyEvent(
         displayId: Int,
@@ -335,7 +344,7 @@ object CarInputClient {
         try {
             service?.keyEvent(displayId, keyCode) ?: false
         } catch (t: Throwable) {
-            diag("keyEvent($displayId,$keyCode) 失败：${t.javaClass.simpleName} ${t.message}")
+            diag("keyEvent($displayId,$keyCode) failed: ${t.javaClass.simpleName} ${t.message}")
             false
         }
 
@@ -345,11 +354,12 @@ object CarInputClient {
                 name: ComponentName?,
                 binder: IBinder?,
             ) {
-                // ⚠️ 本回调由 Shizuku 库 post 到**主线程**（ShizukuServiceConnection 用
-                // new Handler(Looper.getMainLooper())）。因此这里**绝不能**做阻塞调用：
-                // ping() 是跨进程 binder 调用，服务进程忙（建虚拟屏/注入）时可能阻塞
-                // 数百毫秒甚至更久，一旦主线程被堵，后续所有回调排队、binding 永久为真
-                // ——2026-10-22 K60E 真机定谳的「注入必然死锁」正是这条链。
+                // WARNING: this callback is posted by the Shizuku library to the **main thread** (ShizukuServiceConnection uses
+                // new Handler(Looper.getMainLooper())). So **never make blocking calls** here:
+                // ping() is a cross-process binder call and can block for hundreds of ms or more when the service process is busy
+                // (creating displays/injecting); once the main thread is blocked, all later callbacks queue up and
+                // binding stays true forever
+                // - the "injection always deadlocks" chain pinned down on a real K60E on 2026-10-22.
                 val bound = ICarInput.Stub.asInterface(binder)
                 service = bound
                 binding = false
@@ -363,14 +373,15 @@ object CarInputClient {
                         }
                     diag("connected ping=$ok", force = true)
                     if (!ok) {
-                        // 只有仍是本次绑定的结果才清空（期间可能已重绑成功）
+                        // Clear only if this is still the result of the current bind (a rebind may have succeeded meanwhile)
                         if (service === bound) {
                             service = null
                             binding = false
                         }
                     } else {
-                        // 绑定成功后顺手回收旧版本残留进程（其持有的虚拟屏跨进程无法释放，
-                        // 只有进程回收才能让屏消失）。后台线程执行：内部含 shell ps/kill。
+                        // After a successful bind, reap leftover old-version processes (virtual displays they hold cannot be released
+                        // across processes; only reaping the process makes them disappear). Runs on a background
+                        // thread: it contains shell ps/kill.
                         reapStaleUserServices()
                     }
                 }
@@ -384,27 +395,28 @@ object CarInputClient {
             }
         }
 
-    /** 上次绑定尝试时间（防止高频重试）。 */
+    /** Time of the last bind attempt (prevents high-frequency retries). */
     @Volatile
     private var lastBindAttemptAt = 0L
 
-    /** 本次绑定发起时刻（判「回调迟迟不来」用；0 = 当前无进行中的绑定）。 */
+    /** Time the current bind was issued (used to judge "callback is very late"; 0 = no bind in progress). */
     @Volatile
     private var bindingSince = 0L
 
     /**
-     * 确保 UserService 已绑定。可高频调用：service 为空且距上次尝试 >1.5s 时自动重绑
-     * （手机重启/Shizuku 重启后 binder 可能丢失而进程残留，需主动重建连接）。
+     * Ensures the UserService is bound. May be called at high frequency: when the service is null and >1.5s since
+     * the last attempt it rebinds
+     * (after a phone/Shizuku restart the binder may be lost while the process lingers, so the connection must be rebuilt actively).
      *
-     * **本方法可能在主线程被调用**（MainActivity 的启动探测），而 bindUserService 是
-     * 同步 binder 调用——统一改投后台，主线程只做一次转手。
+     * **This method may be called on the main thread** (MainActivity's startup probe), and bindUserService is
+     * a synchronous binder call, so it is posted to the background and the main thread only hands it off.
      */
     fun ensure(context: Context) {
         val app = context.applicationContext
         appContext = app
         addBinderListeners()
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-            // 不在主线程做 binder 调用：回调本身也走主 Looper，这里堵住等于自锁
+            // No binder call on the main thread: the callback itself also runs on the main Looper, so blocking here would self-lock
             Bg.run("shizuku-bind") { ensureInternal(app) }
             return
         }
@@ -416,15 +428,15 @@ object CarInputClient {
         binderListenerAdded = true
         try {
             rikka.shizuku.Shizuku.addBinderReceivedListener {
-                // Shizuku 服务端（重新）起来了：旧连接必然失效，允许重新绑定一次
-                diag("Shizuku binder 已就绪——重新绑定 UserService", force = true)
+                // The Shizuku server came (back) up: the old connection is necessarily dead, allow one rebind
+                diag("Shizuku binder ready - rebinding UserService", force = true)
                 binding = false
                 bindingSince = 0L
                 lastBindAttemptAt = 0L
                 appContext?.let { Bg.run("shizuku-bind") { ensureInternal(it) } }
             }
             rikka.shizuku.Shizuku.addBinderDeadListener {
-                diag("Shizuku binder 断开（服务端退出/重启）——触摸注入暂不可用", force = true)
+                diag("Shizuku binder disconnected (server exited/restarted) - touch injection temporarily unavailable", force = true)
                 service = null
                 binding = false
                 bindingSince = 0L
@@ -436,32 +448,32 @@ object CarInputClient {
     private fun ensureInternal(app: Context) {
         if (service != null) return
         val now = android.os.SystemClock.uptimeMillis()
-        // 1.5s 节流：Shizuku 被系统冻结期间绑定会静默失败，解冻后需要尽快恢复
+        // 1.5s throttle: while Shizuku is frozen by the system a bind fails silently and must be restored quickly after thaw
         if (now - lastBindAttemptAt < BIND_THROTTLE_MS) return
-        // **只在「等得太久」时才重新发起**。旧实现固定 1.5s 就判卡死，且重绑前会
-        // unbindUserService(remove=true)——那会把刚起来的服务进程**直接杀掉**：
-        //   Shizuku 的 connected 回调 post 到主线程 → 主线程一忙回调就晚到 →
-        //   1.5s 后被判「卡死」→ 杀进程 → 重新 spawn → 回调又晚到 → 再杀……
-        // 这是自持抖动，永不收敛（2026-10-22 K60E 真机：注入失败 1700+ 次、
-        // 每 2~3 秒刷一次「绑定卡死状态已解除」）。
-        // 现在：等待窗口放宽到 8s，且**绝不在这里杀服务进程**（重绑是幂等的，
-        // Shizuku 会把已在运行的服务 binder 再次回调过来）。
+        // **Reissue only when we have waited too long.** The old code judged "stuck" at a fixed 1.5s and, before rebinding, called
+        // unbindUserService(remove=true), which **kills the just-started service process**:
+        //   Shizuku's connected callback is posted to the main thread -> a busy main thread delays it ->
+        //   after 1.5s judged "stuck" -> process killed -> respawned -> callback late again -> killed again ...
+        // This is self-sustaining flapping that never converges (2026-10-22 real K60E: 1700+ injection failures,
+        // a "bind stuck state cleared" line every 2~3 seconds).
+        // Now: the wait window is widened to 8s and we **never kill the service process here** (rebinding is idempotent,
+        // Shizuku calls back the binder of an already-running service again).
         if (binding) {
             val waited = if (bindingSince == 0L) 0L else now - bindingSince
             if (!shouldRebind(binding = true, waitedMs = waited, stuckTimeoutMs = BIND_STUCK_TIMEOUT_MS)) {
-                // 仍在正常等待：不打日志、不打断
+                // Still within the normal wait: no log, no interruption
                 return
             }
             binding = false
             diag(
-                "绑定等待 ${waited}ms 仍未回调——重新发起（不杀服务进程）",
+                "bind wait ${waited}ms still no callback - reissuing (service process not killed)",
                 force = true,
             )
         }
         lastBindAttemptAt = now
         val gate = ShizukuGate.state(app)
         if (gate != ShizukuGate.State.READY) {
-            diag("绑定暂停：state=$gate")
+            diag("bind paused: state=$gate")
             return
         }
         binding = true
@@ -470,20 +482,20 @@ object CarInputClient {
             val args =
                 userServiceArgs ?: rikka.shizuku.Shizuku
                     .UserServiceArgs(
-                        // 包名取自运行时（不要硬编码）：改名后这里会自动跟随
+                        // Package name is taken at runtime (do not hard-code it): follows automatically after a rename
                         ComponentName(app.packageName, CarInputServiceImpl::class.java.name),
                     ).processNameSuffix("car_input")
                     .debuggable(true)
-                    // 版本号取 APK lastUpdateTime（见 serviceVersion 注释）
+                    // Version is the APK lastUpdateTime (see the serviceVersion note)
                     .version(serviceVersion())
                     .also { userServiceArgs = it }
-            // **绝不 unbindUserService(remove=true)**：那个参数会 kill 远端服务进程。
-            // 旧实现在每次重试前都调用它 → 把刚 spawn 起来的进程杀掉 → 回调永远等不到
-            // → 再重试再杀，形成自持抖动（2026-10-22 K60E 注入必然死锁的根因之一）。
-            // bindUserService 本身幂等：服务已在运行时 Shizuku 会把现有 binder 再次
-            // 回调到同一个 ServiceConnection（Set 去重），无需先解绑。
+            // **Never unbindUserService(remove=true)**: that parameter kills the remote service process.
+            // The old code called it before every retry -> killed the just-spawned process -> the callback never arrived
+            // -> retry and kill again, self-sustaining flapping (one root cause of the 2026-10-22 K60E injection deadlock).
+            // bindUserService itself is idempotent: when the service is already running Shizuku calls the existing binder back
+            // to the same ServiceConnection (deduplicated by Set), so no prior unbind is needed.
             rikka.shizuku.Shizuku.bindUserService(args, conn)
-            diag("bindUserService requested（等待回调，超时 ${BIND_STUCK_TIMEOUT_MS}ms）")
+            diag("bindUserService requested (waiting for callback, timeout ${BIND_STUCK_TIMEOUT_MS}ms)")
         } catch (e: Throwable) {
             binding = false
             bindingSince = 0L
@@ -492,11 +504,13 @@ object CarInputClient {
     }
 
     /**
-     * UserService 版本 = APK lastUpdateTime（秒）。Shizuku 按「组件+进程名+版本」复用
-     * 常驻服务进程：硬编码版本号时重装 APK 不会换进程——复用的旧进程跑的还是旧 dex，
-     * 新代码静默不生效（2026-10-15 实测：受信屏加 SUPPORTS_IME 后 flags 仍是旧值
-     * 0x448 的根因；且 force-stop 杀不掉这些 shell 进程，会越积越多）。
-     * lastUpdateTime 重装必变 → 必起新进程；APK 不变时恒定 → 正常复用常驻进程。
+     * UserService version = APK lastUpdateTime (seconds). Shizuku reuses the resident service process by
+     * "component + process name + version": with a hard-coded version a reinstalled APK does not change the process, and
+     * the reused old process still runs the old dex so new code silently has no effect (2026-10-15 field test: the root cause of
+     * trusted-display flags staying at the old 0x448 after adding SUPPORTS_IME; force-stop cannot kill these shell
+     * processes, so they pile up).
+     * lastUpdateTime always changes on reinstall -> a new process is always started; constant when the APK is
+     * unchanged -> the resident process is reused normally.
      */
     private fun serviceVersion(): Int =
         try {
@@ -506,37 +520,41 @@ object CarInputClient {
             val info = pm.getPackageInfo(appContext!!.packageName, 0)
             (info.lastUpdateTime / 1000L).toInt()
         } catch (_: Throwable) {
-            15 // 兜底：与历史手写版本号序列衔接，保证不低于 14
+            15 // Fallback: continues the historical hand-written version sequence, guaranteed not below 14
         }
 
     private const val TAG = "CarInputClient"
 
-    /** 两次绑定发起之间的最小间隔（Shizuku 被冻结时绑定会静默失败，解冻后需尽快恢复）。 */
+    /**
+     * Minimum interval between two bind attempts (a bind fails silently while Shizuku is frozen, and must be restored
+     * quickly after thaw).
+     */
     private const val BIND_THROTTLE_MS = 1_500L
 
     /**
-     * 判定「本次绑定卡死」的等待上限。
+     * Upper bound on waiting before judging "this bind is stuck".
      *
-     * 必须远大于正常回调延迟：Shizuku 的 connected 回调 post 到主线程，而服务进程本身
-     * 要 spawn + 加载 dex（调试包更慢）。旧值 1.5s 与节流窗等长，导致「发起 → 1.5s 后
-     * 判死 → 杀进程重来」的自持抖动（2026-10-22 K60E 实测每 2~3 秒刷一次）。
+     * Must be far larger than the normal callback delay: Shizuku's connected callback is posted to the main thread, and the service
+     * process itself must spawn + load dex (slower for debug builds). The old 1.5s value equalled the throttle window, causing the
+     * self-sustaining "issue -> judged dead after 1.5s -> kill process -> retry" flapping (2026-10-22 field test: a
+     * line every 2~3 seconds).
      */
     private const val BIND_STUCK_TIMEOUT_MS = 8_000L
 }
 
 /**
- * 「这次绑定是否该判卡死并重发」的纯函数（[CarInputClient] 的绑定状态机核心）。
+ * Pure function for "should this bind be judged stuck and reissued" (core of [CarInputClient]'s bind state machine).
  *
- * 拆成纯函数是为了钉死一个真机定谳的回归（2026-10-22 Redmi K60E）：旧实现在
- * 「距上次发起 ≥1.5s」时就无条件判卡死，**而这个窗口与正常回调延迟同量级**——
- * Shizuku 的 connected 回调 post 到主线程，服务进程还要 spawn + 加载 dex，
- * 1.5s 常常不够。判死后旧代码还会 `unbindUserService(remove=true)` 把刚起来的
- * 服务进程杀掉，于是「发起 → 判死 → 杀 → 再发起」永不收敛，触摸注入从第一次
- * 触碰起就全灭（日志每 2~3 秒刷「绑定卡死状态已解除」）。
+ * Extracted as a pure function to pin down a regression found on a real device (2026-10-22 Redmi K60E): the old code
+ * judged stuck unconditionally at "at least 1.5s since the last issue", **and that window is the same order as the normal
+ * callback delay**: Shizuku's connected callback is posted to the main thread and the service process must also spawn +
+ * load dex, so 1.5s is often not enough. After judging dead the old code also called `unbindUserService(remove=true)` and
+ * killed the just-started service process, so "issue -> judged dead -> kill -> reissue" never converged and touch injection
+ * was dead from the first touch (the log showed "bind stuck state cleared" every 2~3 seconds).
  *
- * @param binding 当前是否有进行中的绑定
- * @param waitedMs 该次绑定已等待多久（[binding] 为 false 时忽略）
- * @return true = 应重发；false = 继续等（或本就空闲可以发起）
+ * @param binding whether a bind is currently in progress
+ * @param waitedMs how long this bind has been waiting (ignored when [binding] is false)
+ * @return true = reissue; false = keep waiting (or already idle and may issue)
  */
 internal fun shouldRebind(
     binding: Boolean,

@@ -15,36 +15,37 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 用车机热点承载 CarPlay 流量。
+ * Carries CarPlay traffic over the head unit hotspot.
  *
- * **两种入网方式（2026-10-22 起默认静默命令行）**：
- *  - 静默路径（默认，见 `SessionController.joinCarWifiSilently`）：Shizuku 执行
- *    `cmd wifi connect-network`，系统直接把热点连上（**0 弹窗**），随后
- *    [bindCurrentWifi] 用**不带 specifier** 的 `requestNetwork` 捕获 `Network` 句柄并绑定。
- *  - [joinCarPlayNetwork]：`WifiNetworkSpecifier` 应用专属网络——静默路径不可用时的兜底。
- *    网络只对本进程可见（不保存、不成为默认网络），但首次加入会弹系统确认框。
+ * **Two ways to join the network (silent command line is the default since 2026-10-22)**:
+ *  - Silent path (default, see `SessionController.joinCarWifiSilently`): Shizuku runs
+ *    `cmd wifi connect-network` and the system joins the hotspot directly (**no dialog**); then
+ *    [bindCurrentWifi] captures the `Network` handle with a `requestNetwork` **without a specifier** and binds it.
+ *  - [joinCarPlayNetwork]: an app-specific network via `WifiNetworkSpecifier`, the fallback when the silent path is unavailable.
+ * The network is visible only to this process (not saved, not the default network), but the first join shows a system confirmation
+ * dialog.
  *
- * 关键点：
- *  - 请求不带 `NET_CAPABILITY_INTERNET`，系统不会因「无互联网」拆连接；
- *  - 两条路径都必须 `bindProcessToNetwork` 后再建 socket / 注册 mDNS——mDNS 广播
- *    (`NsdManager.registerService`) 没有 Network 参数，只能跟随进程默认网络；
- *  - SSID 必须精确匹配（热点名可能带空格/中文）：静默路径用 `cmd wifi status` 核对。
+ * Key points:
+ *  - The request does not carry `NET_CAPABILITY_INTERNET`, so the system does not drop the connection for "no internet";
+ *  - Both paths must `bindProcessToNetwork` before creating sockets / registering mDNS: mDNS advertisement
+ *    (`NsdManager.registerService`) has no Network parameter and can only follow the process default network;
+ *  - The SSID must match exactly (hotspot names may contain spaces/CJK): the silent path checks with `cmd wifi status`.
  */
 class WifiCarPlayConnector(
     private val context: Context,
     private val log: (String) -> Unit,
 ) {
-    /** 应用专属网络的连接结果。 */
+    /** Result of joining the app-specific network. */
     sealed interface JoinResult {
-        /** 已连接并绑定到本进程；[network] 可用于 NSD/端点判断。 */
+        /** Connected and bound to this process; [network] can be used for NSD/endpoint decisions. */
         data class Joined(
             val network: Network,
         ) : JoinResult
 
-        /** 系统未允许（用户拒绝/热点不在范围/超时）。可重试。 */
+        /** Not allowed by the system (user declined / hotspot out of range / timeout). Retryable. */
         data object Unavailable : JoinResult
 
-        /** 该安全类型无法用 WifiNetworkSpecifier 表达（WEP）——调用方走旧路径。 */
+        /** This security type cannot be expressed with WifiNetworkSpecifier (WEP); the caller takes the old path. */
         data object Unsupported : JoinResult
     }
 
@@ -57,15 +58,16 @@ class WifiCarPlayConnector(
     private val boundNetwork = AtomicReference<Network?>(null)
 
     /**
-     * 应用专属网络被系统断开（热点关闭/离开范围）时回调。会话层据此提示用户；
-     * 空实现 = 不关心（例如手动绑定路径）。
+     * Called when the app-specific network is dropped by the system (hotspot off / out of range). The session layer uses it to
+     * notify the user;
+     * the empty implementation = not interested (e.g. the manual binding path).
      */
     @Volatile
     var onNetworkLost: ((ssid: String) -> Unit)? = null
 
     /**
-     * 当前绑定网络的网关地址（车机热点场景 = 车机 IP）。
-     * mDNS 发现失败时的兜底路径。
+     * Gateway address of the currently bound network (in the head unit hotspot scenario = head unit IP).
+     * Fallback path when mDNS discovery fails.
      */
     fun gatewayAddress(): String? {
         val network = boundNetwork.get() ?: return null
@@ -99,9 +101,10 @@ class WifiCarPlayConnector(
         AdapterNetwork.fallbackHost(connectivityManager, boundNetwork.get(), invitePeer)
 
     /**
-     * 本机在当前绑定网络上的 IPv4 地址（如 10.174.189.57）。
-     * 用于 mDNS 结果过滤：手机双归属（连车机热点 + 自己开热点共享给电脑）时，
-     * mDNS 会跨网发现电脑的 AirPlay 接收器——非本网段地址一律不是车机。
+     * IPv4 address of this phone on the currently bound network (such as 10.174.189.57).
+     * Used for mDNS result filtering: when the phone is dual-homed (connected to the head unit hotspot + sharing its own hotspot
+     * with a computer),
+     * mDNS discovers the computer's AirPlay receiver across networks; any address outside this subnet is not the head unit.
      */
     fun localIpv4Address(): String? {
         val network = boundNetwork.get() ?: return null
@@ -118,10 +121,10 @@ class WifiCarPlayConnector(
     }
 
     /**
-     * 本机在当前绑定网络上的全部 IPv6 地址。
+     * All IPv6 addresses of this phone on the currently bound network.
      *
-     * mDNS 结果的网段验收用：奥迪 4xxx 的 `_airplay._tcp` 常只发链路本地 IPv6，
-     * 旧过滤只按 IPv4 前缀判定，会把车机本身也当成「非本网段」丢掉（2026-10-19）。
+     * For subnet acceptance of mDNS results: the Audi 4xxx `_airplay._tcp` often publishes only a link-local IPv6,
+     * and the old filter judged only by IPv4 prefix, so it dropped the head unit itself as "not on this subnet" (2026-10-19).
      */
     fun localIpv6Addresses(): List<String> {
         val network = boundNetwork.get() ?: return emptyList()
@@ -139,15 +142,16 @@ class WifiCarPlayConnector(
     }
 
     /**
-     * 用应用专属网络（`WifiNetworkSpecifier`）加入车机热点——**静默路径不可用时的兜底**。
-     * 首次加入会弹一次系统确认框；网络不保存、不成为默认网络。
+     * Join the head unit hotspot with an app-specific network (`WifiNetworkSpecifier`): **the fallback when the silent path is
+     * unavailable**.
+     * The first join shows one system confirmation dialog; the network is not saved and does not become the default network.
      *
-     * 阻塞直到连接成功/系统拒绝/超时（内部 200ms 分片，[isCancelled] 可即时退出）。
-     * 成功后进程网络已绑定，调用方可直接注册 mDNS / 建 socket。
+     * Blocks until connected / refused by the system / timeout (internally in 200ms slices, [isCancelled] exits immediately).
+     * On success the process network is bound, and the caller can register mDNS / create sockets directly.
      *
-     * 安全类型映射按 0x5703（xcertplay Iap2WirelessSecurity）：
-     * 0=NONE 1=WEP 2=WPA/WPA2 3=WPA3 过渡 4=WPA3 仅。
-     * WEP 无对应 API（返回 [JoinResult.Unsupported]，调用方走旧路径）。
+     * Security type mapping follows 0x5703 (xcertplay Iap2WirelessSecurity):
+     * 0=NONE 1=WEP 2=WPA/WPA2 3=WPA3 transition 4=WPA3 only.
+     * WEP has no matching API (returns [JoinResult.Unsupported], the caller takes the old path).
      */
     fun joinCarPlayNetwork(
         ssid: String,
@@ -155,9 +159,12 @@ class WifiCarPlayConnector(
         securityType: Int,
         timeoutMillis: Long = 120_000L,
         isCancelled: () -> Boolean = { false },
-        /** 首窗无回调时的快速探测（毫秒级 shell 往返 + ≤3s 绑定，必须不阻塞重发）。 */
+        /** Quick probe when the first window had no callback (millisecond shell round trip + <=3s binding; must not block the resend). */
         quickFallback: (() -> Network?)? = null,
-        /** 重发窗也无回调后的深度兜底（connect-network，10s 量级——本轮窗口已过，为下一轮省时间）。 */
+        /**
+         * Deep fallback after the resend window also had no callback (connect-network, ~10s; this round's window has passed, it
+         * saves time for the next round).
+         */
         deepFallback: (() -> Network?)? = null,
     ): JoinResult {
         val specifier =
@@ -170,61 +177,73 @@ class WifiCarPlayConnector(
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .setNetworkSpecifier(specifier)
                 .build()
-        // 等待节奏按「车机窗口」设计（2026-10-23 奥迪 3315 真机日志定谳）：0x4301 后
-        // 车机 ~15s 拆 BT、~21s 后 AirPlay 服务窗关闭（晚到即 ECONNREFUSED，BT 再健康
-        // 也无法激活）——从 0x5703 起算的入网预算只有 ~9-14s。 specifier 挂起形态下
-        // （「系统已保存该 SSID + 部分 ROM（Android 16/小米实测）」或 forget→request
-        // 紧邻操作，请求**永久 pending** 零回调）各阶段的预算：
-        //  ① 首窗 5s（正常入网实测 0.03~3s；5s 零回调即挂起特征）；
-        //  ② 快速探测（quickFallback：系统已自己连上该 SSID 则直接绑定，≤3s）；
-        //  ③ 重发 specifier（实测挂起后 release→重发 1.6s 即入网——**被验证有效的
-        //     恢复手段，必须紧跟探测**），20s 窗；
-        //  ④ 深度兜底（deepFallback：connect-network 直连，10s 量级）——本轮窗口必然
-        //     已过，价值是让手机先挂上热点，下一轮（车机 0.17s 即重连 BT）走「已连着」近路。
-        // 旧 20s 首窗的教训：第 1 轮首窗没走完车机就拆链（15.2s），排在首窗**之后**的
-        // 任何兜底都轮不到执行；第 2 轮 20s+1.6s=21.6s 入网时 7000 端口已拒绝连接。
-        // 已知代价：首次连接的系统授权弹窗若被用户攥过 5s，本轮请求会被撤回重发、
-        // 弹窗重出一次——一次性 UX 代价，远小于整车连接失败。
+        // Wait pacing is designed around the "head unit window" (Audi 3315 real-car log ruling, 2026-10-23): after 0x4301 the
+        // head unit tears BT down at ~15s and closes the AirPlay service window at ~21s (late arrival = ECONNREFUSED, and a healthy BT
+        // cannot activate it), so the join budget counted from 0x5703 is only ~9-14s. Budget of each stage in the specifier-hang shape
+        // ("system already saved the SSID + some ROMs (Android 16/Xiaomi measured)" or forget->request in quick
+        // succession, where the request stays **pending forever** with zero callbacks):
+        //  1. first window 5s (normal joins measured 0.03~3s; zero callbacks in 5s is the hang signature);
+        //  2. quick probe (quickFallback: if the system already connected to that SSID by itself, bind directly, <=3s);
+        //  3. resend the specifier (measured after a hang: release->resend joins in 1.6s, **the verified effective
+        //     recovery, must follow the probe immediately**), 20s window;
+        //  4. deep fallback (deepFallback: connect-network direct join, ~10s); this round's window has certainly
+        // passed, its value is getting the phone onto the hotspot first so the next round (the head unit reconnects BT within
+        // 0.17s) takes the "already connected" shortcut.
+        // Lesson from the old 20s first window: in round 1 the head unit tore the link down (15.2s) before the first window
+        // finished, so any
+        // fallback placed **after** it never got to run; in round 2 the join at 20s+1.6s=21.6s found port 7000 already refusing
+        // connections.
+        // Known cost: if the user holds the first-time system permission dialog for over 5s, this round's request is withdrawn and
+        // resent and
+        // the dialog shows again, a one-time UX cost far smaller than a failed car connection.
         val firstWindowMs = minOf(timeoutMillis, 5_000L)
         val secondWindowMs = minOf(timeoutMillis - firstWindowMs, 20_000L).coerceAtLeast(0)
         val unavailable = AtomicBoolean(false)
         var network = requestAndAwait(ssid, request, firstWindowMs, isCancelled, unavailable)
-        // 系统明确拒绝（onUnavailable：用户拒了授权框/热点不在范围）后重发无意义，
-        // 只会再拒一次——与挂起（零回调）必须区分开。
+        // After an explicit system refusal (onUnavailable: user declined the dialog / hotspot out of range) a resend is pointless and
+        // would only be refused again; it must be distinguished from a hang (zero callbacks).
         if (network == null && !isCancelled() && !unavailable.get() && secondWindowMs > 0) {
             release()
             if (!isCancelled()) {
-                // 快速兜底成功 = 已绑定到车机热点（系统自动重连的场景），直接返回；
-                // 对「系统已保存并连着热点」的车型重发 specifier 只会再挂（已保存
-                // SSID 正是挂起条件之一），短路是正确行为。
+                // Quick fallback success = already bound to the head unit hotspot (scenario: the system reconnected on its own),
+                // return directly;
+                // for car models where "the system saved and is connected to the hotspot", resending a specifier would only hang
+                // again (a saved
+                // SSID is itself one of the hang conditions), so the short circuit is correct.
                 quickFallback?.invoke()?.let { fallback ->
-                    log("WiFi: 快速兜底入网成功（$fallback）——跳过 specifier 重发")
+                    log("WiFi: quick fallback join succeeded ($fallback); skipping specifier resend")
                     return JoinResult.Joined(fallback)
                 }
             }
             if (!isCancelled()) {
-                log("WiFi: 首窗 ${firstWindowMs / 1000}s 零回调——specifier 可能挂起，重发网络请求（实测重发 1.6s 可入网）")
+                log(
+                    "WiFi: first window ${firstWindowMs / 1000}s with zero callbacks; specifier may be hung, resending the network " +
+                        "request (measured: a resend joins in 1.6s)",
+                )
                 network = requestAndAwait(ssid, request, secondWindowMs, isCancelled, unavailable)
             }
             if (network == null && !isCancelled() && !unavailable.get()) {
                 release()
                 if (!isCancelled()) {
                     deepFallback?.invoke()?.let { fallback ->
-                        log("WiFi: 深度兜底入网成功（$fallback）")
+                        log("WiFi: deep fallback join succeeded ($fallback)")
                         return JoinResult.Joined(fallback)
                     }
                 }
             }
         }
         if (network == null) {
-            log("WiFi: 等待加入 \"$ssid\" 失败（首窗 ${firstWindowMs / 1000}s + 重发窗 ${secondWindowMs / 1000}s + 两级兜底）")
+            log(
+                "WiFi: waiting to join \"$ssid\" failed (first window ${firstWindowMs / 1000}s + resend window " +
+                    "${secondWindowMs / 1000}s + two-level fallback)",
+            )
             release()
             return JoinResult.Unavailable
         }
         return JoinResult.Joined(network)
     }
 
-    /** 发起一次 requestNetwork 并等待到窗口结束/成功/取消；调用方负责 release。 */
+    /** Issue one requestNetwork and wait until the window ends / success / cancel; the caller is responsible for release. */
     private fun requestAndAwait(
         ssid: String,
         request: NetworkRequest,
@@ -240,26 +259,29 @@ class WifiCarPlayConnector(
                     val bound = connectivityManager.bindProcessToNetwork(network)
                     boundNetwork.set(network)
                     result.set(network)
-                    log("WiFi: 已加入应用专属网络 \"$ssid\"（$network bindProcessToNetwork=$bound）——不影响其它应用联网")
+                    log(
+                        "WiFi: joined app-specific network \"$ssid\" ($network bindProcessToNetwork=$bound); other apps' " +
+                            "connectivity is unaffected",
+                    )
                     logAdapterLink(network)
                     latch.countDown()
                 }
 
                 override fun onUnavailable() {
-                    log("WiFi: 系统未允许加入 \"$ssid\"（用户拒绝或热点不在范围内）")
+                    log("WiFi: system did not allow joining \"$ssid\" (user declined or hotspot out of range)")
                     latch.countDown()
                 }
 
                 override fun onLost(network: Network) {
                     if (boundNetwork.compareAndSet(network, null)) {
                         connectivityManager.bindProcessToNetwork(null)
-                        log("WiFi: 应用专属网络 \"$ssid\" 已断开（$network）")
+                        log("WiFi: app-specific network \"$ssid\" disconnected ($network)")
                         onNetworkLost?.invoke(ssid)
                     }
                 }
             }
-        // 先撤上一任回调：快速兜底的 bindCurrentWifi 与本请求共用 callback 槽位，
-        // 直接覆盖会让旧 callback 滞留在 ConnectivityManager 里直到 disconnect。
+        // Withdraw the previous callback first: the quick fallback's bindCurrentWifi shares the callback slot with this request,
+        // and overwriting directly leaves the old callback in ConnectivityManager until disconnect.
         callback.getAndSet(null)?.let {
             runCatching { connectivityManager.unregisterNetworkCallback(it) }
         }
@@ -269,7 +291,10 @@ class WifiCarPlayConnector(
                 connectivityManager.requestNetwork(request, newCallback)
                 true
             } catch (error: Exception) {
-                log("WiFi: 发起应用专属网络请求失败（${error.message}）——可能需要位置权限或系统不支持")
+                log(
+                    "WiFi: app-specific network request failed (${error.message}); may need the location permission or the system " +
+                        "does not support it",
+                )
                 false
             }
         if (!accepted) return null
@@ -285,7 +310,7 @@ class WifiCarPlayConnector(
         return result.get()
     }
 
-    /** 构造 specifier；WEP 或参数不合法返回 null（走旧路径）。 */
+    /** Build the specifier; returns null for WEP or invalid parameters (take the old path). */
     private fun buildSpecifier(
         ssid: String,
         passphrase: String,
@@ -294,21 +319,21 @@ class WifiCarPlayConnector(
         return try {
             val builder = WifiNetworkSpecifier.Builder().setSsid(ssid)
             when (securityType) {
-                // 开放热点：无密码
+                // Open hotspot: no password
                 0 -> Unit
-                // WEP：WifiNetworkSpecifier 无对应 API（现代车机不再使用）
+                // WEP: WifiNetworkSpecifier has no matching API (modern head units no longer use it)
                 1 -> return null
-                // WPA/WPA2 与 WPA3 过渡模式：过渡模式 AP 同时接受 WPA2-PSK
+                // WPA/WPA2 and WPA3 transition mode: a transition-mode AP also accepts WPA2-PSK
                 2, 3 -> {
                     if (passphrase.isEmpty()) return null
                     builder.setWpa2Passphrase(passphrase)
                 }
-                // WPA3 仅
+                // WPA3 only
                 4 -> {
                     if (passphrase.isEmpty()) return null
                     builder.setWpa3Passphrase(passphrase)
                 }
-                // 未知类型：按有密码的 WPA2 尝试（比直接放弃更可能成功）
+                // Unknown type: try as WPA2 with a password (more likely to succeed than giving up outright)
                 else -> {
                     if (passphrase.isEmpty()) return null
                     builder.setWpa2Passphrase(passphrase)
@@ -316,22 +341,26 @@ class WifiCarPlayConnector(
             }
             builder.build()
         } catch (error: Exception) {
-            log("WiFi: 构造应用专属网络参数失败（${error.message}）")
+            log("WiFi: building app-specific network parameters failed (${error.message})")
             null
         }
     }
 
     /**
-     * 绑定「当前已连接的 WiFi」——静默命令行连网成功后用它捕获 `Network` 句柄。
+     * Bind "the currently connected WiFi": captures the `Network` handle after the silent command-line join succeeded.
      *
-     * 请求**不带 specifier**（只声明 TRANSPORT_WIFI、移除 INTERNET），所以系统不会弹
-     * 任何确认框，也会把刚连上的车机 WiFi 立刻回调过来。热点无互联网时系统可能不把它
-     * 设为默认网络，必须显式 bindProcessToNetwork，我们的 socket / mDNS 才会走 WiFi。
-     * 带看门狗：WiFi 未连接时 requestNetwork 会无限静默挂起——5 秒无果给出明确指引
-     * （请求保持挂起，用户加入热点后仍会自动完成绑定并回调）。
+     * The request **has no specifier** (declares only TRANSPORT_WIFI, removes INTERNET), so the system shows no
+     * confirmation dialog and immediately calls back the head unit WiFi that was just joined. With a no-internet hotspot the
+     * system may not make it
+     * the default network, so bindProcessToNetwork must be explicit for our sockets / mDNS to use WiFi.
+     * With a watchdog: when WiFi is not connected requestNetwork hangs silently forever, so after 5s without a result a clear hint is given
+     * (the request stays pending, and once the user joins the hotspot the binding still completes automatically with a callback).
      */
     fun bindCurrentWifi(
-        /** 绑定目标热点的 SSID——断开通知（[onNetworkLost]）需要它；未知则传 null（不断开通知）。 */
+        /**
+         * SSID of the target hotspot to bind; the disconnect notification ([onNetworkLost]) needs it; pass null if unknown (no
+         * disconnect notification).
+         */
         ssidHint: String? = null,
         onResult: (Boolean) -> Unit = {},
     ) {
@@ -342,7 +371,8 @@ class WifiCarPlayConnector(
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build()
-        // 网络回调线程与 Bg 看门狗线程并发读写——原子标志保证可见性与单次投递
+        // The network callback thread and the Bg watchdog thread read/write concurrently; an atomic flag guarantees visibility and
+        // single delivery
         val reported =
             java.util.concurrent.atomic
                 .AtomicBoolean(false)
@@ -351,35 +381,36 @@ class WifiCarPlayConnector(
                 override fun onAvailable(network: Network) {
                     boundNetwork.set(network)
                     val bound = connectivityManager.bindProcessToNetwork(network)
-                    log("WiFi: 已绑定当前WiFi网络 $network bindProcessToNetwork=$bound")
+                    log("WiFi: bound current WiFi network $network bindProcessToNetwork=$bound")
                     logAdapterLink(network)
                     if (reported.compareAndSet(false, true)) onResult(true)
                 }
 
                 override fun onUnavailable() {
-                    log("WiFi: 没有可用的WiFi连接——请先在系统设置里加入接收端热点")
+                    log("WiFi: no usable WiFi connection; join the receiver hotspot in system settings first")
                     if (reported.compareAndSet(false, true)) onResult(false)
                 }
 
                 override fun onLost(network: Network) {
                     if (boundNetwork.compareAndSet(network, null)) {
-                        // 熄火/离开范围：解绑进程网络，否则所有 socket 继续指向死网络；
-                        // 并通知会话层（英雄卡不能停在「已连接」）。
-                        // 与 specifier 路径同语义：兜底入网（bindCurrentWifi）是奥迪 3315
-                        // 的主路径，不转发 onLost 会停在假「已连接」拖到心跳超时才死
-                        // （2026-10-23 审阅定谳）。
+                        // Car switched off / out of range: unbind the process network, otherwise all sockets keep pointing at a
+                        // dead network;
+                        // and notify the session layer (the hero card must not stay on "connected").
+                        // Same semantics as the specifier path: the fallback join (bindCurrentWifi) is the main path on the Audi 3315,
+                        // and not forwarding onLost would stay on a false "connected" until the heartbeat times out
+                        // (review ruling 2026-10-23).
                         connectivityManager.bindProcessToNetwork(null)
-                        log("WiFi: 绑定的 WiFi 网络已断开（$network）")
+                        log("WiFi: bound WiFi network disconnected ($network)")
                         ssidHint?.let { onNetworkLost?.invoke(it) }
                     }
                 }
             }
         callback.set(newCallback)
         connectivityManager.requestNetwork(request, newCallback)
-        // 提示性看门狗（**不决定成败**）：requestNetwork 在「手机尚未连上 WiFi」时
-        // 会一直挂起，等系统关联+DCHP 完成才回调 onAvailable——实测用户手动加入
-        // 热点时可达 10s+。这里只在 5s 时给用户一句指引，超时判定由调用方的
-        // WIFI_BIND_WAIT_S 负责；不要在这里取消请求（回调晚到仍会正确绑定）。
+        // Hint-only watchdog (**does not decide success**): when "the phone has not yet joined WiFi" requestNetwork
+        // hangs until the system finishes association+DHCP before calling onAvailable; measured up to 10s+ when the user
+        // joins the hotspot by hand. It only gives the user one hint at 5s; the timeout verdict belongs to the caller's
+        // WIFI_BIND_WAIT_S, and the request must not be cancelled here (a late callback still binds correctly).
         Bg.run("wifi-bind-watchdog") {
             try {
                 Thread.sleep(5_000)
@@ -387,7 +418,10 @@ class WifiCarPlayConnector(
                 return@run
             }
             if (!reported.get()) {
-                log("WiFi: 5 秒尚未绑定（手机可能还没连上热点）——请到 设置>WLAN 加入接收端热点，加入后本轮绑定会自动完成")
+                log(
+                    "WiFi: not bound after 5s (the phone may not have joined the hotspot yet); join the receiver hotspot under " +
+                        "Settings > WLAN, and this round's binding completes automatically after that",
+                )
             }
         }
     }

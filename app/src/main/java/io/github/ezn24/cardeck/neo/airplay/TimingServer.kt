@@ -1,18 +1,19 @@
 package io.github.ezn24.cardeck.neo.airplay
 
+import io.github.ezn24.cardeck.neo.net.CarNetwork
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 
 /**
- * AirPlay 计时服务（NTP over RTCP，对照 catplay clock/timing_server.rs + rtcp_timesync.rs）。
+ * AirPlay timing service (NTP over RTCP; see catplay clock/timing_server.rs + rtcp_timesync.rs).
  *
- * 初始 SETUP 通告本端口（timingPort）；车机（媒体时钟主）向它发 32 字节 timesync 请求，
- * 我们按 NTP 语义应答：t1=回显请求 t3（客户端发送时刻）、t2=本地接收时刻、t3=本地发送时刻。
- * 缺失时序：此前通告 timingPort=0，车机无法与我们同步媒体时钟——屏幕流 SETUP 被 400 的
- * 头号嫌疑（catplay 真车实现始终绑定真实端口）。
+ * The initial SETUP advertises this port (timingPort); the head unit (media clock master) sends 32-byte timesync requests to it,
+ * and we answer with NTP semantics: t1 = echoed request t3 (client send time), t2 = local receive time, t3 = local send time.
+ * Missing piece: we used to advertise timingPort=0, so the head unit could not sync its media clock with us; this was the
+ * prime suspect for the screen-stream SETUP getting 400 (catplay always binds a real port on real cars).
  *
- * 线格式（大端）：[0x80][pt][length=7][rtp_ts=0][t1(8)][t2(8)][t3(8)]，
- * pt：0xD2 请求 / 0xD3 应答；时间 = NTP 64 位（秒<<32 | 2^32 分数），取自单调时钟。
+ * Wire format (big-endian): [0x80][pt][length=7][rtp_ts=0][t1(8)][t2(8)][t3(8)],
+ * pt: 0xD2 request / 0xD3 response; time = NTP 64-bit (seconds<<32 | 2^32 fraction), taken from a monotonic clock.
  */
 class TimingServer(
     private val log: (String) -> Unit = {},
@@ -22,11 +23,11 @@ class TimingServer(
     @Volatile
     private var running = false
 
-    /** 收到的 timesync 请求计数（诊断：车机是否真的来同步媒体时钟）。 */
+    /** Count of timesync requests received (diagnostics: whether the head unit actually syncs its media clock). */
     private var syncRequests = 0L
     private var lastSyncLogAt = 0L
 
-    /** 非 timesync 包计数（诊断：有没有别的 UDP 报文打到这个端口）。 */
+    /** Count of non-timesync packets (diagnostics: whether other UDP traffic hits this port). */
     private var unexpected = 0L
 
     val port: Int get() = socket?.localPort ?: 0
@@ -34,7 +35,7 @@ class TimingServer(
     fun start(): Boolean {
         if (port != 0 && running) return true
         return try {
-            val s = DatagramSocket()
+            val s = DatagramSocket().also { CarNetwork.bind(it, "timing UDP") }
             s.reuseAddress = true
             socket = s
             running = true
@@ -44,7 +45,7 @@ class TimingServer(
             }
             true
         } catch (error: Exception) {
-            log("TIMING: 启动失败 - ${error.message}")
+            log("TIMING: start failed - ${error.message}")
             false
         }
     }
@@ -69,7 +70,7 @@ class TimingServer(
             if (response == null) {
                 unexpected++
                 if (unexpected <= 5) {
-                    log("TIMING: 收到非 timesync 报文 ${request.size}B（累计 $unexpected）")
+                    log("TIMING: non-timesync packet ${request.size}B (total $unexpected)")
                 }
                 continue
             }
@@ -77,7 +78,7 @@ class TimingServer(
             val now = System.currentTimeMillis()
             if (syncRequests <= 3 || now - lastSyncLogAt >= 30_000L) {
                 lastSyncLogAt = now
-                log("TIMING: timesync 应答 #$syncRequests → ${packet.address.hostAddress}:${packet.port}")
+                log("TIMING: timesync reply #$syncRequests -> ${packet.address.hostAddress}:${packet.port}")
             }
             try {
                 s.send(DatagramPacket(response, response.size, packet.address, packet.port))
@@ -92,8 +93,8 @@ class TimingServer(
         private const val PACKET_BYTES = 32
 
         /**
-         * 构造 timesync 应答；非 timesync 请求返回 null。
-         * [nowNanos]：单调时钟当前值（System.nanoTime 语义，可为任意起点——NTP 差值计算只用相对量）。
+         * Builds a timesync reply; returns null for non-timesync requests.
+         * [nowNanos]: current monotonic clock value (System.nanoTime semantics; any origin works, since NTP offset math only uses relative values).
          */
         fun buildResponse(
             request: ByteArray,
@@ -112,14 +113,14 @@ class TimingServer(
             response[2] = 0
             response[3] = (PACKET_BYTES / 4 - 1).toByte()
             // rtp_ts(4..8) = 0
-            System.arraycopy(request, 24, response, 8, 8) // t1 = 请求的 t3（ntp_xmit 回显）
+            System.arraycopy(request, 24, response, 8, 8) // t1 = request t3 (ntp_xmit echo)
             val now = ntpFromNanos(nowNanos)
-            System.arraycopy(now, 0, response, 16, 8) // t2 = 接收时刻
-            System.arraycopy(now, 0, response, 24, 8) // t3 = 发送时刻
+            System.arraycopy(now, 0, response, 16, 8) // t2 = receive time
+            System.arraycopy(now, 0, response, 24, 8) // t3 = send time
             return response
         }
 
-        /** 单调纳秒 → NTP 64 位（秒<<32 | (纳秒分数 * 2^32 / 1e9)），大端 8 字节。 */
+        /** Monotonic nanoseconds -> NTP 64-bit (seconds<<32 | (nano fraction * 2^32 / 1e9)), 8 bytes big-endian. */
         fun ntpFromNanos(nanos: Long): ByteArray {
             val secs = Math.floorDiv(nanos, 1_000_000_000L)
             val fracNanos = Math.floorMod(nanos, 1_000_000_000L)

@@ -12,30 +12,30 @@ import androidx.appcompat.app.AlertDialog
 import io.github.ezn24.cardeck.neo.R
 
 /**
- * 深色消息弹窗：标题 + 正文（超长可滚动）+ 操作按钮。
+ * Dark message dialog: title + body (scrollable when long) + action buttons.
  *
- * **为什么不用裸 `AlertDialog.Builder.setMessage`**：系统对话框在
- * `Theme.AppCompat.DayNight` 下是浅色主题，与本应用全深色 UI 割裂
- * （2026-10-18 真机截图暴露）。这里自绘 `bg_dialog_panel` 面板，
- * 与免责声明 / 选择目标车机两个弹窗保持一致。
+ * **Why not a bare `AlertDialog.Builder.setMessage`**: system dialogs under
+ * `Theme.AppCompat.DayNight` use a light theme, clashing with the app's all-dark UI
+ * (exposed by a real-device screenshot on 2026-10-18). A custom `bg_dialog_panel` panel is drawn here,
+ * consistent with the disclaimer and target-car selection dialogs.
  *
- * 布局规则：1~2 个操作横排靠右；3 个及以上竖排整宽（窄屏横排会挤爆）。
+ * Layout rules: 1-2 actions go in a row aligned right; 3 or more stack vertically at full width (a narrow screen would overflow in a row).
  */
 object DarkMessageDialog {
     enum class Emphasis {
-        /** 实心强调按钮（bg_cta_fill）。 */
+        /** Solid emphasis button (bg_cta_fill). */
         PRIMARY,
 
-        /** 文字按钮（bg_tbtn）。 */
+        /** Text button (bg_tbtn). */
         TEXT,
 
-        /** 危险操作（暗红底）。 */
+        /** Dangerous action (dark red background). */
         DANGER,
     }
 
     /**
-     * @param dismissOnClick 点击后是否自动关闭（默认 true）。需要保留弹窗
-     *        （例如校验失败后让用户重试）时传 false。
+     * @param dismissOnClick whether to dismiss automatically after a click (default true). Pass false when the dialog
+     *        must stay (e.g. let the user retry after a validation failure).
      */
     data class Action(
         val label: String,
@@ -45,9 +45,9 @@ object DarkMessageDialog {
     )
 
     /**
-     * @param actions 按显示顺序排列；横排时靠右，竖排时自上而下
-     * @param cancelable 返回键/点外部是否可关闭
-     * @param onCancel 通过取消方式关闭时回调（null = 不关心）
+     * @param actions in display order; right-aligned in a row, top to bottom when stacked
+     * @param cancelable whether back key / outside tap can dismiss
+     * @param onCancel callback when dismissed by cancelling (null = don't care)
      */
     fun show(
         activity: Activity,
@@ -91,8 +91,10 @@ object DarkMessageDialog {
             dialog.setOnCancelListener { onCancel?.invoke() }
         }
         dialog.setOnShowListener {
-            // 正文超长时夹到屏高 46% 并内部滚动；短文案贴合内容（固定高度会留大片空白）。
-            // clampBody 同时作为旋转回调：横屏屏高变小后要重新夹紧，否则会撑出屏幕。
+            // With a very long body clamp to 46% of the screen height and scroll inside; short text hugs the content (a fixed height
+            // would leave large blank space).
+            // clampBody also serves as the rotation callback: after landscape shrinks the screen height it must clamp again, or it
+            // overflows the screen.
             val clampBody: (Activity) -> Unit = { ctx ->
                 val maxBodyHeight = (ctx.resources.displayMetrics.heightPixels * 0.46f).toInt()
                 bodyView.post {
@@ -108,7 +110,7 @@ object DarkMessageDialog {
                     }
                 }
             }
-            // 宽度 92%、高度按内容自适应；旋转时 PanelWindow 会回调 clampBody 重算
+            // Width 92%, height adapts to content; on rotation PanelWindow calls clampBody back to recompute
             PanelWindow.apply(dialog, activity, onResize = clampBody)
             clampBody(activity)
         }
@@ -139,7 +141,7 @@ object DarkMessageDialog {
                 }
 
                 Emphasis.DANGER -> {
-                    // 危险动作：暗红底 + 浅红字（复用错误容器色）
+                    // Dangerous action: dark red background + light red text (reuses the error container color)
                     background =
                         GradientDrawable().apply {
                             cornerRadius = 999f * density
@@ -149,8 +151,8 @@ object DarkMessageDialog {
                 }
 
                 Emphasis.TEXT -> {
-                    // 竖排时次要按钮也上胶囊底：否则只有主按钮是实心整宽胶囊，
-                    // 另两项是裸文字，视觉权重完全失衡（真机截图暴露）
+                    // When stacked, secondary buttons also get the pill background: otherwise only the primary is a solid full-width pill,
+                    // the other two are bare text, and visual weight is badly unbalanced (exposed by a real-device screenshot)
                     background =
                         activity.getDrawable(
                             if (vertical) R.drawable.bg_btn_tonal else R.drawable.bg_tbtn,
@@ -169,7 +171,7 @@ object DarkMessageDialog {
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT,
                         ).apply {
-                            // 竖排：按钮之间留 6dp（首个不留）
+                            // Stacked: 6dp between buttons (none before the first)
                             if (!isFirst) topMargin = (6 * density).toInt()
                         }
                 } else {
@@ -178,12 +180,12 @@ object DarkMessageDialog {
                             ViewGroup.LayoutParams.WRAP_CONTENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT,
                         ).apply {
-                            // 横排：首项贴右缘，后续各项之间留 6dp
+                            // In a row: first item against the right edge, 6dp between later ones
                             if (!isFirst) marginStart = (6 * density).toInt()
                         }
                 }
             setOnClickListener {
-                // 防连点：回调里通常要跳转/重开流程/写系统设置
+                // Debounce: the callback usually navigates / reopens a flow / writes system settings
                 isEnabled = false
                 onClick()
             }

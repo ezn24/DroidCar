@@ -2,34 +2,35 @@ package io.github.ezn24.cardeck.neo.iap2
 
 import java.io.ByteArrayOutputStream
 
-/** 手机端回显 SYN|ACK 时声明的发送窗口（真机 iPhone / AADisplay 同值 0x7F）。 */
+/** Send window declared when the phone echoes SYN|ACK (same 0x7F as a real iPhone / AADisplay). */
 private const val PHONE_DECLARED_MAX_OUTGOING = 0x7F
 
 /**
- * iAP2 链路引擎（发送端实现；链路层协议对称，本实现按「发起方」工作）。
+ * iAP2 link engine (sender implementation; the link layer protocol is symmetric, this implementation works as the "initiator").
  *
- * 握手（无线模式，手机为发起方——DiPlay/xcertplay 的 openWireless 以
- * initiateNegotiation=false 等待手机发起）：
- *  1. start() 发送 marker `FF 55 02 00 EE 10`，随即发送同步包（FF5A 帧，
- *     control=0x80，载荷 = SynchronizationPayload）
- *  2. 对端收到 marker 后进入协商并发送自己的同步包；双方收到同步包即回 ACK
- *  3. 协商状态下收到 ACK 即进入 NORMAL（控制会话 10 可用）
+ * Handshake (wireless mode, phone is the initiator; DiPlay/xcertplay openWireless waits for the phone with
+ * initiateNegotiation=false):
+ *  1. start() sends the marker `FF 55 02 00 EE 10`, then immediately the sync packet (FF5A frame,
+ *     control=0x80, payload = SynchronizationPayload)
+ *  2. After receiving the marker the peer enters negotiation and sends its own sync packet; each side ACKs a received sync packet
+ *  3. An ACK received while negotiating enters NORMAL (control session 10 usable)
  *
- * 数据帧：control=0x40（捎带 ACK），seq=发送序号（u8 回绕，初始 99），
- * ack=已按序收到的最新序号，sessionId=10。对端 marker 会被帧头扫描自然丢弃。
+ * Data frame: control=0x40 (piggybacked ACK), seq = send sequence (u8 wrapping, initial 99),
+ * ack = latest in-order sequence received, sessionId=10. The peer marker is naturally dropped by the frame header scan.
  *
- * 协议语义参照 reference/xcertplay transport/Iap2LinkEngine.kt（独立重写）。
- * 简化项（RFCOMM 为可靠有序流）：不做乱序缓冲与主动 EAK，保留重复帧检测、
- * 发送窗口与重传计时。
+ * Protocol semantics follow reference/xcertplay transport/Iap2LinkEngine.kt (independent rewrite).
+ * Simplifications (RFCOMM is a reliable ordered stream): no out-of-order buffering and no proactive EAK; duplicate frame
+ * detection, the send window and the retransmit timer are kept.
  */
 class Iap2LinkEngine(
     private val maxOutgoing: Int = 4,
     private val retransmissionTimeoutMillis: Long = 4_000L,
     private val maxRetransmissions: Int = 4,
     /**
-     * 本方首个链路序号。默认 99 只为测试/重放可比对；真车蓝牙链路传 [randomInitialSequence]：
-     * 真 iPhone 每次随机，福特 SYNC+ 2.0 对固定 99 的 SYN 完全不应答，换值即通
-     * （上游 shaonialife/cardeck#25 车主实测）。
+     * Our first link sequence number. The default 99 only keeps tests/replays comparable; real-car Bluetooth links pass
+     * [randomInitialSequence]:
+     * a real iPhone randomizes every time, and Ford SYNC+ 2.0 never answers a fixed-99 SYN but works once the value changes
+     * (owner-measured, upstream shaonialife/cardeck#25).
      */
     initialSequence: Int = DEFAULT_INITIAL_SEQUENCE,
 ) {
@@ -110,6 +111,8 @@ class Iap2LinkEngine(
         var retransmissions: Int = 0,
         var deadlineMillis: Long = 0,
         val awaitAck: Boolean = true,
+        /** Link session to send on; null = the control session (all traffic except file transfer). */
+        val sessionId: Int? = null,
     )
 
     var state: State = State.IDLE
@@ -122,44 +125,50 @@ class Iap2LinkEngine(
     private var lastReceivedInOrder = 0
 
     /**
-     * 采纳的对端控制会话 ID（收到对端 sync 载荷时确定）。
-     * Audi 真车字节级实测（2026-10-09）：车机（MIB3）以发起方姿态发 SYN，声明
-     * 会话表 {1:control, 2:EA}，手机回显其表后它以 **1 号会话**通信——
-     * CSM 发在 10 号会被静默丢弃（链路层照常 ACK，极具迷惑性）。
-     * 测试台 DiPlay/xcertplay 声明 10，采纳后与本表默认一致，行为不变。
+     * Peer control session ID adopted (decided when the peer sync payload is received).
+     * Audi real-car byte-level measurement (2026-10-09): the head unit (MIB3) sends SYN as initiator declaring the
+     * session table {1:control, 2:EA}; after the phone echoes its table it talks on **session 1**,
+     * and CSM sent on session 10 is silently dropped (the link layer still ACKs, which is very misleading).
+     * Test benches DiPlay/xcertplay declare 10, which matches our default table after adoption, so behavior is unchanged.
      */
     private var adoptedPeerControlSessionId: Int? = null
 
-    /** 采纳的对端 sync 载荷（协商回显/诊断用）。 */
+    /** Peer sync payload adopted (for negotiation echo / diagnostics). */
     private var adoptedSynchronization: SynchronizationPayload? = null
 
     /**
-     * 隧道（type-130）协商模式。DiPlay 的隧道链路引擎（Iap2LinkEngine.openTunnel，
-     * initiateNegotiation=true）有两个硬性期望（2026-08 字节级对照源码）：
-     *  1. 收到「ACK 但尚未收到对端 SYN」时立即判链路失败（die）——因此回显必须**先于**
-     *     裸 ACK 发出（回显帧 control=SYN|ACK 自带确认位，一帧即可完成对端协商）；
-     *  2. 其隧道为零 ACK 模式（maxRetransmissions=0/maxAcknowledgements=0），不会回
-     *     任何 ACK——等待「对端 ACK」完成协商会死锁，回显即视为协商完成。
-     * 默认 false：蓝牙（RFCOMM/事件通道）路径语义不变（Audi 需 ACK+回显、等最终 ACK）。
+     * Tunnel (type-130) negotiation mode. DiPlay's tunnel link engine (Iap2LinkEngine.openTunnel,
+     * initiateNegotiation=true) has two hard expectations (2026-08 byte-level comparison with the source):
+     *  1. On "ACK received but peer SYN not yet received" it fails the link at once (die), so the echo must be sent **before**
+     *     a bare ACK (an echo frame with control=SYN|ACK carries the ack bit, one frame completes peer negotiation);
+     *  2. Its tunnel is zero-ACK mode (maxRetransmissions=0/maxAcknowledgements=0) and never sends
+     *     any ACK, so waiting for a "peer ACK" to finish negotiation deadlocks; the echo counts as negotiation complete.
+     * Default false: Bluetooth (RFCOMM/event channel) path semantics unchanged (Audi needs ACK+echo and waits for the final ACK).
      */
     var echoFirst: Boolean = false
 
-    /** 诊断：首次采纳对端会话表时回调（打印对端提议的会话表，便于真车排查）。 */
+    /** Diagnostics: called when the peer session table is first adopted (prints the table the peer proposed, for real-car debugging). */
     var onPeerSynchronizationAdopted: ((SynchronizationPayload) -> Unit)? = null
 
-    /** 诊断：丢弃未知会话 ID 的数据帧时回调（(sessionId, bytes)）。 */
+    /** Diagnostics: called when a data frame with an unknown session ID is dropped ((sessionId, bytes)). */
     var onUnknownSessionData: ((Int, Int) -> Unit)? = null
 
     /**
-     * EA 会话（2 号）数据帧回调：设置后 EA 帧不再被当作未知会话丢弃，
-     * 而是交由此回调（事件通道虚拟链路上的触摸 HID 载体）。
+     * Callback for EA session (session 2) data frames: when set, EA frames are no longer dropped as unknown sessions
+     * but handed to this callback (the touch HID carrier on the event channel virtual link).
      */
     var onEaData: ((bytes: ByteArray) -> Unit)? = null
 
-    /** 诊断：每个入向链路帧的摘要（control/seq/ack/sessionId/载荷长度），真车排查用。 */
+    /**
+     * Datagrams on the file-transfer session (kind 1): the head unit's Start / Success / Failure answers to a
+     * now-playing artwork transfer. Unset = such frames are dropped as unknown sessions, as before.
+     */
+    var onFileTransferData: ((bytes: ByteArray) -> Unit)? = null
+
+    /** Diagnostics: summary of every inbound link frame (control/seq/ack/sessionId/payload length), for real-car debugging. */
     var onFrameReceived: ((control: Int, sequence: Int, ack: Int, sessionId: Int, size: Int) -> Unit)? = null
 
-    /** 诊断：每个出向链路帧的摘要（仅链路层帧，用于对照真车协商时序）。 */
+    /** Diagnostics: summary of every outbound link frame (link layer frames only, to compare with real-car negotiation timing). */
     var onFrameSent: ((control: Int, sequence: Int, ack: Int, sessionId: Int, size: Int) -> Unit)? = null
 
     private var unknownSessionDropped = 0
@@ -174,23 +183,23 @@ class Iap2LinkEngine(
     private var syncDeadline: Long? = null
     private var retransmitDeadline: Long? = null
 
-    /** 上一次回显 SYN 时对端的 SYN 序号与我方序号（重传同一 SYN 时原样重放）。 */
+    /** Peer SYN sequence and our sequence at the last SYN echo (replayed verbatim when the same SYN is retransmitted). */
     private var lastEchoPeerSequence: Int? = null
     private var lastEchoOwnSequence = 0
 
     val isDead: Boolean get() = state == State.DEAD
 
-    /** 本引擎是否发起过 SYN（start=发起方；enterNegotiating/startResponder=响应方）。 */
+    /** Whether this engine has sent a SYN (start = initiator; enterNegotiating/startResponder = responder). */
     private var originatedSyn = false
 
     /**
-     * **本方声明的发送窗口**（LSP maxOutgoing 语义 = 声明方自己的未确认包上限）：
-     * 发送窗口按此计，而非对端声明值——回显时我们会声明 0x7F（ownSyncOf），
-     * 按对端值计窗会把突发消息卡死在对端的小窗口里（MIB3 突发 8 条 × 对端 4）。
+     * **Send window we declared** (LSP maxOutgoing semantics = the declarer's own unacknowledged packet cap):
+     * the send window is counted by this, not by the peer-declared value; when echoing we declare 0x7F (ownSyncOf),
+     * and counting by the peer value would jam a burst inside the peer's small window (MIB3 burst of 8 x peer 4).
      */
     private var declaredMaxOutgoing = maxOutgoing
 
-    /** 重传计时与上限：默认取构造参数；适配器模式改用盒子 SYN 声明的值。 */
+    /** Retransmit timer and limit: constructor parameters by default; adapter mode uses the values declared in the box SYN. */
     private var retransmitMillis = retransmissionTimeoutMillis
     private var retransmitLimit = maxRetransmissions
 
@@ -204,15 +213,17 @@ class Iap2LinkEngine(
     var adapterResponder: Boolean = false
 
     /**
-     * 链路已 NORMAL 时，对端连续发 marker = 求重协商：回「marker + 本方新序号 SYN」，再回显
-     * 对端随后的 SYN（SYN|ACK），对端最终 ACK 闭环。凯迪拉克 CT5（GM/Cinemo）实测：收到
-     * 0x4300 后约 260ms 起在蓝牙链路上 1Hz 发 marker，静默则永不停；照此回应 66ms 内闭环、
-     * marker 风暴停止（上游 shaonialife/cardeck#27）。只对蓝牙车机链路开启；隧道与转接盒
-     * 各有自己的 marker 处理。单个 marker 不触发（防误判）。
+     * While the link is already NORMAL, consecutive peer markers = a renegotiation request: reply "marker + our new-sequence SYN",
+     * then echo
+     * the peer's following SYN (SYN|ACK), and the peer's final ACK closes the loop. Cadillac CT5 (GM/Cinemo) measured: after
+     * 0x4300 it sends a 1Hz marker on the Bluetooth link from ~260ms on and never stops if left unanswered; answering as above
+     * closes the loop within 66ms
+     * and the marker storm stops (upstream shaonialife/cardeck#27). Enabled only on the Bluetooth head unit link; tunnel and adapter
+     * each have their own marker handling. A single marker does not trigger it (avoids misjudging).
      */
     var renegotiateOnPeerMarker: Boolean = false
 
-    /** 诊断：重协商触发时回调。 */
+    /** Diagnostics: called when renegotiation triggers. */
     var onPeerRenegotiation: ((String) -> Unit)? = null
 
     private var lastPeerMarkerMillis: Long? = null
@@ -225,7 +236,7 @@ class Iap2LinkEngine(
     private var adapterSynSequence: Int? = null
     private var adapterEchoSequence = DEFAULT_INITIAL_SEQUENCE
 
-    /** 进入协商：发 marker + 同步包（发送端=发起方，不等待对端 marker）。 */
+    /** Enter negotiation: send marker + sync packet (sender = initiator, does not wait for a peer marker). */
     fun start(nowMillis: Long) {
         if (state != State.IDLE) return
         originatedSyn = true
@@ -237,14 +248,14 @@ class Iap2LinkEngine(
     }
 
     /**
-     * 补发协商开场：marker + 本表同步包（允许从 [State.NEGOTIATING] 再次触发）。
+     * Re-send the negotiation opener: marker + our sync packet (may re-trigger from [State.NEGOTIATING]).
      *
-     * 用于「对端只发 marker、不发同步包」的形态——它在等**我们**的会话表。
-     * Honda HFT（Alpine 8A250-30A）2026-10-20 事件通道实测：车机在 60 秒里发了
-     * 60 个 marker `FF 55 02 00 EE 10`，一条 FF5A 同步包都没有（说明它卡在探测态），
-     * 而我们此前只回 marker，于是车机一直重发、链路永远建不起来。
-     * 对照同一条车机的蓝牙 iAP2 链路：手机首帧正是「marker + FF5A SYN」，车机
-     * 50ms 内即回自己的会话表——事件通道上补齐同一组合即可推进。
+     * For the shape where "the peer only sends markers and no sync packet": it is waiting for **our** session table.
+     * Honda HFT (Alpine 8A250-30A) measured on the event channel 2026-10-20: the head unit sent 60 markers
+     * `FF 55 02 00 EE 10` in 60 seconds and not one FF5A sync packet (it was stuck in probing state),
+     * and we used to reply with a marker only, so the head unit kept resending and the link never came up.
+     * Compared with the same head unit's Bluetooth iAP2 link: the phone's first frame is exactly "marker + FF5A SYN", and the head unit
+     * answered with its own session table within 50ms; supplying the same combination on the event channel gets it moving.
      */
     fun initiate(nowMillis: Long) {
         if (state == State.DEAD) return
@@ -257,11 +268,12 @@ class Iap2LinkEngine(
     }
 
     /**
-     * 停止协商期的自动重发（marker / 同步包），状态保持不变。
+     * Stop the automatic resend during negotiation (marker / sync packet); state is unchanged.
      *
-     * 用于「对端一直不回同步包」的场景：控制通道上一旦无限 500ms 打点，会把对端
-     * CarPlay 栈刷懵（2026-10-11 事件通道实测过的坑），所以由上层按轮次重开、轮次
-     * 用尽后显式停手。
+     * For the case where "the peer never answers with a sync packet": endless 500ms ticking on the control channel
+     * confuses the peer CarPlay stack (pitfall measured on the event channel 2026-10-11), so the upper layer reopens by round and
+     * explicitly
+     * stops after the rounds run out.
      */
     fun stopNegotiationRetries() {
         markerDeadline = null
@@ -269,24 +281,24 @@ class Iap2LinkEngine(
     }
 
     /**
-     * 应答者模式：只发 marker，**不发 SYN**——等对端（车机）自己发 SYN 再 ACK+回显。
-     * 奥迪事件通道虚拟链路实测（2026-10-11）：车机发 marker 开场后由它发起 SYN；
-     * 我们主动发 SYN（且被 500ms 重发洪水放大）会把车机 CarPlay 栈打懵——
-     * 表现为事件通道再无响应、连蓝牙链路的 ACK 都停了。
+     * Responder mode: send only the marker, **not SYN**, and wait for the peer (head unit) to send SYN itself, then ACK + echo.
+     * Audi event channel virtual link measured (2026-10-11): after the head unit sends the opening marker it initiates SYN;
+     * our own SYN (amplified by the 500ms resend flood) confuses the head unit CarPlay stack:
+     * the event channel stops responding altogether and even the Bluetooth link ACKs stop.
      */
     fun startResponder(nowMillis: Long) {
         if (state != State.IDLE) return
         state = State.NEGOTIATING
         appendOutput(MARKER)
         markerDeadline = nowMillis + MARKER_RESEND_MILLIS
-        // syncDeadline 保持 null：不主动发 SYN、不重发 SYN
+        // syncDeadline stays null: no proactive SYN, no SYN resend
     }
 
     /**
-     * 静默进入协商（DETECT 语义，对照 catplay LinkLayer server 角色）：
-     * 不发任何字节——对端（客户端）每 200ms 重发 DETECT，我们**收到一次回一次**、
-     * 绝不主动重发（服务器重发 DETECT 会把客户端状态机打回 Detecting，
-     * SYN 永远出不来——2026-10-11 事件通道实测）。
+     * Enter negotiation silently (DETECT semantics, follows the catplay LinkLayer server role):
+     * send no bytes; the peer (client) resends DETECT every 200ms and we **answer once per receipt**
+     * and never resend proactively (a server resending DETECT knocks the client state machine back to Detecting so
+     * SYN never comes out; measured on the event channel 2026-10-11).
      */
     fun enterNegotiating() {
         if (state != State.IDLE) return
@@ -309,7 +321,7 @@ class Iap2LinkEngine(
             receive.append(bytes, offset, count)
             offset += count
             while (parseAvailable(nowMillis) && state != State.DEAD) {
-                // 排空所有完整帧
+                // Drain all complete frames
             }
         }
     }
@@ -337,8 +349,8 @@ class Iap2LinkEngine(
         if (syncDeadline != null && syncDeadline!! <= nowMillis) {
             syncDeadline = null
             if (state == State.NEGOTIATING) {
-                // 已采纳对端表：只补裸 ACK（回显仅首次发一次，避免协商轮次膨胀）；
-                // 未采纳：继续重发本表 SYN（测试台时序）
+                // Peer table already adopted: only supply a bare ACK (the echo is sent only once, avoiding inflated negotiation rounds);
+                // not adopted: keep resending our table SYN (test bench timing)
                 if (adapterResponder) {
                     // The reference re-sends its SYN|ACK every 500 ms until the box ACKs it
                     sendAdapterEcho()
@@ -357,12 +369,14 @@ class Iap2LinkEngine(
     }
 
     /**
-     * 排入一个完整的控制会话载荷。窗口满时进入积压队列，由 ACK 或 pump 驱动重试。
-     * 返回 false 仅代表链路已死。
+     * Enqueue one complete control session payload. When the window is full it goes to the backlog queue, retried on ACK or by the pump.
+     * Returns false only when the link is dead.
      *
-     * [awaitAck]=false：发后不管——不计入未确认清单、不重传，**链路不会因它未被 ACK
-     * 而死亡**。用于 Audi 实测中「接受但从不 ACK」的消息（0x4E0E 传输标识：车机对
-     * 其他包毫秒级 ACK、唯独不认它，重传看门狗曾据此在 +20s 杀掉整条蓝牙链路）。
+     * [awaitAck]=false: fire and forget; not counted in the unacknowledged list, not retransmitted, and **the link does not
+     * die because it was not ACKed**. For messages the Audi "accepts but never ACKs" in measurements (0x4E0E transport identifier:
+     * the head unit
+     * ACKs other packets within milliseconds but not this one, and the retransmit watchdog once killed the whole Bluetooth link at
+     * +20s because of it).
      */
     fun sendControl(
         bytes: ByteArray,
@@ -380,10 +394,38 @@ class Iap2LinkEngine(
         return true
     }
 
-    // ---- 接收解析 ----
+    /**
+     * Queues one datagram on the file-transfer session (shares the link sequence space and send window with control
+     * traffic). Returns false when the link is not up or the peer's session table has no file-transfer session.
+     */
+    fun sendFileTransfer(
+        bytes: ByteArray,
+        nowMillis: Long,
+    ): Boolean {
+        if (state != State.NORMAL) return false
+        val sessionId = fileTransferSessionId() ?: return false
+        if (bytes.size > maxSessionPayload()) return false
+        sendBacklog += Packet(0, bytes.copyOf(), sessionId = sessionId)
+        drainSendWindow(nowMillis)
+        return true
+    }
+
+    /** Largest payload one link packet can carry with the negotiated maximum length. */
+    fun maxSessionPayload(): Int = (peerSynchronization?.maxLength ?: 0xFFFF) - HEADER_BYTES - 1
+
+    /**
+     * File-transfer session ID from the negotiated table (WinPlay and our own table: 12). A table without a kind-1
+     * session means the peer cannot receive files.
+     */
+    fun fileTransferSessionId(): Int? {
+        val sync = adoptedSynchronization ?: peerSynchronization ?: return SESSION_FILE_TRANSFER
+        return sync.sessions.firstOrNull { it.kind == FILE_TRANSFER_KIND }?.id
+    }
+
+    // ---- Receive parsing ----
 
     private fun parseAvailable(nowMillis: Long): Boolean {
-        // 丢弃帧头前的杂字节（含对端 marker FF55…）
+        // Drop stray bytes before the frame header (including the peer marker FF55...)
         while (receive.size >= 2 &&
             !(receive[0] == 0xFF.toByte() && receive[1] == 0x5A.toByte())
         ) {
@@ -444,14 +486,15 @@ class Iap2LinkEngine(
         }
         if (control and CONTROL_SYNCHRONIZE != 0) {
             val sync = SynchronizationPayload.decode(payload ?: ByteArray(0))
-            // echoFirst 模式下即使本引擎已 NORMAL 也继续处理对端 SYN 重发：对端引擎
-            // （DiPlay openTunnel）只从 TCP 读，若其 SYN 到达时我方隧道尚未建立，
-            // 首次回显会走错通道；其 500ms 的 SYN 重发让我们在隧道就绪后补上回显
-            // （parseAvailable 的帧扫描会丢弃重发中的 FF55 marker，无副作用）。
+            // In echoFirst mode keep handling retransmitted peer SYNs even if this engine is already NORMAL: the peer engine
+            // (DiPlay openTunnel) only reads from TCP, and if its SYN arrives before our tunnel is up
+            // the first echo goes down the wrong channel; its 500ms SYN resend lets us supply the echo once the tunnel is ready
+            // (the frame scan of parseAvailable drops the FF55 marker in the resend, no side effect).
             //
-            // **只有纯 SYN（不带 ACK 位）才回 SYN|ACK**：SYN|ACK 说明对端在回应我们的
-            // 发起方 SYN，属于「它已应答」的信号（见下方 ACK 分支），再回一条就会形成
-            // 双方互回 SYN|ACK 的无限乒乓（单测暴露：两个引擎互相喂帧时协商永不收敛）。
+            // **Only a pure SYN (no ACK bit) gets SYN|ACK back**: a SYN|ACK means the peer is answering our
+            // initiator SYN, i.e. the "it has answered" signal (see the ACK branch below); replying again would create
+            // an endless ping-pong of SYN|ACK both ways (exposed by a unit test: negotiation never converged when two engines fed
+            // each other frames).
             val isPureSyn = (control and CONTROL_ACKNOWLEDGEMENT) == 0
             if (adapterResponder) {
                 if (sync != null && isPureSyn) handleAdapterSyn(sync, payload!!, sequence, nowMillis)
@@ -461,44 +504,47 @@ class Iap2LinkEngine(
             ) {
                 if (state == State.NORMAL && nowMillis <= renegotiateUntilMillis) {
                     renegotiateUntilMillis = 0L
-                    onPeerRenegotiation?.invoke("rx 对端重协商 SYN seq=$sequence → 回显 SYN|ACK")
+                    onPeerRenegotiation?.invoke("rx peer renegotiation SYN seq=$sequence -> echo SYN|ACK")
                 }
                 val firstAdoption = adoptedSynchronization == null
                 peerSynchronization = sync
                 if (firstAdoption) adoptedSynchronization = sync
-                // Audi 真车实测（2026-10-09，字节级对照）：车机以发起方姿态发 SYN 声明其会话表
-                // {1:control,2:EA}，手机必须「ACK + 原样回显其表（SYN|ACK）」——车机见到回显才发
-                // 最终 ACK 完成协商（只回裸 ACK 时它永不回 ACK）。回显即声明「我采纳你的表」，
-                // 之后 CSM 走采纳表的控制会话 ID（1）；发 10 会被静默丢弃。
+                // Audi real car measured (2026-10-09, byte-level comparison): the head unit sends SYN as initiator declaring its
+                // session table
+                // {1:control,2:EA}; the phone must "ACK + echo its table verbatim (SYN|ACK)", and only on seeing the echo does the
+                // head unit send the
+                // final ACK to complete negotiation (with a bare ACK only, it never ACKs). The echo declares "I adopt your table",
+                // after which CSM uses the adopted control session ID (1); sending on 10 is silently dropped.
                 sync.sessions.firstOrNull { it.kind == CONTROL_KIND }?.let {
                     adoptedPeerControlSessionId = it.id
                 }
                 lastReceivedInOrder = sequence
-                // **每次** SYN 都只回一帧 SYN|ACK（不回裸 ACK）：
-                //  ① 语义完整：SYN|ACK 自带确认位与 ack 字段，裸 ACK 是冗余的
-                //     （catplay `on_recv_neg_host` 正是只发 SYN+ACK）；
-                //  ② 序号不能撞：裸 ACK 用当前 sentSequence，而 SYN|ACK 会自增，下一次
-                //     裸 ACK 就复用上一帧 SYN|ACK 的序号——BMW 把同序号帧当重复丢弃；
-                //  ③ 重传同一 SYN 时整帧原样重放，字节级幂等。
-                // 2026-10-19 BMW 87866 定谳：旧实现在首次采纳后只回裸 ACK，该车机每轮
-                // 重试都用新序号重开协商（161→191→40…），因此 14 轮全部卡在协商、
-                // 一次 0x1D00 都没走到（日志：133 条 SYN / 0 条 ACK）。
+                // **Every** SYN gets exactly one SYN|ACK frame back (no bare ACK):
+                //  1. Complete semantics: SYN|ACK already carries the ack bit and ack field, a bare ACK is redundant
+                //     (catplay `on_recv_neg_host` sends only SYN+ACK);
+                //  2. Sequence numbers must not collide: a bare ACK uses the current sentSequence while SYN|ACK increments it, so the next
+                //     bare ACK would reuse the previous SYN|ACK sequence, and BMW drops same-sequence frames as duplicates;
+                //  3. Retransmitting the same SYN replays the whole frame verbatim, byte-level idempotent.
+                // BMW 87866 ruling, 2026-10-19: the old code sent only a bare ACK after the first adoption, and that head unit
+                // reopens negotiation
+                // with a new sequence on every retry (161->191->40...), so all 14 rounds stuck in negotiation
+                // and never reached a single 0x1D00 (log: 133 SYN / 0 ACK).
                 sendSynchronizationEcho(sync, sequence)
                 if (firstAdoption) onPeerSynchronizationAdopted?.invoke(sync)
-                // 响应方（未发过 SYN）回显即视为协商完成：对端见到 SYN|ACK 后即认为
-                // 链路可用（MIB3 真机 iPhone 发完 SYN|ACK 立即发 0x1D00，不等 ACK）；
-                // 发起方仍等对端 ACK/数据（原语义）
+                // For a responder (never sent SYN) the echo counts as negotiation complete: after seeing SYN|ACK the peer considers the
+                // link usable (a real iPhone on MIB3 sends 0x1D00 right after SYN|ACK without waiting for an ACK);
+                // an initiator still waits for the peer ACK/data (original semantics)
                 if (echoFirst || !originatedSyn) completeNegotiationIfPending(nowMillis)
             } else if (sync != null &&
                 !isPureSyn &&
                 adoptedSynchronization == null &&
                 state == State.NEGOTIATING
             ) {
-                // 发起方收到 SYN|ACK（对端对我们 SYN 的应答，载荷=对端表）：
-                // 只采纳、**不回显**（回显会形成互回 SYN|ACK 的乒乓）。此前只在纯
-                // SYN 上采纳，对端是「纯响应方」时发起方永远到不了 NORMAL——
-                // MIB3 虚拟链路（手机 arm detect → 车机 SYN → 手机 SYN|ACK）正是
-                // 这个形态：车机侧由本分支收敛，随后按超时机制补裸 ACK。
+                // Initiator receives SYN|ACK (the peer's answer to our SYN, payload = peer table):
+                // only adopt, **do not echo** (echoing creates a SYN|ACK ping-pong). It used to adopt only on a pure
+                // SYN, so when the peer was a "pure responder" the initiator never reached NORMAL;
+                // the MIB3 virtual link (phone arms detect -> head unit SYN -> phone SYN|ACK) has exactly this shape:
+                // this branch converges the head unit side, and a bare ACK is supplied afterwards by the timeout mechanism.
                 peerSynchronization = sync
                 adoptedSynchronization = sync
                 sync.sessions.firstOrNull { it.kind == CONTROL_KIND }?.let {
@@ -520,13 +566,17 @@ class Iap2LinkEngine(
                 (control and CONTROL_SYNCHRONIZE) == 0 &&
                 (control and CONTROL_EXTENDED_ACKNOWLEDGEMENT) == 0
         if (isDataFrame) {
-            // 控制消息的会话 ID：本国表 10 或采纳表（Audi=1；测试台两者一致）
+            // Session ID of control messages: our own table 10 or the adopted table (Audi=1; test bench has both equal)
             if (sessionId == SESSION_CONTROL || sessionId == adoptedPeerControlSessionId) {
-                // 收到对端的数据即代表对端认为链路可用；ACK 帧若丢失/被跳过，这里兜底进入 NORMAL
+                // Receiving peer data means the peer considers the link usable; if the ACK frame was lost/skipped, this is the
+                // fallback into NORMAL
                 completeNegotiationIfPending(nowMillis)
                 handleData(sequence, payload!!)
+            } else if (onFileTransferData != null && sessionId == fileTransferSessionId()) {
+                handleFileTransferData(sequence, payload!!)
             } else if (sessionId == SESSION_EA && onEaData != null) {
-                // EA 会话数据（含触摸 HID）：对端序号账法与控制会话独立，直接上抛
+                // EA session data (including touch HID): the peer's sequence accounting is independent of the control session, pass
+                // it up directly
                 onEaData?.invoke(payload!!)
                 sendAcknowledgement()
             } else {
@@ -537,17 +587,20 @@ class Iap2LinkEngine(
 
     private fun onPeerMarker(nowMillis: Long) {
         if (!renegotiateOnPeerMarker || adapterResponder || echoFirst || state != State.NORMAL) return
-        if (nowMillis <= renegotiateUntilMillis) return // 已回应过，等对端 SYN
+        if (nowMillis <= renegotiateUntilMillis) return // already answered, waiting for the peer SYN
         val previous = lastPeerMarkerMillis
         lastPeerMarkerMillis = nowMillis
         if (previous == null || nowMillis - previous > PEER_MARKER_PAIR_MILLIS) return
         lastPeerMarkerMillis = null
-        // 新 SYN 必须用新序号：沿用最后一个数据帧的序号会被当作重复帧丢弃（BMW 同类教训）
+        // The new SYN must use a new sequence: reusing the last data frame's sequence would be dropped as a duplicate (same lesson as BMW)
         sentSequence = nextSequence(sentSequence)
         appendOutput(MARKER)
         sendSynchronization()
         renegotiateUntilMillis = nowMillis + RENEGOTIATION_WINDOW_MILLIS
-        onPeerRenegotiation?.invoke("链路已 NORMAL 仍连续收到对端 marker——回 marker + SYN(seq=$sentSequence) 重协商")
+        onPeerRenegotiation?.invoke(
+            "link already NORMAL yet peer marker keeps coming: reply marker + SYN(seq=$sentSequence) to " +
+                "renegotiate",
+        )
     }
 
     private fun completeNegotiationIfPending(nowMillis: Long) {
@@ -621,26 +674,29 @@ class Iap2LinkEngine(
         if (unknownSessionDropped <= 5) onUnknownSessionData?.invoke(sessionId, size)
     }
 
-    /** 诊断：出向同步包回显已生成（隧道模式用于「回显已送达后才允许发 CSM」门闸）。 */
+    /**
+     * Diagnostics: outbound sync packet echo generated (in tunnel mode, the gate that allows CSM only after the echo has been
+     * delivered).
+     */
     var onSynchronizationEchoSent: (() -> Unit)? = null
 
     /**
-     * 回显对端 sync（SYN|ACK，载荷与对端完全一致）——声明「手机采纳车机会话表」。
+     * Echo the peer sync (SYN|ACK, payload identical to the peer's), declaring "the phone adopts the head unit session table".
      *
-     * **必须消耗一个新发送序号**：对端按自己的序号账法校验回包（catplay
-     * `NegotiationTx::SynAck` 用 `take_own_seq()` 自增）。旧实现复用 `sentSequence`
-     * （发 SYN 后从未自增），于是 SYN 与 SYN-ACK 同为 seq=99，BMW 判为重复帧丢弃——
-     * 14 轮协商全部超时、车机一条 ACK 都没回（2026-10-19 实车日志定谳）。
+     * **Must consume a new send sequence**: the peer validates replies against its own sequence accounting (catplay
+     * `NegotiationTx::SynAck` increments with `take_own_seq()`). The old code reused `sentSequence`
+     * (never incremented after sending SYN), so SYN and SYN-ACK both had seq=99 and BMW dropped it as a duplicate frame:
+     * all 14 negotiation rounds timed out and the head unit never returned a single ACK (real-car log ruling, 2026-10-19).
      *
-     * 对**同一个** SYN 的重发保持字节级幂等：重放上次那一帧，不推进序号。
-     * DiPlay 隧道模式每 500ms 重发同一 SYN，靠这条维持原有行为。
+     * A retransmission of the **same** SYN stays byte-level idempotent: replay the previous frame, do not advance the sequence.
+     * DiPlay tunnel mode resends the same SYN every 500ms and relies on this to keep its original behavior.
      */
 
     /**
-     * 回显用的「我方参数」：会话表/超时沿用对端声明（手机端无特殊要求），
-     * 但 **maxOutgoing 提到 0x7F**——原样回显会把我们自己的发送窗口限死在对端的
-     * 小窗口（MIB3 突发 8 条在 maxOutgoing=4 下积压；真机 iPhone/AADisplay 均声明
-     * 0x7F）。maxLength 保持对端值（=我们的收包上限，勿放大）。
+     * "Our parameters" used in the echo: session table/timeouts follow the peer declaration (no special need on the phone side),
+     * but **maxOutgoing is raised to 0x7F**: echoing verbatim would pin our own send window to the peer's
+     * small window (MIB3 burst of 8 backs up at maxOutgoing=4; a real iPhone/AADisplay both declare
+     * 0x7F). maxLength keeps the peer value (= our receive cap, do not enlarge).
      */
     private fun ownSyncOf(peer: SynchronizationPayload): SynchronizationPayload =
         peer.copy(maxOutgoing = PHONE_DECLARED_MAX_OUTGOING).also {
@@ -684,11 +740,11 @@ class Iap2LinkEngine(
         val distance = sequenceDistance(sequence, lastReceivedInOrder)
         val peerWindow = peerSynchronization?.maxOutgoing ?: maxOutgoing
         if (distance == 0 || distance > peerWindow + ACK_SLACK) {
-            sendAcknowledgement() // 重复或过期：重新确认当前序号
+            sendAcknowledgement() // duplicate or stale: re-acknowledge the current sequence
             return
         }
-        // RFCOMM 为可靠有序流，不会丢包；序号跳变只可能是对端把 ACK/SYN 也计入了序号
-        // （各家实现账法不一致）。因此接受任意前进量并推进水位，避免死锁式丢帧。
+        // RFCOMM is a reliable ordered stream and drops nothing; a sequence jump can only mean the peer counted ACK/SYN into the sequence
+        // (implementations account differently). So accept any forward jump and advance the watermark, avoiding deadlock-style frame drops.
         lastReceivedInOrder = sequence
         if (pendingEvents.size >= 256) {
             die("event queue overflow")
@@ -698,7 +754,23 @@ class Iap2LinkEngine(
         sendAcknowledgement()
     }
 
-    // ---- 发送 ----
+    /** Same sequence accounting as [handleData]; the datagram goes to [onFileTransferData] instead of the CSM queue. */
+    private fun handleFileTransferData(
+        sequence: Int,
+        payload: ByteArray,
+    ) {
+        val distance = sequenceDistance(sequence, lastReceivedInOrder)
+        val peerWindow = peerSynchronization?.maxOutgoing ?: maxOutgoing
+        if (distance == 0 || distance > peerWindow + ACK_SLACK) {
+            sendAcknowledgement()
+            return
+        }
+        lastReceivedInOrder = sequence
+        onFileTransferData?.invoke(payload)
+        sendAcknowledgement()
+    }
+
+    // ---- Send ----
 
     private fun drainSendWindow(nowMillis: Long) {
         if (state != State.NORMAL) return
@@ -715,8 +787,8 @@ class Iap2LinkEngine(
             sentSequence = nextSequence(sentSequence)
             packet.sequence = sentSequence
             packet.deadlineMillis = nowMillis + retransmitMillis
-            writePacket(packet.payload, packet.sequence, CONTROL_ACKNOWLEDGEMENT, controlSessionId())
-            if (!packet.awaitAck) continue // 发后不管：不追踪、不重传（见 sendControl 注释）
+            writePacket(packet.payload, packet.sequence, CONTROL_ACKNOWLEDGEMENT, packet.sessionId ?: controlSessionId())
+            if (!packet.awaitAck) continue // fire and forget: not tracked, not retransmitted (see the sendControl comment)
             if (peer == null || peer.maxRetransmissions > 0) {
                 unacknowledged += packet
                 retransmitDeadline = packet.deadlineMillis
@@ -726,7 +798,7 @@ class Iap2LinkEngine(
         }
     }
 
-    /** 出向控制消息的会话 ID：采纳了对端表就用其 control ID（Audi=1），否则本表 10。 */
+    /** Session ID of outbound control messages: the adopted peer table's control ID if adopted (Audi=1), otherwise our own table 10. */
     private fun controlSessionId(): Int = adoptedPeerControlSessionId ?: SESSION_CONTROL
 
     private fun retransmitDue(nowMillis: Long) {
@@ -737,7 +809,7 @@ class Iap2LinkEngine(
             die("packet ${next.sequence} not acknowledged")
             return
         }
-        writePacket(next.payload, next.sequence, CONTROL_ACKNOWLEDGEMENT, controlSessionId())
+        writePacket(next.payload, next.sequence, CONTROL_ACKNOWLEDGEMENT, next.sessionId ?: controlSessionId())
         retransmitDeadline = unacknowledged.minOfOrNull { it.deadlineMillis }
     }
 
@@ -864,8 +936,11 @@ class Iap2LinkEngine(
         const val SESSION_EA = 11
         const val SESSION_FILE_TRANSFER = 12
 
-        /** 会话描述符里的类型字段：0 = 控制会话（xcertplay/extractor/catplay 一致）。 */
+        /** Type field in the session descriptor: 0 = control session (xcertplay/extractor/catplay agree). */
         private const val CONTROL_KIND = 0
+
+        /** Session descriptor type 1 = file transfer (WinPlay table: 12/k1/v2). */
+        private const val FILE_TRANSFER_KIND = 1
 
         val MARKER = byteArrayOf(0xFF.toByte(), 0x55, 0x02, 0x00, 0xEE.toByte(), 0x10)
         const val HEADER_BYTES = 9
@@ -876,10 +951,10 @@ class Iap2LinkEngine(
         private const val CONTROL_RESET = 0x10
         const val DEFAULT_INITIAL_SEQUENCE = 99
 
-        /** 链路已 NORMAL 时，两个对端 marker 相隔不超过此值才视为「求重协商」。 */
+        /** While the link is NORMAL, two peer markers no more than this far apart count as a "renegotiation request". */
         private const val PEER_MARKER_PAIR_MILLIS = 3_000L
 
-        /** 发出重协商 SYN 后，在此窗口内接受对端的新 SYN 并回显。 */
+        /** After sending the renegotiation SYN, a new peer SYN is accepted and echoed within this window. */
         private const val RENEGOTIATION_WINDOW_MILLIS = 5_000L
 
         fun randomInitialSequence(): Int = java.security.SecureRandom().nextInt(0x100)

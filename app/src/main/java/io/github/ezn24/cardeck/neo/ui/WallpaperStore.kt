@@ -8,15 +8,15 @@ import android.net.Uri
 import java.io.File
 
 /**
- * 车机壁纸存储。深色/浅色两个槽位（2026-11-17），跟随手机深浅色自动切换：
- * 每个槽位的来源 = 内置默认（assets/wallpaper_default.jpg）/ 内置图案（[WallpaperPresets]，
- * 代码绘制）/ 用户图片（深色 files/wallpaper.jpg 沿用旧文件名，浅色 files/wallpaper_light.jpg）；
- * 浅色槽位默认「同深色」。
+ * Car wallpaper storage. Two slots, dark/light (2026-11-17), switched automatically with the phone's dark/light mode:
+ * each slot's source = built-in default (assets/wallpaper_default.jpg) / built-in pattern ([WallpaperPresets],
+ * drawn in code) / user image (dark uses files/wallpaper.jpg keeping the old file name, light uses files/wallpaper_light.jpg);
+ * the light slot defaults to "same as dark".
  *
- * 合成器以位图上传 GL 纹理；更换壁纸后经 [version] 递增通知重载。
+ * The compositor uploads the bitmap as a GL texture; after the wallpaper changes, a [version] increment notifies a reload.
  */
 object WallpaperStore {
-    /** 内置默认壁纸（assets 内文件名）。 */
+    /** Built-in default wallpaper (file name inside assets). */
     const val DEFAULT_ASSET = "wallpaper_default.jpg"
 
     private const val USER_FILE = "wallpaper.jpg"
@@ -40,7 +40,7 @@ object WallpaperStore {
         slot: Slot,
     ): Boolean = userFile(context, slot).let { it.exists() && it.length() > 0 }
 
-    /** 槽位来源；未设置时深色 = 旧版用户图（若有）否则默认，浅色 = 同深色。 */
+    /** Slot source; when unset dark = the old user image (if any) otherwise the default, light = same as dark. */
     fun source(
         context: Context,
         slot: Slot,
@@ -64,7 +64,7 @@ object WallpaperStore {
         markChanged()
     }
 
-    /** 手机当前是否深色（应用级配置，不受 Activity 局部夜间模式影响）。 */
+    /** Whether the phone is currently dark (app-level configuration, unaffected by Activity-local night mode). */
     fun isNight(context: Context): Boolean =
         (
             context.applicationContext.resources.configuration.uiMode and
@@ -72,7 +72,7 @@ object WallpaperStore {
         ) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
 
-    /** 当前生效的槽位与来源（浅色模式且浅色槽位不是「同深色」才用浅色）。 */
+    /** Currently effective slot and source (the light slot is used only in light mode and when the light slot is not "same as dark"). */
     private fun effective(context: Context): Pair<Slot, String> {
         if (!isNight(context)) {
             val light = source(context, Slot.LIGHT)
@@ -83,7 +83,7 @@ object WallpaperStore {
 
     @Volatile private var lastNight: Boolean? = null
 
-    /** 进程启动时挂一次：手机深浅色切换且两槽位不同 → 通知车机侧重载壁纸。 */
+    /** Attached once at process start: when phone dark/light switches and the two slots differ -> notify the car side to reload the wallpaper. */
     fun attach(app: android.app.Application) {
         lastNight = isNight(app)
         app.registerComponentCallbacks(
@@ -103,7 +103,7 @@ object WallpaperStore {
         )
     }
 
-    /** 按来源解码（[maxSize] 限边长）；失败回退内置默认。 */
+    /** Decode by source ([maxSize] limits the edge length); falls back to the built-in default on failure. */
     fun decodeSource(
         context: Context,
         slot: Slot,
@@ -121,14 +121,15 @@ object WallpaperStore {
         java.util.concurrent.atomic
             .AtomicLong(0)
 
-    /** 当前壁纸版本（更换后递增；接收方据此判断是否需要重载）。 */
+    /** Current wallpaper version (incremented on change; receivers use it to decide whether to reload). */
     val version: Long get() = versionCounter.get()
 
-    // ---- 变更通知（监听器模式；接收方注册后应立即读一次当前状态兜底） ----
+    // ---- Change notifications (listener pattern; a receiver should read the current state once right after registering as a fallback)
+    // ----
 
     private val listeners = java.util.concurrent.CopyOnWriteArraySet<(Long) -> Unit>()
 
-    /** 注册壁纸变更监听（在主线程回调；参数为新版本号）。 */
+    /** Register a wallpaper change listener (called on the main thread; the argument is the new version number). */
     fun addListener(listener: (Long) -> Unit) {
         listeners.add(listener)
     }
@@ -143,8 +144,9 @@ object WallpaperStore {
     }
 
     /**
-     * 解码当前壁纸（后台线程调用；失败回退内置默认，再失败回退 null 由调用方画纯色）。
-     * 按 [maxSize] 限制边长（aspectFill 由调用方按比例缩放绘制）。
+     * Decode the current wallpaper (call on a background thread; falls back to the built-in default, then to null so the caller paints a
+     * solid color).
+     * The edge length is limited by [maxSize] (the caller scales proportionally for aspectFill drawing).
      */
     fun decode(
         context: Context,
@@ -191,7 +193,7 @@ object WallpaperStore {
             }
         }.getOrNull()
 
-    /** 复制用户选择的图片到该槽位并设为来源（重复选择同一图也覆盖，幂等）。 */
+    /** Copy the user-selected image into this slot and make it the source (re-picking the same image also overwrites; idempotent). */
     fun setFromUri(
         context: Context,
         uri: Uri,
@@ -217,13 +219,13 @@ object WallpaperStore {
         return sample
     }
 
-    // ---- 桌面切片：全流画布的 aspectFill 位图（GridActivity/DockActivity 共用） ----
+    // ---- Desktop slice: aspectFill bitmap of the whole stream canvas (shared by GridActivity/DockActivity) ----
 
-    /** 双尺寸缓存（桌面 = 超采样屏尺寸、dock = 流尺寸各一份）。 */
+    /** Two-size cache (desktop = oversampled display size, dock = stream size, one each). */
     private val canvasCache = HashMap<String, Bitmap>()
     private var canvasCacheVersion = -1L
 
-    /** 画布位图就绪监听（首次构建/版本更换重建后回调；参数 = 画布版本号）。 */
+    /** Canvas bitmap ready listeners (called after the first build / rebuild on a version change; the argument = canvas version number). */
     private val canvasReadyListeners = java.util.concurrent.CopyOnWriteArrayList<(Long) -> Unit>()
 
     fun addCanvasReadyListener(listener: (Long) -> Unit) {
@@ -235,8 +237,8 @@ object WallpaperStore {
     }
 
     /**
-     * 按「整个视频流画布」做 aspectFill 的壁纸位图（调用方把切片偏移到自己的窗口位置）。
-     * 按尺寸+版本缓存（桌面与 dock 各一份）；后台线程调用，返回的位图只读。
+     * Wallpaper bitmap aspectFill-ed over the "whole video stream canvas" (the caller offsets the slice to its own window position).
+     * Cached by size + version (one each for desktop and dock); call on a background thread; the returned bitmap is read-only.
      */
     @Synchronized
     fun aspectFillCanvas(
@@ -261,8 +263,9 @@ object WallpaperStore {
         val drawWidth = source.width * scale
         val drawHeight = source.height * scale
         val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
-        // 必须用「目标矩形」重载缩放绘制——drawBitmap(bmp, x, y, paint) 按原图像素
-        // 尺寸绘制：源图小于画布时（如竖屏照片 < 横屏画布宽）右侧留空（透明黑）
+        // Must scale-draw with the "destination rect" overload: drawBitmap(bmp, x, y, paint) draws at the source pixel
+        // size, so when the source is smaller than the canvas (e.g. a portrait photo narrower than the landscape canvas) the right side
+        // is left empty (transparent black)
         val dest =
             android.graphics.Rect(
                 ((canvasWidth - drawWidth) / 2f).toInt(),

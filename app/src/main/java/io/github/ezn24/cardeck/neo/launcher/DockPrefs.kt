@@ -3,12 +3,12 @@ package io.github.ezn24.cardeck.neo.launcher
 import android.content.Context
 
 /**
- * dock 栏外观偏好（SharedPreferences 持久化 + 监听器通知）。
+ * Dock appearance preferences (persisted in SharedPreferences + listener notification).
  *
- *  - scrimOpacity：dock 暗幕强度 0..100（%黑；0=壁纸清晰可见，100=全黑）
- *  - blur：背景高斯模糊强度 0..100（0=不模糊；映射到 RenderEffect 模糊半径）
+ *  - scrimOpacity: dock scrim strength 0..100 (% black; 0 = wallpaper clearly visible, 100 = fully black)
+ *  - blur: background Gaussian blur strength 0..100 (0 = no blur; mapped to the RenderEffect blur radius)
  *
- * 监听器在主线程回调（设置页拖动滑条时触发），DockActivity 据此即时重渲染。
+ * Listeners are called on the main thread (triggered while the settings slider is dragged), and DockActivity re-renders immediately.
  */
 object DockPrefs {
     private const val PREFS_NAME = "settings"
@@ -16,14 +16,15 @@ object DockPrefs {
     private const val KEY_BLUR = "dockBlur"
     private const val KEY_WIDTH = "dockWidthPercent"
 
-    /** 暗幕强度默认值（%）。 */
+    /** Default scrim strength (%). */
     const val DEFAULT_SCRIM = 20
 
     /**
-     * 栏宽度缩放（50–100，步进 5；默认 100）。厚度像素与 dock 屏密度**同乘**——
-     * 内容 dp 布局不变、渲染进更少像素，整条 dock（图标/时钟/文字）等比变窄。
-     * **仅下次连接生效**（dock 虚拟屏按会话建立时的尺寸/密度创建，与 scrim/blur
-     * 的实时生效不同）。
+     * Bar width scale (50-100, step 5; default 100). Thickness pixels and the dock display density are **multiplied together** -
+     * the dp layout of the content is unchanged but rendered into fewer pixels, so the whole dock (icons / clock / text) narrows
+     * proportionally.
+     * **Takes effect on the next connection only** (the dock virtual display is created with the size/density at session setup,
+     * unlike scrim/blur which apply live).
      */
     const val WIDTH_MIN = 50
     const val WIDTH_MAX = 100
@@ -47,7 +48,7 @@ object DockPrefs {
             .apply()
     }
 
-    /** 模糊强度默认值（%）。 */
+    /** Default blur strength (%). */
     const val DEFAULT_BLUR = 40
 
     private val listeners = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()

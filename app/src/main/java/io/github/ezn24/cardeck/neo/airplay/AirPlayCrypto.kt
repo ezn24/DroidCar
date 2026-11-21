@@ -16,7 +16,7 @@ import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
 import java.security.SecureRandom
 
-/** AirPlay 配对与控制通道密码学原语（BouncyCastle 轻量 API，独立实现）。 */
+/** Cryptographic primitives for AirPlay pairing and the control channel (BouncyCastle lightweight API, independent implementation). */
 object AirPlayCrypto {
     private const val MAC_BITS = 128
     private const val NONCE_SIZE = 12
@@ -101,23 +101,23 @@ object AirPlayCrypto {
     }
 
     /**
-     * AES-128-CTR 密钥流（catplay `AirPlayCipherCodec` / `ScreenFrameCodec` 的 AES 路径）。
+     * AES-128-CTR keystream (the AES path of catplay `AirPlayCipherCodec` / `ScreenFrameCodec`).
      *
-     * 计数器是标准 CTR128BE（BouncyCastle SICBlockCipher 同为大端计数），
-     * **状态跨帧连续**——catplay 每个流只建一个 `Aes128Ctr`、逐帧 apply_keystream，
-     * 所以这里也必须由调用方持有同一个实例，不能每帧新建。
+     * The counter is standard CTR128BE (BouncyCastle SICBlockCipher is also big-endian), and
+     * **state persists across frames**: catplay builds a single `Aes128Ctr` per stream and applies the keystream frame by frame,
+     * so the caller must hold one instance here too and never create one per frame.
      */
     class Aes128CtrStream(
         key: ByteArray,
         iv: ByteArray,
     ) {
-        // newInstance 的返回类型是 CTRModeCipher 接口（SICBlockCipher 的实现细节已封装）。
+        // newInstance returns the CTRModeCipher interface (SICBlockCipher implementation details are encapsulated).
         private val cipher: org.bouncycastle.crypto.modes.CTRModeCipher =
             SICBlockCipher
                 .newInstance(AESEngine())
                 .apply { init(true, ParametersWithIV(KeyParameter(key), iv)) }
 
-        /** 原地异或密钥流（加密与解密同一操作）。 */
+        /** XORs the keystream in place (encryption and decryption are the same operation). */
         fun applyKeystream(data: ByteArray) {
             if (data.isEmpty()) return
             cipher.processBytes(data, 0, data.size, data, 0)
@@ -152,7 +152,7 @@ object AirPlayCrypto {
         return if (processed + finalized == output.size) output else output.copyOf(processed + finalized)
     }
 
-    /** 控制通道计数 nonce：4 字节零 + 8 字节小端计数。 */
+    /** Control-channel counter nonce: 4 zero bytes + 8-byte little-endian counter. */
     fun nonce64(counter: Long): ByteArray {
         val nonce = ByteArray(NONCE_SIZE)
         var value = counter
@@ -163,7 +163,7 @@ object AirPlayCrypto {
         return nonce
     }
 
-    /** 配对消息 nonce：4 字节零 + 8 字节 ASCII 标签。 */
+    /** Pairing message nonce: 4 zero bytes + 8-byte ASCII tag. */
     fun nonceLabel(label: String): ByteArray {
         val nonce = ByteArray(NONCE_SIZE)
         val ascii = label.toByteArray(Charsets.US_ASCII)

@@ -5,25 +5,25 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ctrl mDNS 广播身份字段的回归保护。
+ * Regression protection for the ctrl mDNS advertisement identity fields.
  *
- * 2026-10-19 奥迪 MMI 3315 实车对照（`docs/PROTOCOL-NOTES.md` §9i）：
- * 0.1.6 用 `name=sender` + `srcvers=950.7.1` 时车机 0.65 秒内下发 0x4301；
- * 0.1.7 改成 catplay 的 `name=iPhone` + `srcvers=566.25.21` 后，车机**连 ctrl-int
- * 探测都不再发**、0x4301 永不到达。这两项是车机在 WiFi 上唯一可见的手机身份，
- * 改动等于换了台设备——必须有测试挡住「照 catplay 抄」的再次修改。
+ * 2026-10-19 Audi MMI 3315 real-car comparison (`docs/PROTOCOL-NOTES.md` section 9i):
+ * with 0.1.6 using `name=sender` + `srcvers=950.7.1` the head unit sent 0x4301 within 0.65 seconds;
+ * after 0.1.7 changed to catplay's `name=iPhone` + `srcvers=566.25.21`, the head unit **stopped even sending ctrl-int
+ * probes** and 0x4301 never arrived. These two fields are the only phone identity visible to the head unit on WiFi,
+ * changing them is equivalent to swapping the device -- a test must block another "copy from catplay" change.
  *
- * 同时锁住 `_device-info._tcp` 不再注册：Android 的 NsdServiceInfo 不接受 port=0
- * （真机报 `The port is missing`），而它是未验证收益的附加广播，失败反而制造噪音。
+ * It also locks in that `_device-info._tcp` is no longer registered: Android's NsdServiceInfo does not accept port=0
+ * (a real device reports `The port is missing`), and it is an extra advertisement of unverified benefit, whose failure only creates noise.
  */
 class CarPlayCtrlAdvertiserTest {
     @Test
     fun ctrlTxtKeepsValuesVerifiedOnAudi() {
         val srcvers = CarPlayCtrlAdvertiser.advertisedSrcversForTest()
         val name = CarPlayCtrlAdvertiser.advertisedServiceNameForTest()
-        assertEquals("车机按该版本号分支：改掉会连 ctrl 探测都不发", "950.7.1", srcvers)
-        assertEquals("0.1.6 起实测可用的实例名", "sender", name)
-        assertTrue("服务类型不得改动", CarPlayCtrlAdvertiser.SERVICE_TYPE == "_carplay-ctrl._tcp")
+        assertEquals("The head unit branches on this version number: changing it stops even ctrl probes", "950.7.1", srcvers)
+        assertEquals("Instance name measured working since 0.1.6", "sender", name)
+        assertTrue("The service type must not change", CarPlayCtrlAdvertiser.SERVICE_TYPE == "_carplay-ctrl._tcp")
     }
 
     @Test
@@ -50,10 +50,10 @@ class CarPlayCtrlAdvertiserTest {
 
     @Test
     fun deviceInfoIsNotAdvertised() {
-        // _device-info._tcp 曾以 port=0 注册并必然失败（The port is missing）。
-        // 若将来要恢复，必须先确认 NsdManager 接受合法端口且该车机确有此需求。
+        // _device-info._tcp was once registered with port=0 and necessarily failed (The port is missing).
+        // To restore it in the future, first confirm NsdManager accepts a valid port and that this head unit really needs it.
         assertTrue(
-            "不应再广播 _device-info._tcp",
+            "_device-info._tcp should no longer be advertised",
             !CarPlayCtrlAdvertiser.advertisedServiceTypesForTest().contains("_device-info._tcp"),
         )
     }

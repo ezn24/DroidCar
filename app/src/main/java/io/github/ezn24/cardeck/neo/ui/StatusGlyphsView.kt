@@ -8,12 +8,13 @@ import android.util.AttributeSet
 import android.view.View
 
 /**
- * CarPlay 侧栏时间下方的状态行：蜂窝信号柱（无 SIM 时为 4 个暗圆点）+ Wi-Fi 扇形图标。
+ * Status row under the CarPlay sidebar clock: cellular signal bars (4 dim dots when there is no SIM) + Wi-Fi fan icon.
  *
- * - 信号：[cellLevel] 0..4 根信号柱点亮（白），其余暗（白 35%）；-1 = 无 SIM/无服务，显示 4 个暗圆点；
- * - Wi-Fi：[wifiLevel] 0..3 条弧点亮；-1 = 未连 Wi-Fi，不画图标（宽度随之收缩）。
+ * - Signal: [cellLevel] 0..4 bars lit (white), the rest dim (white 35%); -1 = no SIM/no service, shows 4 dim dots;
+ * - Wi-Fi: [wifiLevel] 0..3 arcs lit; -1 = not on Wi-Fi, no icon drawn (width shrinks accordingly).
  *
- * 尺寸只由高度决定（与 [BatteryGlyphView] 同一套做法），dock 横条/竖条都能 wrap_content。
+ * Size is determined by height only (same approach as [BatteryGlyphView]); works with wrap_content in both the dock's horizontal and
+ * vertical bars.
  */
 class StatusGlyphsView
     @JvmOverloads
@@ -40,7 +41,7 @@ class StatusGlyphsView
             }
         private val oval = RectF()
 
-        /** 蜂窝信号格数（SignalStrength.level：0..4；-1 = 无 SIM / 无服务）。 */
+        /** Cellular signal level count (SignalStrength.level: 0..4; -1 = no SIM / no service). */
         fun setCellLevel(level: Int) {
             val v = level.coerceIn(-1, 4)
             if (v == cellLevel) return
@@ -48,7 +49,7 @@ class StatusGlyphsView
             invalidate()
         }
 
-        /** Wi-Fi 格数（0..3；-1 = 未连 Wi-Fi → 不显示图标）。 */
+        /** Wi-Fi level count (0..3; -1 = not on Wi-Fi -> icon hidden). */
         fun setWifiLevel(level: Int) {
             val v = level.coerceIn(-1, 3)
             if (v == wifiLevel) return
@@ -71,7 +72,7 @@ class StatusGlyphsView
         override fun onDraw(canvas: Canvas) {
             val h = height.toFloat()
             if (cellLevel < 0) {
-                // 无 SIM / 无服务：iPhone 同款 4 个暗圆点
+                // No SIM / no service: 4 dim dots, same as the iPhone
                 val r = h * DOT_D / 2f
                 val cy = h * 0.62f
                 for (i in 0 until 4) {
@@ -79,7 +80,7 @@ class StatusGlyphsView
                     canvas.drawCircle(cx, cy, r, offPaint)
                 }
             } else {
-                // 有服务：4 根由矮到高的信号柱，按格数点亮（SF Symbols `cellularbars`）
+                // With service: 4 bars rising from short to tall, lit by level (SF Symbols `cellularbars`)
                 val barW = h * BAR_W
                 val radius = barW * 0.3f
                 for (i in 0 until 4) {
@@ -90,7 +91,7 @@ class StatusGlyphsView
                 }
             }
             if (wifiLevel < 0) return
-            // Wi-Fi：以底部一点为圆心的三条弧 + 圆心小点（SF Symbols `wifi` 的近似）
+            // Wi-Fi: three arcs centered on a point at the bottom + a small center dot (approximating SF Symbols `wifi`)
             val x0 = h * (DOTS_W + GAP_W)
             val w = h * WIFI_W
             val cx = x0 + w / 2f
@@ -110,12 +111,12 @@ class StatusGlyphsView
             const val ON = 0xFFFFFFFF.toInt()
             const val OFF = 0x59FFFFFF
 
-            /** 以下尺寸都是「相对高度」的比例。 */
+            /** The sizes below are all ratios "relative to height". */
             const val DOT_D = 0.36f
             const val DOT_PITCH = 0.56f
             const val DOTS_W = DOT_D + DOT_PITCH * 3
 
-            /** 信号柱：宽 0.27h，高度 35%/55%/77%/100%；四根总宽与四个圆点相同（两种形态切换不跳宽）。 */
+            /** Signal bars: width 0.27h, heights 35%/55%/77%/100%; total width of the four bars equals that of four dots (no width jump between the two forms). */
             const val BAR_W = 0.27f
             const val BAR_PITCH = (DOTS_W - BAR_W) / 3f
             val BAR_HEIGHTS = floatArrayOf(0.35f, 0.55f, 0.77f, 1f)

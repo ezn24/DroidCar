@@ -11,19 +11,19 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 日志导出：把运行日志写成 `下载/CarDeck/CarDeck-log-<时间>.txt`，普通文件管理器可见。
+ * Log export: writes the runtime log to `Download/CarDeck/CarDeck-log-<time>.txt`, visible in ordinary file managers.
  *
- * 为什么落 MediaStore.Downloads 而不是应用私有目录：
- *  - `filesDir` / `getExternalFilesDir` 普通用户在文件管理器里找不到（Android 11+
- *    系统文件管理器直接屏蔽 `Android/data`），日志导出等于没导；
- *  - MediaStore.Downloads 无需任何存储权限，落盘即出现在系统「下载」目录，
- *    微信/QQ/邮件发送附件也能直接选到。
+ * Why MediaStore.Downloads rather than the app-private directory:
+ *  - `filesDir` / `getExternalFilesDir` cannot be found by ordinary users in a file manager (Android 11+
+ *    system file managers hide `Android/data` outright), so the export would be useless;
+ *  - MediaStore.Downloads needs no storage permission, shows up in the system "Download" folder as soon as it is written,
+ *    and WeChat/QQ/email attachments can pick it directly.
  *
- * 内容优先取 `files/main_debug.log`：它记录全部 appendLog（不受 UI 日志开关影响，
- * 最多保留最近 2MB）；文件不可读时才退回 UI 的内存缓冲（最近 20~40KB）。
+ * Content prefers `files/main_debug.log`: it records every appendLog (independent of the UI log switch,
+ * keeping the latest 2MB at most); only when the file is unreadable does it fall back to the UI in-memory buffer (latest 20~40KB).
  */
 object LogExporter {
-    /** 导出范围：默认只导本次进程启动后的日志（历史轮次对排查是噪音）。 */
+    /** Export scope: by default only logs since this process started (earlier rounds are noise for troubleshooting). */
     enum class Scope(
         val label: String,
         val fileNameTag: String,
@@ -35,19 +35,19 @@ object LogExporter {
     data class Result(
         val uri: Uri,
         val fileName: String,
-        /** 给用户看的绝对路径（文件管理器里按这个找）。 */
+        /** Absolute path shown to the user (what to look for in the file manager). */
         val displayPath: String,
         val bytes: Long,
         val scope: Scope,
     )
 
-    /** 导出目录（相对外部存储根）：下载/CarDeck。 */
+    /** Export directory (relative to the external storage root): Download/CarDeck. */
     private val RELATIVE_DIR = "${Environment.DIRECTORY_DOWNLOADS}/CarDeck"
 
-    /** 文件管理器里展示的绝对路径前缀（主用户外部存储；分区存储下即 /sdcard）。 */
+    /** Absolute path prefix shown in the file manager (primary user external storage; /sdcard under scoped storage). */
     private const val DISPLAY_ROOT = "/storage/emulated/0"
 
-    /** 导出并返回结果；失败返回 null（调用方提示用户）。任意线程可调（含 IO）。 */
+    /** Export and return the result; returns null on failure (the caller informs the user). Callable from any thread (does IO). */
     fun export(
         context: Context,
         fallbackText: String,
@@ -63,18 +63,18 @@ object LogExporter {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
                 put(MediaStore.MediaColumns.RELATIVE_PATH, RELATIVE_DIR)
-                // 先标 pending 再写：避免文件管理器/相册扫描到半截文件
+                // Mark pending before writing: keeps file managers/galleries from scanning a half-written file
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
         val uri = resolver.insert(collection, values) ?: return null
         return try {
             val bytes = body.toByteArray(Charsets.UTF_8)
             resolver.openOutputStream(uri)?.use { it.write(bytes) }
-                ?: throw IllegalStateException("openOutputStream 返回 null")
+                ?: throw IllegalStateException("openOutputStream returned null")
             resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
             Result(uri, fileName, "$DISPLAY_ROOT/$RELATIVE_DIR/$fileName", bytes.size.toLong(), scope)
         } catch (_: Exception) {
-            // 半截文件（IS_PENDING=1）对用户不可见，但会占空间——清掉
+            // A half-written file (IS_PENDING=1) is invisible to the user but takes space; remove it
             runCatching { resolver.delete(uri, null, null) }
             null
         }
@@ -86,27 +86,28 @@ object LogExporter {
         scope: Scope,
     ): String =
         buildString {
-            appendLine("CarDeck 运行日志")
-            appendLine("导出时间: " + SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()))
-            appendLine("应用版本: " + versionName(context))
-            appendLine("导出范围: " + scope.label)
+            appendLine("CarDeck runtime log")
+            appendLine("Exported at: " + SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()))
+            appendLine("App version: " + versionName(context))
+            appendLine("Export scope: " + scope.label)
             appendLine(
-                "设备: ${Build.MANUFACTURER} ${Build.MODEL} | " +
+                "Device: ${Build.MANUFACTURER} ${Build.MODEL} | " +
                     "Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})",
             )
             appendLine("==================================================")
             val fileLog = DebugFileLog.read(context, currentSessionOnly = scope == Scope.CURRENT_SESSION)
             if (!fileLog.isNullOrBlank()) {
                 if (scope == Scope.CURRENT_SESSION) {
-                    appendLine("（仅本次进程启动之后的日志；需要历史请点「导出全部」）")
+                    appendLine("(Only logs since this process started; tap \"Export all\" for history)")
                 } else {
-                    appendLine("（全部文件日志；文件最多 2MB，超出时系统只保留最近一段）")
+                    appendLine("(Full file log; the file keeps at most 2MB, the system retains only the latest part when exceeded)")
                 }
                 append(fileLog)
                 if (!fileLog.endsWith('\n')) appendLine()
             } else {
-                // 启动标记刚写、其余日志还没落盘（或文件不可读）时，界面缓冲仍是有效来源
-                appendLine("（文件日志不可用——导出界面缓冲，可能不完整）")
+                // Right after the start marker is written, before other logs hit disk (or when the file is unreadable), the UI buffer is
+                // still a valid source
+                appendLine("(File log unavailable -- exporting the UI buffer, may be incomplete)")
                 append(fallbackText)
             }
         }

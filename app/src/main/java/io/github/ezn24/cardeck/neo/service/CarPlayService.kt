@@ -16,9 +16,9 @@ import io.github.ezn24.cardeck.neo.util.Bg
 import io.github.ezn24.cardeck.neo.util.DebugFileLog
 
 /**
- * 前台保活服务：连接建立期间以 connectedDevice 类型常驻，
- * 防止 app 退到后台后被系统/MagicOS 省电策略杀死导致断连。
- * 连接逻辑仍运行在 MainActivity 派生的线程里——本服务负责保住进程。
+ * Foreground keep-alive service: stays resident with the connectedDevice type while a connection is being established,
+ * preventing the system / MagicOS power saving from killing the app after it goes to the background and dropping the connection.
+ * The connection logic still runs in threads spawned from MainActivity; this service is responsible for keeping the process alive.
  */
 class CarPlayService : Service() {
     private var wakeLock: android.os.PowerManager.WakeLock? = null
@@ -27,8 +27,9 @@ class CarPlayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     /**
-     * 息屏保活：CPU 唤醒锁维持编码/协议线程与 TCP 存活探测的响应；
-     * WiFi 低延迟锁阻止无线进入激进省电（否则接收端 20s 内判死拆链）。
+     * Keep-alive with screen off: the CPU wake lock keeps the encoder/protocol threads and TCP liveness probes responsive;
+     * the WiFi low-latency lock stops the radio from entering aggressive power saving (otherwise the receiver declares the link
+     * dead within 20s and tears it down).
      */
     private fun acquireLocks() {
         if (wakeLock?.isHeld == true && wifiLock?.isHeld == true) return
@@ -62,9 +63,12 @@ class CarPlayService : Service() {
     private val autoStopRunnable =
         Runnable {
             when {
-                SessionController.isStreaming() -> fileLog("SVC: 已开始推流——取消下车收摊")
+                SessionController.isStreaming() -> fileLog("SVC: streaming started; cancelling the leave-car teardown")
                 SessionController.isSessionRunning() -> {
-                    fileLog("SVC: 车机蓝牙断开已 ${AUTO_STOP_GRACE_MILLIS / 1000}s 未恢复——收起会话")
+                    fileLog(
+                        "SVC: car Bluetooth disconnect not recovered within ${AUTO_STOP_GRACE_MILLIS / 1000}s; tearing the " +
+                            "session down",
+                    )
                     SessionController.disconnect(applicationContext)
                 }
                 else -> Unit
@@ -74,7 +78,10 @@ class CarPlayService : Service() {
     private fun scheduleAutoStop() {
         mainHandler.removeCallbacks(autoStopRunnable)
         mainHandler.postDelayed(autoStopRunnable, AUTO_STOP_GRACE_MILLIS)
-        fileLog("SVC: 连接中车机蓝牙断开——${AUTO_STOP_GRACE_MILLIS / 1000}s 内未恢复才收起会话")
+        fileLog(
+            "SVC: car Bluetooth disconnected while connecting; tearing the session down only if not recovered within " +
+                "${AUTO_STOP_GRACE_MILLIS / 1000}s",
+        )
     }
 
     private fun cancelPendingAutoStop() = mainHandler.removeCallbacks(autoStopRunnable)
@@ -84,35 +91,43 @@ class CarPlayService : Service() {
         flags: Int,
         startId: Int,
     ): Int {
-        // 下车：车机蓝牙 ACL 断开（由 startService 投递——服务在跑时进程已是前台服务态，
-        // 不受后台启动限制）。disconnect 内部会 stopService → onDestroy。
+        // Leaving the car: car Bluetooth ACL disconnected (delivered via startService: while the service runs the process is
+        // already in foreground service state,
+        // not subject to background start limits). disconnect internally does stopService -> onDestroy.
         if (intent?.action == ACTION_AUTO_STOP_SESSION) {
-            // 推流中忽略：会话交接到 WiFi 后接收端放掉蓝牙是正常行为（WinPlay 实测 RECORD 后
-            // 3 秒即断 ACL，2026-11-18 「刚连上就断」根因）。真下车时热点随之消失，
-            // WiFi onLost / 推流 onEnded 会收尾，不需要靠蓝牙判断。
+            // Ignore while streaming: after the session hands over to WiFi the receiver dropping Bluetooth is normal (WinPlay
+            // measured the ACL dropping
+            // 3s after RECORD, root cause of "disconnects right after connecting", 2026-11-18). On a real exit the hotspot
+            // disappears with it,
+            // and WiFi onLost / streaming onEnded handle the teardown, so Bluetooth need not be used to decide.
             if (SessionController.isStreaming()) {
-                fileLog("SVC: 车机蓝牙断开但正在推流（会话已在 WiFi 上）——忽略，交给 WiFi 断开收尾")
+                fileLog(
+                    "SVC: car Bluetooth disconnected but streaming (session already on WiFi); ignoring, WiFi disconnect handles " +
+                        "teardown",
+                )
                 return START_NOT_STICKY
             }
             if (SessionController.isSessionRunning()) {
-                // 连接中：我们自己的 RFCOMM 尝试会让 ACL 连了又断，立即收摊等于自己打断自己
-                // （zz85/cardeck 在 smartBox 上实测：连-断-收摊循环）。宽限期内 ACL 重新连上
-                // （AUTO_START）或开始推流即取消。
+                // While connecting: our own RFCOMM attempts make the ACL connect and drop repeatedly, so tearing down immediately
+                // would interrupt ourselves
+                // (zz85/cardeck measured on the smartBox: connect-drop-teardown loop). Cancelled if the ACL reconnects within the
+                // grace period
+                // (AUTO_START) or streaming begins.
                 scheduleAutoStop()
             } else {
-                fileLog("SVC: 收到「下车自动结束」——无会话，停止服务")
+                fileLog("SVC: received \"leave-car auto stop\" with no session; stopping the service")
                 cancelPendingAutoStop()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
             return START_NOT_STICKY
         }
-        // 必须显式指定类型为 connectedDevice：
-        // 2 参 startForeground 会拾取 manifest 声明的全部类型（含 mediaProjection），
-        // 而 Android 14 启动 mediaProjection 类型要求 AppOps PROJECT_MEDIA（用户当次授权才有效）——
-        // 重启/授权过期后直接 SecurityException 崩溃（2026-10-09 实测踩坑）。
-        // 但**已有投影时**必须继续带上 mediaProjection 类型：否则这次 startForeground
-        // 会把类型摘掉，Android 14 会连带停掉投影（自动连接刚拿到的令牌就废了）。
+        // The type must be specified explicitly as connectedDevice:
+        // the 2-arg startForeground picks up all types declared in the manifest (including mediaProjection),
+        // and Android 14 starting the mediaProjection type requires AppOps PROJECT_MEDIA (valid only for the user's current grant),
+        // so after a restart / expired grant it crashes with SecurityException (pitfall measured 2026-10-09).
+        // But **when a projection already exists** the mediaProjection type must stay: otherwise this startForeground
+        // drops the type and Android 14 stops the projection with it (the token auto-connect just obtained is wasted).
         val fgsTypes =
             if (mediaProjection != null) {
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
@@ -127,28 +142,31 @@ class CarPlayService : Service() {
             fgsTypes,
         )
         acquireLocks()
-        // 授权结果在（用户刚确认投屏）时：升级前台类型再创建投影（try/catch 兜底不崩）
+        // When a grant result is present (the user just confirmed screen capture): upgrade the foreground type before creating the
+        // projection (try/catch fallback, no crash)
         if (pendingProjectionResult != null) {
             upgradeToProjection()
             takeProjection()
         } else if (mediaProjection != null) {
             upgradeToProjection()
         }
-        // 上车自动连接：进程可能是被 ACL 广播冷启动的，先建会话对象（BT client/server、
-        // WiFi 连接器、mDNS 广播器都在 ensureSessionObjects 里），再走与首页按钮相同的流程。
-        // 放后台线程：冷启动时 ensure 要读偏好/绑定 UserService，别压在服务主线程上。
+        // Auto-connect when getting in the car: the process may have been cold-started by the ACL broadcast, so build the session
+        // objects first (BT client/server,
+        // WiFi connector and mDNS advertiser are all in ensureSessionObjects), then follow the same flow as the home page button.
+        // Run on a background thread: on a cold start ensure reads prefs / binds the UserService, which must not sit on the service
+        // main thread.
         if (intent?.action == ACTION_AUTO_START_SESSION) {
             cancelPendingAutoStop()
             if (SessionController.isSessionRunning()) {
-                // 连接尝试本身会触发 ACL_CONNECTED：会话已在跑就不要重复起步
-                fileLog("SVC: 收到「上车自动启动」——会话已在进行，忽略")
+                // The connection attempt itself triggers ACL_CONNECTED: if a session is already running, do not start again
+                fileLog("SVC: received \"car-entry auto start\"; session already in progress, ignoring")
                 return START_STICKY
             }
-            fileLog("SVC: 收到「上车自动启动」——拉起会话")
+            fileLog("SVC: received \"car-entry auto start\"; starting session")
             val app = applicationContext
             Bg.run("auto-session-start") {
                 SessionController.ensure(app)
-                // 自动连接默认带声音：先静默领取投屏令牌；失败退回只推视频
+                // Auto-connect has audio by default: silently acquire the projection token first; on failure fall back to video only
                 SessionController.audioEnabledForSession =
                     io.github.ezn24.cardeck.neo.launcher.settings.DisplayPrefs
                         .carAudio(applicationContext) &&
@@ -160,20 +178,20 @@ class CarPlayService : Service() {
     }
 
     /**
-     * 自动连接时静默领取 MediaProjection（AudioPlaybackCapture 的授权来源）。
+     * Silently acquire MediaProjection during auto-connect (the grant source for AudioPlaybackCapture).
      *
-     * Android 14 的顺序硬约束：**先**有授权结果 → **再**把 FGS 类型升级为
-     * mediaProjection → 才能调 `getMediaProjection`。这里直接复用
-     * [pendingProjectionResult] + [upgradeToProjection] + [takeProjection]，
-     * 与手动授权走同一条路径（唯一区别是令牌来自 [SilentProjectionActivity]）。
+     * Hard ordering constraint on Android 14: **first** have the grant result -> **then** upgrade the FGS type to
+     * mediaProjection -> only then call `getMediaProjection`. This directly reuses
+     * [pendingProjectionResult] + [upgradeToProjection] + [takeProjection],
+     * the same path as the manual grant (the only difference is the token comes from [SilentProjectionActivity]).
      *
-     * @return 是否拿到实例；false 时自动连接只推视频（不弹窗、不重试）
+     * @return whether an instance was obtained; on false auto-connect pushes video only (no dialog, no retry)
      */
     private fun acquireProjectionSilently(): Boolean {
         val grant =
             SilentProjectionActivity.request(applicationContext)
                 ?: run {
-                    fileLog("SVC: 静默投屏令牌获取失败——本次自动连接只推视频")
+                    fileLog("SVC: silent projection token acquisition failed; this auto-connect pushes video only")
                     return false
                 }
         pendingProjectionResult = grant.resultCode to grant.data
@@ -182,9 +200,9 @@ class CarPlayService : Service() {
         val ok = mediaProjection != null
         fileLog(
             if (ok) {
-                "SVC: 静默投屏令牌已就绪（自动连接带声音）"
+                "SVC: silent projection token ready (auto-connect with audio)"
             } else {
-                "SVC: 静默投屏令牌无效（getMediaProjection 失败）"
+                "SVC: silent projection token invalid (getMediaProjection failed)"
             },
         )
         return ok
@@ -197,25 +215,26 @@ class CarPlayService : Service() {
             val manager =
                 getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
             val projection = manager.getMediaProjection(code, data)
-            // Android 14+：createVirtualDisplay 前必须注册回调（资源管理强制）
+            // Android 14+: a callback must be registered before createVirtualDisplay (enforced by resource management)
             projection?.registerCallback(
                 object : android.media.projection.MediaProjection.Callback() {
                     override fun onStop() {
                         mediaProjection = null
-                        // 关键诊断：授权丢失会导致音频/镜像不可用（此前只写 logcat，HKS 加密看不到）
-                        fileLog("SVC: MediaProjection 被系统停止（onStop）——音频/镜像需重新授权")
+                        // Key diagnostic: losing the grant makes audio/mirroring unavailable (previously written only to logcat,
+                        // invisible under HKS encryption)
+                        fileLog("SVC: MediaProjection stopped by the system (onStop); audio/mirroring needs re-authorization")
                     }
                 },
                 android.os.Handler(android.os.Looper.getMainLooper()),
             )
             mediaProjection = projection
             if (projection != null) {
-                fileLog("SVC: MediaProjection 就绪（投影创建成功）")
+                fileLog("SVC: MediaProjection ready (projection created)")
             } else {
-                fileLog("SVC: getMediaProjection 返回 null（授权结果已失效？）")
+                fileLog("SVC: getMediaProjection returned null (grant result expired?)")
             }
         } catch (error: Exception) {
-            fileLog("SVC: getMediaProjection 失败 - ${error.message ?: error.javaClass.simpleName}")
+            fileLog("SVC: getMediaProjection failed - ${error.message ?: error.javaClass.simpleName}")
         }
     }
 
@@ -229,23 +248,23 @@ class CarPlayService : Service() {
                     android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
             )
         } catch (error: Exception) {
-            fileLog("SVC: 升级 mediaProjection FGS 类型失败 - ${error.message}")
+            fileLog("SVC: upgrading the mediaProjection FGS type failed - ${error.message}")
         }
     }
 
     override fun onDestroy() {
         cancelPendingAutoStop()
         releaseLocks()
-        // Android 14+：MediaProjection 与前台的 mediaProjection 类型绑定——
-        // 保活服务停止（如用户点「断开连接」）时系统会连带停止投影。
+        // Android 14+: MediaProjection is bound to the foreground mediaProjection type:
+        // when the keep-alive service stops (e.g. the user taps "Disconnect") the system stops the projection with it.
         fileLog(
-            "SVC: onDestroy（保活服务停止）mediaProjection=" +
-                (if (mediaProjection != null) "仍在（即将被系统回收）" else "null"),
+            "SVC: onDestroy (keep-alive service stopped) mediaProjection=" +
+                (if (mediaProjection != null) "still present (about to be reclaimed by the system)" else "null"),
         )
         super.onDestroy()
     }
 
-    /** 投影生命周期等关键事件：logcat + 文件双写（HKS 环境下文件是唯一可读通道）。 */
+    /** Key events such as the projection lifecycle: written to both logcat and file (under HKS the file is the only readable channel). */
     private fun fileLog(message: String) {
         android.util.Log.i("CarPlayService", message)
         DebugFileLog
@@ -256,20 +275,32 @@ class CarPlayService : Service() {
         private const val CHANNEL_ID = "carplay_connection"
         private const val NOTIFICATION_ID = 1
 
-        /** 上车自动连接：车机蓝牙 ACL 连上时由 CarBluetoothReceiver 投递。 */
+        /** Auto-connect when getting in the car: delivered by CarBluetoothReceiver when the car Bluetooth ACL connects. */
         const val ACTION_AUTO_START_SESSION = "io.github.ezn24.cardeck.neo.action.AUTO_START"
 
-        /** 下车自动收摊：ACL 断开时投递（只有服务在跑才发，见 CarBluetoothReceiver）。 */
+        /**
+         * Auto-teardown when leaving the car: delivered on ACL disconnect (only sent when the service is running, see
+         * CarBluetoothReceiver).
+         */
         const val ACTION_AUTO_STOP_SESSION = "io.github.ezn24.cardeck.neo.action.AUTO_STOP"
 
-        /** 连接中车机 ACL 断开后的收摊宽限期（我们自己的 RFCOMM 尝试会反复连断 ACL）。 */
+        /**
+         * Teardown grace period after the car ACL drops while connecting (our own RFCOMM attempts make the ACL connect and drop
+         * repeatedly).
+         */
         private const val AUTO_STOP_GRACE_MILLIS = 60_000L
 
-        /** 镜像模式：授权后由 MainActivity 写入；服务重声明 FGS 类型后方可创建虚拟屏。 */
+        /**
+         * Mirroring mode: written by MainActivity after authorization; the virtual display can only be created once the service
+         * re-declares the FGS type.
+         */
         @Volatile
         var mediaProjection: android.media.projection.MediaProjection? = null
 
-        /** 授权结果暂存：由服务在前台类型升级后调用 getMediaProjection（Android 14+ 顺序要求）。 */
+        /**
+         * Grant result held over: the service calls getMediaProjection after the foreground type upgrade (Android 14+ ordering
+         * requirement).
+         */
         @Volatile
         var pendingProjectionResult: Pair<Int, Intent>? = null
 
@@ -296,7 +327,7 @@ class CarPlayService : Service() {
                 },
             )
         }
-        // 点击通知 → 打开 App 主界面（此前缺 setContentIntent，点击无反应）
+        // Tapping the notification opens the app main screen (setContentIntent was missing before, so taps did nothing)
         val contentIntent =
             android.app.PendingIntent.getActivity(
                 this,

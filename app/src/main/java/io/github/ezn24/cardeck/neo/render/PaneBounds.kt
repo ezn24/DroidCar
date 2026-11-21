@@ -1,6 +1,6 @@
 package io.github.ezn24.cardeck.neo.render
 
-/** 流像素坐标唯一来源：建屏、合成与触摸使用相同的整数边界。 */
+/** Single source of stream-pixel coordinates: display creation, composition and touch use the same integer bounds. */
 data class PaneBounds(
     val left: Float,
     val top: Float,
@@ -34,7 +34,8 @@ fun mediaPaneBounds(
             PaneBounds(dockWidth + margin, margin, dockWidth + margin + regular.width, appHeight - margin)
         }
     }
-    // portrait = 上下分屏；dock 在左侧时（音乐条版面）x 从 dock 右缘起，dock 在底部时 dockWidth=0
+    // portrait = top/bottom split; with the dock on the left (music-strip layout) x starts at the dock's right edge;
+    // with the dock at the bottom dockWidth=0
     return if (portrait) {
         PaneBounds(dockWidth + margin, start, streamWidth - margin, appHeight - margin)
     } else {

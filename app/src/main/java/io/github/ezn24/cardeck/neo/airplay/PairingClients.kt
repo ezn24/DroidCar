@@ -2,16 +2,16 @@ package io.github.ezn24.cardeck.neo.airplay
 
 import java.io.IOException
 
-/** TLV8 请求/应答传输抽象：真实实现走 RTSP POST，测试用 mock 接收端直连。 */
+/** TLV8 request/response transport abstraction: the real implementation uses RTSP POST; tests connect a mock receiver directly. */
 fun interface TlvTransport {
-    /** 发送一个 TLV8 请求体，返回接收端的 TLV8 应答体。 */
+    /** Sends one TLV8 request body and returns the receiver's TLV8 response body. */
     fun exchange(
         path: String,
         body: ByteArray,
     ): ByteArray
 }
 
-/** 手机（控制器）长期身份：ed25519 密钥对 + 配对 ID，首次使用时生成。 */
+/** Long-term identity of the phone (controller): ed25519 key pair + pairing ID, generated on first use. */
 class ControllerIdentity(
     val pairingId: String,
     val privateKey: ByteArray,
@@ -19,17 +19,17 @@ class ControllerIdentity(
 )
 
 /**
- * AirPlay /pair-setup 客户端（M1/M3/M5）。
- * 参考接收端：固定码 SRP-6a（"Pair-Setup"/"3939"），之后在加密信封里交换长期 ed25519 公钥。
+ * AirPlay /pair-setup client (M1/M3/M5).
+ * Reference receiver: fixed-code SRP-6a ("Pair-Setup"/"3939"), then the long-term ed25519 public keys are exchanged inside an encrypted envelope.
  */
 class PairSetupClient(
     private val identity: ControllerIdentity,
     private val transport: TlvTransport,
     private val log: (String) -> Unit,
 ) {
-    /** 完成后接收端已保存我们的长期公钥；返回接收端静态身份（来自 M6，可选用）。 */
+    /** On completion the receiver has stored our long-term public key; returns the receiver's static identity (from M6, optional use). */
     fun run(): ReceiverIdentity? {
-        // M1: 请求 SRP 参数（Method=None + State=1，对照 catplay PairSetup::start）
+        // M1: request SRP parameters (Method=None + State=1; see catplay PairSetup::start)
         val m2 =
             Tlv8.decode(
                 transport.exchange(
@@ -42,13 +42,13 @@ class PairSetupClient(
                     ),
                 ),
             )
-        val salt = m2[Tlv8.TYPE_SALT] ?: throw IOException("pair-setup M2 缺少 salt")
-        val serverPublic = m2[Tlv8.TYPE_PUBLIC_KEY] ?: throw IOException("pair-setup M2 缺少 publicKey")
-        log("pair-setup: M2 收到 SRP 参数 salt=${salt.size}B B=${serverPublic.size}B")
+        val salt = m2[Tlv8.TYPE_SALT] ?: throw IOException("pair-setup M2 missing salt")
+        val serverPublic = m2[Tlv8.TYPE_PUBLIC_KEY] ?: throw IOException("pair-setup M2 missing publicKey")
+        log("pair-setup: M2 received SRP parameters salt=${salt.size}B B=${serverPublic.size}B")
 
-        // M3: 客户端公钥 A + 证明 M1
+        // M3: client public key A + proof M1
         val srp = Srp6aClient.start(salt, serverPublic)
-        val clientProof = srp.clientProof() ?: throw IOException("pair-setup: SRP B 非法")
+        val clientProof = srp.clientProof() ?: throw IOException("pair-setup: SRP B invalid")
         val m4 =
             Tlv8.decode(
                 transport.exchange(
@@ -62,12 +62,12 @@ class PairSetupClient(
                     ),
                 ),
             )
-        val serverProof = m4[Tlv8.TYPE_PROOF] ?: throw IOException("pair-setup M4 缺少 proof")
-        if (!srp.serverProofValid(serverProof)) throw IOException("pair-setup: 服务器证明校验失败")
-        val sessionKey = srp.sessionKey ?: throw IOException("pair-setup: 会话密钥缺失")
-        log("pair-setup: M4 SRP 互验通过")
+        val serverProof = m4[Tlv8.TYPE_PROOF] ?: throw IOException("pair-setup M4 missing proof")
+        if (!srp.serverProofValid(serverProof)) throw IOException("pair-setup: server proof verification failed")
+        val sessionKey = srp.sessionKey ?: throw IOException("pair-setup: session key missing")
+        log("pair-setup: M4 SRP mutual verification passed")
 
-        // M5: 加密信封提交长期公钥
+        // M5: submit the long-term public key in an encrypted envelope
         val encryptionKey =
             AirPlayCrypto.hkdfSha512(
                 sessionKey,
@@ -110,11 +110,11 @@ class PairSetupClient(
                 ),
             )
         if (m6[Tlv8.TYPE_STATE]?.firstOrNull()?.toInt() != 6) {
-            throw IOException("pair-setup M6 状态非 6：${m6[Tlv8.TYPE_ERROR]?.firstOrNull()}")
+            throw IOException("pair-setup M6 state is not 6: ${m6[Tlv8.TYPE_ERROR]?.firstOrNull()}")
         }
-        log("pair-setup: ✓ M6 完成，接收端已保存我们的长期公钥")
+        log("pair-setup: ✓ M6 done, receiver stored our long-term public key")
 
-        // 解析 M6 加密信封里的接收端身份（完整性校验）
+        // Parse the receiver identity in the M6 encrypted envelope (integrity check)
         val encrypted = m6[Tlv8.TYPE_ENCRYPTED_DATA] ?: return null
         val inner =
             Tlv8.decode(
@@ -136,8 +136,8 @@ class PairSetupClient(
                 receiverSignature,
             )
         log(
-            "pair-setup: 接收端身份 id=${receiverId.toString(Charsets.UTF_8)} " +
-                "pub=${receiverKey.toHexString().take(16)}… 签名校验=$valid",
+            "pair-setup: receiver identity id=${receiverId.toString(Charsets.UTF_8)} " +
+                "pub=${receiverKey.toHexString().take(16)}… signature valid=$valid",
         )
         return ReceiverIdentity(receiverId.toString(Charsets.UTF_8), receiverKey)
     }
@@ -149,8 +149,8 @@ class PairSetupClient(
 }
 
 /**
- * AirPlay /pair-verify 客户端（M1/M3）：每次会话的临时 X25519 + 长期 ed25519 签名，
- * 成功后得到控制通道的 ChaCha20 密钥。
+ * AirPlay /pair-verify client (M1/M3): per-session ephemeral X25519 + long-term ed25519 signature,
+ * yielding the control-channel ChaCha20 keys on success.
  */
 class PairVerifyClient(
     private val identity: ControllerIdentity,
@@ -164,7 +164,7 @@ class PairVerifyClient(
     )
 
     fun run(receiverStaticPublicKey: ByteArray? = null): ControlKeys {
-        // M1: 临时 X25519 公钥
+        // M1: ephemeral X25519 public key
         val ephemeral = AirPlayCrypto.x25519Generate()
         val m2 =
             Tlv8.decode(
@@ -178,8 +178,8 @@ class PairVerifyClient(
                     ),
                 ),
             )
-        val receiverEphemeral = m2[Tlv8.TYPE_PUBLIC_KEY] ?: throw IOException("pair-verify M2 缺少 publicKey")
-        val encrypted = m2[Tlv8.TYPE_ENCRYPTED_DATA] ?: throw IOException("pair-verify M2 缺少 encryptedData")
+        val receiverEphemeral = m2[Tlv8.TYPE_PUBLIC_KEY] ?: throw IOException("pair-verify M2 missing publicKey")
+        val encrypted = m2[Tlv8.TYPE_ENCRYPTED_DATA] ?: throw IOException("pair-verify M2 missing encryptedData")
 
         val shared = AirPlayCrypto.x25519Shared(ephemeral.privateKey, receiverEphemeral)
         val encryptionKey =
@@ -192,10 +192,10 @@ class PairVerifyClient(
             Tlv8.decode(
                 AirPlayCrypto.chachaOpen(encryptionKey, AirPlayCrypto.nonceLabel("PV-Msg02"), encrypted),
             )
-        val receiverId = inner[Tlv8.TYPE_IDENTIFIER] ?: throw IOException("pair-verify M2 信封缺少 identifier")
-        val receiverSignature = inner[Tlv8.TYPE_SIGNATURE] ?: throw IOException("pair-verify M2 信封缺少 signature")
+        val receiverId = inner[Tlv8.TYPE_IDENTIFIER] ?: throw IOException("pair-verify M2 envelope missing identifier")
+        val receiverSignature = inner[Tlv8.TYPE_SIGNATURE] ?: throw IOException("pair-verify M2 envelope missing signature")
 
-        // 用 mDNS/0x4301 提供的接收端静态公钥验证（有则验，无则跳过）
+        // Verify with the receiver static public key provided by mDNS/0x4301 (verify if present, skip otherwise)
         if (receiverStaticPublicKey != null) {
             val valid =
                 AirPlayCrypto.ed25519Verify(
@@ -203,10 +203,10 @@ class PairVerifyClient(
                     receiverEphemeral + receiverId + ephemeral.publicKey,
                     receiverSignature,
                 )
-            log("pair-verify: 接收端签名校验（对照 pk）=$valid")
+            log("pair-verify: receiver signature check (against pk)=$valid")
         }
 
-        // M3: 我们的长期签名
+        // M3: our long-term signature
         val identifierBytes = identity.pairingId.toByteArray(Charsets.UTF_8)
         val signature =
             AirPlayCrypto.ed25519Sign(
@@ -236,11 +236,11 @@ class PairVerifyClient(
                 ),
             )
         if (m4[Tlv8.TYPE_STATE]?.firstOrNull()?.toInt() != 4) {
-            throw IOException("pair-verify M4 状态非 4：${m4[Tlv8.TYPE_ERROR]?.firstOrNull()}")
+            throw IOException("pair-verify M4 state is not 4: ${m4[Tlv8.TYPE_ERROR]?.firstOrNull()}")
         }
-        log("pair-verify: ✓ 完成，派生控制通道密钥")
+        log("pair-verify: ✓ done, control-channel keys derived")
 
-        // 方向对照接收端实现：接收端 readKey="Control-Write-…"（即我们发出的方向）
+        // Direction as in the receiver implementation: receiver readKey="Control-Write-..." (the direction we send)
         val phoneWriteKey =
             AirPlayCrypto.hkdfSha512(
                 shared,

@@ -5,7 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 两个链路引擎通过直接交换输出字节完成握手与数据往返（无线程、无 I/O）。 */
+/** Two link engines complete the handshake and data round trip by directly exchanging output bytes (no threads, no I/O). */
 class Iap2LinkEngineTest {
     @Test
     fun handshakeReachesNormalOnBothSides() {
@@ -25,7 +25,7 @@ class Iap2LinkEngineTest {
         assertTrue(phone.peerSynchronization?.sessions?.any { it.id == Iap2LinkEngine.SESSION_CONTROL } == true)
     }
 
-    /** 初始序号可注入：首个 SYN 用它（真车传随机值，福特 SYNC+ 不认固定 99）。 */
+    /** The initial sequence number is injectable: the first SYN uses it (real cars pass a random value; Ford SYNC+ does not accept a fixed 99). */
     @Test
     fun initialSequenceIsUsedForFirstSyn() {
         val phone = Iap2LinkEngine(initialSequence = 200)
@@ -35,8 +35,8 @@ class Iap2LinkEngineTest {
     }
 
     /**
-     * 凯迪拉克 CT5 形态（上游 #27）：链路 NORMAL 后车机连续发 marker 求重协商。
-     * 手机回「marker + 新序号 SYN」，再回显车机的新 SYN（SYN|ACK），链路保持 NORMAL。
+     * Cadillac CT5 form (upstream #27): after the link is NORMAL the head unit sends consecutive markers asking for renegotiation.
+     * The phone replies "marker + new-sequence SYN", then echoes the head unit's new SYN (SYN|ACK); the link stays NORMAL.
      */
     @Test
     fun repeatedPeerMarkersInNormalTriggerRenegotiation() {
@@ -49,24 +49,24 @@ class Iap2LinkEngineTest {
 
         val t = tick()
         phone.feed(Iap2LinkEngine.MARKER, t)
-        assertTrue("单个 marker 不得触发重协商", phone.takeOutput().isEmpty())
+        assertTrue("A single marker must not trigger renegotiation", phone.takeOutput().isEmpty())
         phone.feed(Iap2LinkEngine.MARKER, t + 1_000)
         val out = phone.takeOutput()
-        assertArrayEquals("回应必须以 marker 开头", Iap2LinkEngine.MARKER, out.copyOfRange(0, 6))
+        assertArrayEquals("The reply must start with a marker", Iap2LinkEngine.MARKER, out.copyOfRange(0, 6))
         val syn = parseFrames(out).single()
-        assertTrue("必须是纯 SYN", syn.control and 0x80 != 0 && syn.control and 0x40 == 0)
-        if (before != null) assertTrue("重协商 SYN 必须用新序号", syn.sequence != before)
+        assertTrue("Must be a pure SYN", syn.control and 0x80 != 0 && syn.control and 0x40 == 0)
+        if (before != null) assertTrue("The renegotiation SYN must use a new sequence number", syn.sequence != before)
 
-        // 车机回自己的新 SYN → 手机回显 SYN|ACK，仍为 NORMAL
+        // The head unit replies with its own new SYN -> the phone echoes SYN|ACK, still NORMAL
         val carRestart = Iap2LinkEngine(initialSequence = 52)
         carRestart.start(0)
         phone.feed(carRestart.takeOutput(), t + 1_100)
         val echo = parseFrames(phone.takeOutput())
-        assertTrue("必须回显 SYN|ACK", echo.any { it.control and 0xC0 == 0xC0 && it.ack == 52 })
+        assertTrue("Must echo SYN|ACK", echo.any { it.control and 0xC0 == 0xC0 && it.ack == 52 })
         assertEquals(Iap2LinkEngine.State.NORMAL, phone.state)
     }
 
-    /** 未开启（隧道/测试台默认）时，NORMAL 下的 marker 一律丢弃，行为与旧版一致。 */
+    /** When not enabled (tunnel/test-bench default), a marker in NORMAL is always dropped, behavior identical to the old version. */
     @Test
     fun peerMarkersIgnoredWhenRenegotiationDisabled() {
         val phone = Iap2LinkEngine()
@@ -82,41 +82,41 @@ class Iap2LinkEngineTest {
     }
 
     /**
-     * 事件通道形态：车机只反复发 marker、一条同步包都不发（Honda HFT 2026-10-20 实测
-     * 60 秒 60 个 marker），说明它卡在探测态、在等**我们**的会话表。
-     * 已处于 NEGOTIATING 时 [Iap2LinkEngine.initiate] 必须仍能发出「marker + FF5A SYN」，
-     * 双方随即收敛到 NORMAL——这是切歌按键通路的入口。
+     * Event channel form: the head unit only repeatedly sends markers and not a single sync packet (Honda HFT measured 2026-10-20,
+     * 60 markers in 60 seconds), meaning it is stuck in probe state, waiting for **our** session table.
+     * When already NEGOTIATING, [Iap2LinkEngine.initiate] must still be able to emit "marker + FF5A SYN",
+     * after which both sides converge to NORMAL -- this is the entry of the track-skip key path.
      */
     @Test
     fun initiateFromNegotiatingSendsMarkerAndSynThenReachesNormal() {
         val phone = Iap2LinkEngine()
         val accessory = Iap2LinkEngine()
-        // 双方都是静默待命（只发 marker 不发起协商）
+        // Both sides are silently standing by (only sending markers, not starting negotiation)
         phone.enterNegotiating()
         accessory.enterNegotiating()
 
         phone.initiate(0)
         val out = phone.takeOutput()
-        assertArrayEquals("首帧必须是 marker", Iap2LinkEngine.MARKER, out.copyOfRange(0, 6))
+        assertArrayEquals("The first frame must be a marker", Iap2LinkEngine.MARKER, out.copyOfRange(0, 6))
         val frames = parseFrames(out)
-        assertEquals("marker 之后必须紧跟一条同步包", 1, frames.size)
-        assertTrue("同步包 control 必须带 SYN 位（0x80）", frames[0].control and 0x80 != 0)
+        assertEquals("The marker must be followed immediately by one sync packet", 1, frames.size)
+        assertTrue("The sync packet control must carry the SYN bit (0x80)", frames[0].control and 0x80 != 0)
 
-        // 车机侧收到「marker + 本表 SYN」→ 回 SYN|ACK（这就是日志里应当出现的推进）
+        // Head-unit side receives "marker + our-table SYN" -> replies SYN|ACK (this is the progress that should appear in the log)
         accessory.feed(out, tick())
-        assertEquals("车机侧收到我们的会话表后必须进入 NORMAL", Iap2LinkEngine.State.NORMAL, accessory.state)
+        assertEquals("The head-unit side must enter NORMAL after receiving our session table", Iap2LinkEngine.State.NORMAL, accessory.state)
         phone.feed(accessory.takeOutput(), tick())
-        assertEquals("实际 phone=${phone.state}", Iap2LinkEngine.State.NORMAL, phone.state)
+        assertEquals("Actual phone=${phone.state}", Iap2LinkEngine.State.NORMAL, phone.state)
         assertTrue(
-            "双方都必须采纳对方的会话表",
+            "Both sides must adopt the other's session table",
             phone.peerSynchronization != null && accessory.peerSynchronization != null,
         )
     }
 
     /**
-     * 轮次用尽后必须能停手：控制通道上无限 500ms 打点会把车机 CarPlay 栈刷懵，
-     * 所以上层按轮次重开、轮次用尽后调 [Iap2LinkEngine.stopNegotiationRetries]。
-     * 停手后不得再产出任何出站字节，状态保持 NEGOTIATING（等车机自己发 CSM）。
+     * Must be able to stop once rounds are exhausted: endless 500ms pings on the control channel would flood the head unit's CarPlay stack,
+     * so the upper layer reopens per round and calls [Iap2LinkEngine.stopNegotiationRetries] after rounds are exhausted.
+     * After stopping it must produce no further outbound bytes, and the state stays NEGOTIATING (waiting for the head unit to send CSM itself).
      */
     @Test
     fun stopNegotiationRetriesSilencesResends() {
@@ -126,11 +126,11 @@ class Iap2LinkEngineTest {
         phone.takeOutput()
 
         phone.advanceTime(1_000L)
-        assertTrue("未停手时必须仍在重发 marker/同步包", phone.takeOutput().isNotEmpty())
+        assertTrue("Before stopping it must still resend marker/sync packets", phone.takeOutput().isNotEmpty())
 
         phone.stopNegotiationRetries()
         phone.advanceTime(60_000L)
-        assertTrue("停手后不得再有任何出站字节", phone.takeOutput().isEmpty())
+        assertTrue("After stopping there must be no outbound bytes", phone.takeOutput().isEmpty())
         assertEquals(Iap2LinkEngine.State.NEGOTIATING, phone.state)
     }
 
@@ -167,7 +167,7 @@ class Iap2LinkEngineTest {
 
         val payload = Iap2Csm.encode(0x1D02)
         assertTrue(phone.sendControl(payload, 1))
-        // 截获 phone 输出的数据帧，重复喂给 accessory 两次
+        // Intercept the data frames the phone outputs and feed them to the accessory twice
         val dataFrame = phone.takeOutput()
         accessory.feed(dataFrame, 2)
         accessory.feed(dataFrame, 3)
@@ -185,7 +185,7 @@ class Iap2LinkEngineTest {
 
         val frames = (0 until 5).map { Iap2Csm.encode(0x5000 + it) }
         frames.forEach { assertTrue(phone.sendControl(it, 10)) }
-        // 窗口 2：只有前 2 帧立即发出，其余积压；ACK 后由 handleAcknowledgement 冲刷
+        // Window 2: only the first 2 frames go out immediately, the rest are queued; flushed by handleAcknowledgement after ACK
         var now = 11L
         while (pollControls(accessory).size < 5) {
             exchange(phone, accessory)
@@ -196,34 +196,34 @@ class Iap2LinkEngineTest {
         }
     }
 
-    // ---- 协商细节回归 ----
+    // ---- Negotiation detail regressions ----
 
     /**
-     * SYN-ACK 必须使用**新的**发送序号（对端按 `SYN.seq + 1` 校验）。
+     * SYN-ACK must use a **new** send sequence number (the peer validates against `SYN.seq + 1`).
      *
-     * 2026-10-19 BMW 87866 实车日志：我方 SYN 与 SYN-ACK 同为 seq=99，车机判为重复帧
-     * 丢弃，14 轮协商全部超时、133 条 SYN 未换回一条 ACK。catplay 用 `take_own_seq()`
-     * 消耗新序号，这里锁死该行为。
+     * 2026-10-19 BMW 87866 real-car log: our SYN and SYN-ACK both had seq=99, the head unit judged it a duplicate frame and
+     * dropped it; all 14 negotiation rounds timed out, 133 SYNs never got a single ACK back. catplay uses `take_own_seq()`
+     * to consume a new sequence number; this locks that behavior in.
      */
     @Test
     fun synAckUsesFreshSequenceNumber() {
         val phone = Iap2LinkEngine()
         phone.start(0)
-        phone.takeOutput() // marker + 我方 SYN（seq=99）
+        phone.takeOutput() // marker + our SYN (seq=99)
 
         phone.feed(synFrame(peerSequence = 161), 1)
         val frames = parseFrames(phone.takeOutput())
         val synAck = frames.single { it.control == 0xC0 }
 
-        assertEquals("ack 必须回显对端 SYN 序号", 161, synAck.ack)
-        assertEquals("SYN-ACK 序号必须比 SYN 大 1", 100, synAck.sequence)
+        assertEquals("ack must echo the peer's SYN sequence number", 161, synAck.ack)
+        assertEquals("SYN-ACK sequence number must be SYN's plus 1", 100, synAck.sequence)
     }
 
     /**
-     * 协商期间**每一条** SYN 都要回 SYN|ACK。
+     * **Every** SYN during negotiation must get a SYN|ACK.
      *
-     * BMW 每轮重试都用新序号重开协商；旧实现只在首次采纳时回显，其余只回裸 ACK，
-     * 车机永远走不完协商。catplay `on_recv_neg_host` 对每条 SYN 都发 SYN+ACK。
+     * BMW reopens negotiation with a new sequence number every retry round; the old implementation only echoed on first adoption and replied to the rest with bare ACKs,
+     * so the head unit could never finish negotiating. catplay `on_recv_neg_host` sends SYN+ACK for every SYN.
      */
     @Test
     fun everySynGetsASynAckReply() {
@@ -231,7 +231,7 @@ class Iap2LinkEngineTest {
         phone.start(0)
         phone.takeOutput()
 
-        // 车机连续三轮用不同序号重开协商（复刻日志 161 → 191 → 40）
+        // The head unit reopens negotiation three rounds in a row with different sequence numbers (replicating the log 161 -> 191 -> 40)
         val sequences = listOf(161, 191, 40)
         val replies = ArrayList<Pair<Int, Int>>() // (synAckSeq, ack)
         sequences.forEachIndexed { index, peerSeq ->
@@ -241,13 +241,13 @@ class Iap2LinkEngineTest {
                 .forEach { replies += it.sequence to it.ack }
         }
 
-        assertEquals("每条 SYN 都应有 SYN|ACK", sequences.size, replies.size)
+        assertEquals("Every SYN should get a SYN|ACK", sequences.size, replies.size)
         assertEquals(sequences, replies.map { it.second })
-        // 序号逐次递增（99 → 100 → 101 → 102）
+        // Sequence numbers increase one by one (99 -> 100 -> 101 -> 102)
         assertEquals(listOf(100, 101, 102), replies.map { it.first })
     }
 
-    /** 同一个 SYN 的字节级重发必须幂等：整对帧原样重放，不推进序号、不产生新序号。 */
+    /** A byte-level resend of the same SYN must be idempotent: the whole frame pair is replayed as-is, without advancing the sequence number or producing a new one. */
     @Test
     fun retransmittedSynKeepsTheSameEcho() {
         val phone = Iap2LinkEngine()
@@ -259,11 +259,11 @@ class Iap2LinkEngineTest {
         phone.feed(synFrame(peerSequence = 77), 2)
         val again = phone.takeOutput()
 
-        assertArrayEquals("重传同一 SYN 应原样重放", first, again)
+        assertArrayEquals("Retransmitting the same SYN should replay as-is", first, again)
         assertEquals(100, parseFrames(first).single { it.control == 0xC0 }.sequence)
     }
 
-    /** 裸 ACK 不能与已发出的 SYN|ACK 撞序号（BMW 会把同序号帧当重复丢弃）。 */
+    /** A bare ACK must not collide in sequence number with an already-sent SYN|ACK (BMW drops same-sequence frames as duplicates). */
     @Test
     fun ackSequenceNeverDuplicatesTheSynAck() {
         val phone = Iap2LinkEngine()
@@ -275,11 +275,11 @@ class Iap2LinkEngineTest {
             phone.feed(synFrame(peerSequence = peerSeq), (index + 1).toLong())
             emitted += parseFrames(phone.takeOutput()).map { it.sequence }
         }
-        assertEquals("序号必须严格递增且无重复", emitted.size, emitted.distinct().size)
+        assertEquals("Sequence numbers must be strictly increasing without duplicates", emitted.size, emitted.distinct().size)
         assertEquals(emitted.sorted(), emitted)
     }
 
-    // ---- 工具 ----
+    // ---- Utilities ----
 
     private class ParsedFrame(
         val control: Int,
@@ -288,7 +288,7 @@ class Iap2LinkEngineTest {
         val frameLength: Int,
     )
 
-    /** 解析一段输出里的所有 FF5A 帧（跳过前置 marker）。 */
+    /** Parses all FF5A frames in an output (skipping the leading marker). */
     private fun parseFrames(bytes: ByteArray): List<ParsedFrame> {
         val frames = ArrayList<ParsedFrame>()
         var offset = 0
@@ -304,13 +304,13 @@ class Iap2LinkEngineTest {
         return frames
     }
 
-    /** 解析一帧 FF5A（长度含 9 字节头 + 载荷 + 载荷校验和）。 */
+    /** Parses one FF5A frame (length includes the 9-byte header + payload + payload checksum). */
     private fun parseFrame(
         bytes: ByteArray,
         offset: Int,
     ): ParsedFrame {
         require(bytes[offset] == 0xFF.toByte() && bytes[offset + 1] == 0x5A.toByte()) {
-            "offset=$offset 不是 FF5A 帧头"
+            "offset=$offset is not an FF5A frame header"
         }
         val length = ((bytes[offset + 2].toInt() and 0xFF) shl 8) or (bytes[offset + 3].toInt() and 0xFF)
         return ParsedFrame(
@@ -322,18 +322,18 @@ class Iap2LinkEngineTest {
     }
 
     /**
-     * 构造车机侧的 SYN 帧（含 marker）。
+     * Builds a head-unit-side SYN frame (including the marker).
      *
-     * 帧头是 **9 字节**：`FF5A | u16 长度 | u8 控制 | u8 seq | u8 ack | u8 会话 | u8 头校验和`，
-     * 所以 seq 在帧内偏移 5、头校验和在偏移 8（不是 7——那一位是会话 ID）。
+     * The frame header is **9 bytes**: `FF5A | u16 length | u8 control | u8 seq | u8 ack | u8 session | u8 header checksum`,
+     * so seq is at in-frame offset 5 and the header checksum at offset 8 (not 7 -- that byte is the session ID).
      */
     private fun synFrame(peerSequence: Int): ByteArray {
         val engine = Iap2LinkEngine()
         engine.start(0)
         val raw = engine.takeOutput()
-        val synOffset = 6 // 前置 marker 6 字节
+        val synOffset = 6 // The leading marker is 6 bytes
         raw[synOffset + 5] = peerSequence.toByte()
-        // 头校验和 = 前 8 字节之和的补码
+        // Header checksum = complement of the sum of the first 8 bytes
         var sum = 0
         for (index in synOffset until synOffset + 8) sum += raw[index].toInt() and 0xFF
         raw[synOffset + 8] = (-sum and 0xFF).toByte()

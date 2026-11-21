@@ -14,8 +14,8 @@ import io.github.ezn24.cardeck.neo.launcher.settings.SettingsMenus
 import io.github.ezn24.cardeck.neo.launcher.settings.SettingsToastHost
 
 /**
- * 手机侧「车机设置」二级菜单页（M3 暗色）：
- * 列出五个设置入口，点击进入内容 Fragment——与车机 SettingsActivity 双栏共用同一套面板。
+ * Phone-side "car settings" second-level menu page (M3 dark):
+ * lists the five settings entries; tapping one opens a content Fragment, shared with the head-unit SettingsActivity two-pane layout.
  */
 class PhoneSettingsActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -63,13 +63,13 @@ class PhoneSettingsActivity : AppCompatActivity() {
 }
 
 /**
- * 手机侧设置内容宿主：承载与车机双栏共用的内容 Fragment。
+ * Phone-side settings content host: carries the content Fragment shared with the head-unit two-pane layout.
  */
 class SettingsContentActivity :
     AppCompatActivity(),
     SettingsToastHost {
     override fun onCreate(savedInstanceState: Bundle?) {
-        // 面板颜色走主题属性（panel*）：手机与车机（竖屏转发）都随手机深浅色与系统主色
+        // Panel colors come from theme attributes (panel*): phone and head unit (portrait forwarding) both follow the phone's light/dark mode and system accent
         super.onCreate(savedInstanceState)
         val menuId = intent.getIntExtra(EXTRA_MENU, SettingsMenus.DESKTOP)
         setContentView(R.layout.activity_settings_content)

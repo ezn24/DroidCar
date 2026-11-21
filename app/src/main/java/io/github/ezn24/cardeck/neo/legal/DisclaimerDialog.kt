@@ -16,29 +16,29 @@ import io.github.ezn24.cardeck.neo.SessionController
 import io.github.ezn24.cardeck.neo.ui.PanelWindow
 
 /**
- * 免责声明弹窗（两种形态）：
+ * Disclaimer dialog (two forms):
  *
- * - **首次启动（强制）**：不可取消（返回键/外部点击都无效），「接受」需同时满足
- *   10 秒倒计时与「已滑到底」；「放弃使用」立即可点（拒绝不该被阻拦）。
- * - **菜单重看（只读）**：无倒计时、无滚动要求，一个「关闭」按钮。
+ * - **First launch (mandatory)**: not cancelable (back key and outside taps are ignored); "Accept" requires both the
+ *   10-second countdown and "scrolled to the bottom"; "Decline" is tappable immediately (refusal must not be blocked).
+ * - **Menu re-read (read-only)**: no countdown, no scroll requirement, a single "Close" button.
  *
- * 倒计时用**绝对截止时间**（[SystemClock.elapsedRealtime]）而不是递减计数：
- * 屏幕旋转导致 Activity 重建时，把 deadline 透传回来即可继续剩余时间，
- * 不会从头再等 10 秒。
+ * The countdown uses an **absolute deadline** ([SystemClock.elapsedRealtime]) rather than a decrementing counter:
+ * when rotation recreates the Activity, passing the deadline back resumes the remaining time
+ * instead of waiting another 10 seconds from scratch.
  */
 object DisclaimerDialog {
-    /** 强制接受前的最短停留时间。 */
+    /** Minimum dwell time before mandatory acceptance. */
     const val COUNTDOWN_MS = 10_000L
 
     private const val WINDOW_HEIGHT_FRACTION = 0.78f
 
     /**
-     * 显示弹窗。
+     * Show the dialog.
      *
-     * @param requireAcceptance true=首次启动强制接受；false=菜单只读
-     * @param deadlineAt 倒计时截止的 elapsedRealtime（仅强制形态使用）
-     * @param onDecline 点「放弃使用」后的回调（仅强制形态）
-     * @param onDismiss 任何方式关闭后的回调（Activity 用来清引用）
+     * @param requireAcceptance true = mandatory acceptance on first launch; false = read-only from the menu
+     * @param deadlineAt elapsedRealtime at which the countdown ends (mandatory form only)
+     * @param onDecline callback after tapping "Decline" (mandatory form only)
+     * @param onDismiss callback after dismissal by any means (the Activity uses it to drop references)
      */
     fun show(
         activity: Activity,
@@ -73,7 +73,7 @@ object DisclaimerDialog {
                 .setView(view)
                 .create()
 
-        // 强制形态：返回键与外部点击都不得关闭
+        // Mandatory form: neither the back key nor outside taps may dismiss it
         dialog.setCancelable(!requireAcceptance)
         dialog.setCanceledOnTouchOutside(!requireAcceptance)
 
@@ -85,14 +85,15 @@ object DisclaimerDialog {
             handler = mainHandler
             var scrolledToBottom = false
             SessionController.appendLog(
-                "DISCLAIMER: 弹出强制声明（倒计时 ${COUNTDOWN_MS / 1000} 秒 + 需滑到底）" +
+                "DISCLAIMER: mandatory notice shown (countdown ${COUNTDOWN_MS / 1000} s + must scroll to the bottom)" +
                     " remain=${(deadlineAt - SystemClock.elapsedRealtime()).coerceAtLeast(0L)}ms",
             )
 
             fun refresh() {
-                // 布局未完成时 ScrollView 高宽都是 0，"不可滚动" 会被当成 "内容不足一屏"，
-                // 从而把 scrolledToBottom 永久置位（真机上表现为不用滚动就能接受）。
-                // 必须等布局完成后再判：height>0 才算数。
+                // Before layout completes the ScrollView size is 0, so "not scrollable" would be taken as "content shorter than one
+                // screen",
+                // permanently setting scrolledToBottom (on a real device: accepting without scrolling).
+                // Must wait for layout to finish: only height>0 counts.
                 val layoutReady = scroll.height > 0
                 val viewport = (scroll.height - scroll.paddingTop - scroll.paddingBottom).coerceAtLeast(0)
                 val contentScrollable = layoutReady && sections.height > viewport
@@ -136,7 +137,7 @@ object DisclaimerDialog {
             mainHandler.post(looping)
 
             scroll.setOnScrollChangeListener { _, _, _, _, _ -> refresh() }
-            // 首帧布局完成后再判一次（此刻才知道内容是否超过一屏）
+            // Decide again after the first layout (only now is it known whether content exceeds one screen)
             scroll.post { refresh() }
 
             btnAccept.setOnClickListener {
@@ -152,21 +153,22 @@ object DisclaimerDialog {
             btnAccept.setOnClickListener { dialog.dismiss() }
         }
 
-        // 统一收尾：停定时器 + 通知调用方清引用（此前调用方再设一次监听会覆盖这里的清理）
+        // Unified teardown: stop the timer + tell the caller to drop references (setting another listener in the caller used to override
+        // this cleanup)
         dialog.setOnDismissListener {
             ticker?.let { handler?.removeCallbacks(it) }
             onDismiss?.invoke()
         }
 
         dialog.setOnShowListener {
-            // 宽度 92%、高度 78% 屏高；登记后旋转时由 Activity 调 resizeShowing 重算
+            // Width 92%, height 78% of the screen; once registered, the Activity calls resizeShowing on rotation to recompute
             PanelWindow.apply(dialog, activity, WINDOW_HEIGHT_FRACTION)
         }
         dialog.show()
         return dialog
     }
 
-    /** 逐节渲染：标题加粗 + 正文，节间留白。 */
+    /** Render section by section: bold title + body, spacing between sections. */
     private fun renderSections(
         activity: Activity,
         container: LinearLayout,

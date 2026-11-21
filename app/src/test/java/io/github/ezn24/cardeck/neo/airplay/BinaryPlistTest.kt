@@ -7,7 +7,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 import java.util.Base64
 
-/** 用 macOS plutil 生成的真实 bplist00 向量验证解析器。 */
+/** Verifies the parser against real bplist00 vectors generated with macOS plutil. */
 class BinaryPlistTest {
     private val vector =
         Base64.getDecoder().decode(
@@ -77,8 +77,8 @@ class BinaryPlistTest {
     }
 
     /**
-     * 整数宽度必须按**有符号**范围选。端口号常落在 32768..65535，按无符号阈值写成
-     * 2 字节时 Apple 端按 int16 读成负数（35449 → -30087），接收端会拒绝或绑错端口。
+     * Integer width must be chosen by the **signed** range. Port numbers often fall in 32768..65535; writing them with an unsigned threshold as
+     * 2 bytes makes Apple read them as int16 negatives (35449 -> -30087), so the receiver rejects the plist or binds the wrong port.
      */
     @Test
     fun encodeDecodeRoundTripsPortRangeIntegers() {
@@ -98,7 +98,7 @@ class BinaryPlistTest {
 
     @Test
     fun parsesHandCraftedMinimalPlist() {
-        // 最小 bplist：唯一对象 true @8，offset 表 @9（1 字节 = 0x08），尾部 trailer
+        // Minimal bplist: single object true @8, offset table @9 (1 byte = 0x08), trailing trailer
         val minimal =
             byteArrayOf(
                 0x62,
@@ -110,7 +110,7 @@ class BinaryPlistTest {
                 0x30,
                 0x30, // bplist00
                 0x09, // object #0 = true
-                0x08, // offset 表：object#0 在偏移 8
+                0x08, // offset table: object#0 at offset 8
                 0,
                 0,
                 0,

@@ -4,17 +4,17 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * 扩展长度（0x…F + int 对象）必须按无符号解读。
+ * Extended length (0x...F + int object) must be read as unsigned.
  *
- * 实测来源（2026-10-20）：DiPlay 以 iAPSendMessage 信封下发 0x5000，data 长 182B
- * （0xB6）——旧实现 readSigned 读成 -74，copyOfRange 抛 `IllegalArgumentException:
- * 51 > -23`，整条命令被丢；≥128 的长度全部中招。
+ * Measured source (2026-10-20): DiPlay sends 0x5000 in an iAPSendMessage envelope, data length 182B
+ * (0xB6) -- the old readSigned read it as -74 and copyOfRange threw `IllegalArgumentException:
+ * 51 > -23`, dropping the whole command; every length >= 128 was affected.
  */
 class BplistExtendedLengthTest {
     @Test
     fun extendedDataLengthAbove127Parses() {
         val data = ByteArray(200) { (it and 0xFF).toByte() }
-        // 手工编码：{"data": <200B>}（规范布局：扩展长度 0x4F 0x10 0xC8）
+        // Hand-encoded: {"data": <200B>} (canonical layout: extended length 0x4F 0x10 0xC8)
         val objects = ArrayList<ByteArray>()
         objects.add(byteArrayOf(0xD1.toByte(), 1, 2)) // root dict(1)
         objects.add(byteArrayOf(0x54.toByte()) + "data".toByteArray()) // 1
@@ -55,7 +55,7 @@ class BplistExtendedLengthTest {
         var body = "bplist00".toByteArray()
         body += objects[0]
         val table = body.size
-        body += byteArrayOf(8) // 偏移表：1 对象
+        body += byteArrayOf(8) // offset table: 1 object
         val trailer = ByteArray(32)
         trailer[6] = 1
         trailer[7] = 1

@@ -8,36 +8,36 @@ import java.io.FileDescriptor
 import java.net.Socket
 
 /**
- * CarPlay 长连接的 TCP 对端健康检查（对照 DiPlay `TcpLiveness`，2026-10-21 版本）。
+ * TCP peer health check for long-lived CarPlay connections (follows DiPlay `TcpLiveness`, 2026-10-21 version).
  *
- * 为什么必须显式设置：Android 内核默认 keepalive 是 **两小时**才开始探测。车机熄火 /
- * 手机走出热点范围时链路常**不发 RST**（Wi-Fi 直接消失），于是控制通道的读线程会挂在
- * `read()` 上直到系统超时——画面冻结、看门狗不触发，用户只能手动断开重连。
+ * Why it must be set explicitly: the Android kernel default keepalive only starts probing after **two hours**. When the car is
+ * switched off / the phone leaves hotspot range the link often **sends no RST** (WiFi just vanishes), so the control channel reader
+ * hangs in `read()` until a system timeout: frozen picture, watchdog never fires, the user must disconnect and reconnect by hand.
  *
- * 取值与 DiPlay 一致：空闲 10s 起探测、每 3s 一次、连续 3 次无响应判定对端死亡
- * （合计 ~19s），再用 `TCP_USER_TIMEOUT` 给「已发出未确认的数据」设 20s 上限。
- * 19s 这个量级刻意大于车机的 15s AirPlay 看门狗，避免我们比车机更早判死正常会话。
+ * Values match DiPlay: start probing after 10s idle, every 3s, 3 unanswered probes declare the peer dead
+ * (~19s total), and `TCP_USER_TIMEOUT` caps "sent but unacknowledged data" at 20s.
+ * 19s is deliberately above the head unit's 15s AirPlay watchdog so we never declare a healthy session dead before the head unit does.
  *
- * **API 差异（踩过）**：`ParcelFileDescriptor.fromSocket` 在 API 29 之前返回的是
- * socket **自身** fd 的包装，close/finalize 会把原 socket 一起关掉。所以 29+ 才用它
- * 拿副本；26~28 改为反射 `Socket.getFileDescriptor$()` 直接对原 fd 设置（该方法在
- * Android 9 属 light greylist，任意 targetSdk 可调用）；API 25 及以下没有公开的
- * `setsockoptInt`，只记一行日志。
+ * **API difference (hit before)**: before API 29 `ParcelFileDescriptor.fromSocket` returns a wrapper around the
+ * socket's **own** fd, and close/finalize closes the original socket too. So it is only used for a dup on 29+;
+ * 26~28 reflect `Socket.getFileDescriptor$()` and set options on the original fd (light greylist on
+ * Android 9, callable at any targetSdk); API 25 and below have no public
+ * `setsockoptInt`, so we only log a line.
  */
 object TcpLiveness {
     private const val TCP_KEEPIDLE = 4
     private const val TCP_KEEPINTVL = 5
     private const val TCP_KEEPCNT = 6
 
-    /** 与 DiPlay 相同的默认值（秒 / 次数 / 毫秒）。 */
+    /** Same defaults as DiPlay (seconds / count / milliseconds). */
     private const val KEEP_IDLE_SECONDS = 10
     private const val KEEP_INTERVAL_SECONDS = 3
     private const val KEEP_COUNT = 3
     private const val USER_TIMEOUT_MILLIS = 20_000
 
     /**
-     * 为长连接 socket 打开并调优 keepalive。失败只记日志、不抛——车机可能不需要它，
-     * 但绝不能因为设置失败而挡住连接。
+     * Enable and tune keepalive on a long-lived socket. Failures are only logged, never thrown: the head unit may not need it,
+     * but a failed setting must never block the connection.
      */
     fun configure(
         socket: Socket,
@@ -46,7 +46,7 @@ object TcpLiveness {
     ) {
         runCatching { socket.keepAlive = true }
         if (Build.VERSION.SDK_INT < 26) {
-            log("TCP: $label 无法调优 keepalive（API ${Build.VERSION.SDK_INT} < 26）")
+            log("TCP: $label cannot tune keepalive (API ${Build.VERSION.SDK_INT} < 26)")
             return
         }
         try {
@@ -62,12 +62,12 @@ object TcpLiveness {
                 tune(fd)
             }
             log(
-                "TCP: $label keepalive 已启用" +
-                    "（idle=${KEEP_IDLE_SECONDS}s interval=${KEEP_INTERVAL_SECONDS}s count=$KEEP_COUNT" +
-                    " userTimeout=${USER_TIMEOUT_MILLIS}ms）",
+                "TCP: $label keepalive enabled" +
+                    " (idle=${KEEP_IDLE_SECONDS}s interval=${KEEP_INTERVAL_SECONDS}s count=$KEEP_COUNT" +
+                    " userTimeout=${USER_TIMEOUT_MILLIS}ms)",
             )
         } catch (error: Exception) {
-            log("TCP: $label keepalive 调优失败（${error.javaClass.simpleName}: ${error.message}）")
+            log("TCP: $label keepalive tuning failed (${error.javaClass.simpleName}: ${error.message})")
         }
     }
 

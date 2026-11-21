@@ -7,18 +7,18 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 
 /**
- * 调试桥的互联网通道选择器：跟踪可用的蜂窝网络作为**兜底**。
+ * Internet channel selector for the debug bridge: tracks an available cellular network as a **fallback**.
  *
- * 为什么需要它（2026-10-21 DiPlay 实车会话定谳）：加入车机热点用的是
- * `WifiNetworkSpecifier` + 进程绑定网络——会话期间**本进程所有默认 socket 都路由到
- * 车机热点**，而热点没有互联网，调试桥的 WebSocket 在「加入热点」那一毫秒即断。
- * 多网络 socket 是 Android 的标准解法：从蜂窝 `Network.socketFactory` 建 socket、
- * DNS 也走该网络，与进程默认路由解耦，车机会话期间照常收日志。
+ * Why it exists (settled in the 2026-10-21 DiPlay real-car session): the head unit hotspot is joined with
+ * `WifiNetworkSpecifier` + a process-bound network, so during a session **all default sockets of this process are routed to
+ * the head unit hotspot**, which has no internet, and the debug bridge WebSocket drops the very millisecond the hotspot is joined.
+ * Multi-network sockets are the standard Android solution: build sockets from the cellular `Network.socketFactory` and
+ * resolve DNS through that network too, decoupled from the process default route, so logs keep flowing during a car session.
  *
- * 选择策略见 [current]：默认网络已验证（正常 WiFi/蜂窝日常态）→ 走默认；
- * 未验证（车机热点）→ 蜂窝。跟踪蜂窝但不跟踪 WiFi 的原因：车机热点这类
- * specifier 网络同样可能上报 NET_CAPABILITY_INTERNET（未经过验证），
- * 按「WiFi 且有 INTERNET」挑会正好选中车机热点。
+ * Selection policy, see [current]: default network validated (normal WiFi/cellular everyday state) -> use default;
+ * not validated (head unit hotspot) -> cellular. Cellular is tracked but WiFi is not because specifier networks such as the
+ * head unit hotspot may also report NET_CAPABILITY_INTERNET (without validation), so
+ * picking "WiFi with INTERNET" would select exactly the head unit hotspot.
  */
 class InternetRoute(
     context: Context,
@@ -55,20 +55,20 @@ class InternetRoute(
         cellular = null
     }
 
-    /** 当前最优先的互联网通道；null = 进程默认网络可用，直接走系统默认路由。
+    /** The currently preferred internet channel; null = the process default network is usable, use the system default route directly.
      *
-     *  默认网络带 VALIDATED（真通互联网，如家里/公司 WiFi）就优先它——无条件走
-     *  蜂窝反而更差：室内 WiFi 环境蜂窝信号弱，15MB APK 实测中途断流
-     * （unexpected end of stream，2026-10-21）。车机会话期间进程默认网络是
-     *  车机热点（无互联网、不 VALIDATED），此时才退蜂窝。
-     *  **但 VALIDATED 是缓存判定 ≠ 当前可达**（2026-10-22 实测：测试台热点无上行
-     *  互联网却仍标 VALIDATED，重连每轮 ENETUNREACH 且永不换路）——默认网络近期
-     *  连接失败过（[noteFailure]）即改走蜂窝；成功（[noteSuccess]）或默认网络
-     *  更换（netId 变化，如会话结束解绑）时复位判定。 */
+     *  A default network with VALIDATED (really reaches the internet, e.g. home/office WiFi) is preferred: going cellular
+     *  unconditionally is worse, since indoors the cellular signal is weak and a 15MB APK dropped mid-way in testing
+     *  (unexpected end of stream, 2026-10-21). During a car session the process default network is the
+     *  head unit hotspot (no internet, not VALIDATED), and only then do we fall back to cellular.
+     *  **But VALIDATED is a cached verdict, not current reachability** (2026-10-22 observed: the bench hotspot has no uplink
+     *  internet yet is still marked VALIDATED, every reconnect round hit ENETUNREACH and never switched route): if the default
+     *  network failed recently ([noteFailure]) go cellular instead; the verdict resets on success ([noteSuccess]) or when the
+     *  default network changes (netId changes, e.g. unbinding when a session ends). */
     fun current(): Network? {
         val active = cm.activeNetwork ?: return cellular
-        // toString() 即 netId 的十进制串（公开途径拿网络身份）：默认网络更换
-        // （会话结束解绑/切网）即视为新网络，失败判定复位
+        // toString() is the decimal netId string (a public way to get the network identity): a default network change
+        // (unbinding at session end / network switch) counts as a new network and resets the failure verdict
         val netKey = active.toString()
         if (netKey != lastActiveNetKey) {
             lastActiveNetKey = netKey
@@ -80,12 +80,12 @@ class InternetRoute(
         return null
     }
 
-    /** 一次走默认网络的连接失败：连续失败即换蜂窝，直到网络变化或成功复位。 */
+    /** One connection failure on the default network: consecutive failures switch to cellular until the network changes or a success resets it. */
     fun noteFailure(usedDefaultNetwork: Boolean) {
         if (usedDefaultNetwork) defaultFailStreak++
     }
 
-    /** 走默认网络的连接成功：清除失败判定，恢复优先默认的快速路径。 */
+    /** A connection on the default network succeeded: clear the failure verdict and restore the fast path that prefers the default. */
     fun noteSuccess(usedDefaultNetwork: Boolean) {
         if (usedDefaultNetwork) defaultFailStreak = 0
     }

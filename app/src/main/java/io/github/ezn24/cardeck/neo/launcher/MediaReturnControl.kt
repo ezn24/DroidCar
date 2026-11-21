@@ -6,7 +6,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import io.github.ezn24.cardeck.neo.render.OverlayCard
 
-/** 浮动返回键覆盖在完整媒体画面上，不占用虚拟屏高度。 */
+/** A floating back button overlaid on the full media picture; it takes no virtual display height. */
 object MediaReturnControl {
     private val bitmap by lazy {
         Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).also {

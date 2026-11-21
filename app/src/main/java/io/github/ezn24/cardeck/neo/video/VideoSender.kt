@@ -8,6 +8,7 @@ import io.github.ezn24.cardeck.neo.airplay.AirPlayCrypto
 import io.github.ezn24.cardeck.neo.airplay.BinaryPlist
 import io.github.ezn24.cardeck.neo.airplay.StreamFrameCipher
 import io.github.ezn24.cardeck.neo.bt.AdapterMode
+import io.github.ezn24.cardeck.neo.net.CarNetwork
 import io.github.ezn24.cardeck.neo.net.TcpLiveness
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
@@ -15,52 +16,61 @@ import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * CarPlay 主屏视频发送端（Phase 2-C2）。
+ * CarPlay main-screen video sender (Phase 2-C2).
  *
- * 线格式（对照 DiPlay ScreenStream.kt）：
- *  - 每条消息 = 128 字节头 + body；头部 = [0..3] u32LE body 长度、[4] opcode、
- *    [8..15] NTP 32.32 LE 发送时间；整头作帧加密 AAD，其余字节为零
- *  - opcode 1 = VideoConfig：明文 avcC 记录（looksLikeAvcC 判定）
- *  - opcode 0 = VideoFrame：ChaCha20-Poly1305 密封的「4 字节 BE 长度前缀 NAL 序列」，
- *    nonce = nonce64(帧计数)，计数按帧顺序从 0 递增
+ * Wire format (per DiPlay ScreenStream.kt):
+ *  - Every message = 128-byte header + body; header = [0..3] u32LE body length, [4] opcode,
+ *    [8..15] NTP 32.32 LE send time; the whole header is the frame-encryption AAD, the other bytes are zero
+ *  - opcode 1 = VideoConfig: plaintext avcC record (recognized by looksLikeAvcC)
+ *  - opcode 0 = VideoFrame: ChaCha20-Poly1305 sealed "NAL sequence with 4-byte BE length prefixes",
+ *    nonce = nonce64(frame counter), the counter increments from 0 in frame order
  *
- * 视频源：MediaCodec Surface 输入（H.264 硬编码），内容由画面源渲染
- * （隐形屏模式的 DualDisplayComposer 输入 Surface）。
+ * Video source: MediaCodec Surface input (H.264 hardware encode), content rendered by the picture source
+ * (the input Surface of DualDisplayComposer in invisible-display mode).
  */
 class VideoSender(
     private val host: String,
     private val dataPort: Int,
     /**
-     * 帧加密方式（catplay `ScreenFrameCodec` 三种形态）：
-     *  - ChaCha：已配对（pair-verify 派生流密钥）
-     *  - AesCtr：未配对会话（`et=NONE`，AES-128-CTR + 全零会话密钥）
+     * Frame encryption (the three forms of catplay `ScreenFrameCodec`):
+     *  - ChaCha: paired (stream key derived by pair-verify)
+     *  - AesCtr: unpaired session (`et=NONE`, AES-128-CTR + all-zero session key)
      */
     private val frameCipher: StreamFrameCipher,
-    /** H.264 4:2:0 要求偶数尺寸——奇数高度会让编码器在首帧输入时进错误态（125% 缩放实测踩坑）。 */
+    /**
+     * H.264 4:2:0 requires even dimensions: an odd height puts the encoder into an error state on the first input frame
+     * (hit with 125% scaling).
+     */
     width: Int,
     height: Int,
-    /** 目标帧率（30/60）：编码器元数据 + 60fps 提码率；实际节奏由合成器驱动。 */
+    /** Target frame rate (30/60): encoder metadata + 60fps raises the bitrate; the actual pace is driven by the composer. */
     private val targetFps: Int = 30,
     private val log: (String) -> Unit,
-    /** 推流自然结束（对端断开等）时回调——CarPlay 会话真实结束的信号。 */
-    /** 推流结束回调；参数 = 是否由对端（车机/网络）断开，false 表示是本机主动 [stop]。 */
+    /** Called when streaming ends naturally (peer disconnect etc.): the signal that the CarPlay session really ended. */
+    /** Stream-ended callback; parameter = whether the peer (car/network) disconnected, false means a local [stop]. */
     private val onEnded: ((byPeer: Boolean) -> Unit)? = null,
     /**
-     * 屏幕流内 keepAlive 帧是否携带统计体（车机 /info 的 `keepAliveSendStatsAsBody`）。
-     * 奥迪 MMI 3315 声明 true → opcode=5 + bplist 统计体；否则 opcode=2 空帧。
-     * 真 iPhone/catplay 在视频持续推流时**仍然每秒发一次**——它不是视频流量的备份，
-     * 而是接收端屏幕上独立的存活信号（2026-10-19 奥迪 3315 两轮实测：缺它时
-     * RECORD 后 10.2s 整轮被 reset，视频/feedback/事件通道全都健康）。
+     * Whether the in-stream keepAlive frame carries a stats body (the car's `/info` `keepAliveSendStatsAsBody`).
+     * Audi MMI 3315 declares true -> opcode=5 + bplist stats body; otherwise opcode=2 empty frame.
+     * A real iPhone/catplay **still sends one every second** while video streams: it is not a backup for video traffic
+     * but an independent liveness signal on the receiver's screen (2026-10-19 Audi 3315, two rounds: without it
+     * the whole round was reset 10.2s after RECORD while video/feedback/event channels were all healthy).
      */
     private val keepAliveWithStats: Boolean = false,
-    /** 「清晰优先」：请求 H.264 High profile（编码器拒绝时自动退回，见 [start]）。转接盒恒 Baseline。 */
+    /**
+     * "Clarity first": request H.264 High profile (falls back automatically if the encoder refuses, see [start]).
+     * Adapter mode is always Baseline.
+     */
     private val clarityFirst: Boolean = false,
-    /** 日志用：本次会话的分辨率缩放百分比。 */
+    /** For logs: resolution scale percentage of this session. */
     private val scalePercent: Int = 100,
-    /** 接收端声明并接受 HEVC（SetupInfo.hevc）且用户开了 HEVC：改用 H.265 编码。转接盒恒 H.264。 */
+    /**
+     * The receiver declared and accepted HEVC (SetupInfo.hevc) and the user enabled HEVC: encode with H.265. Adapter
+     * mode is always H.264.
+     */
     hevc: Boolean = false,
 ) {
-    /** 实际使用 HEVC（编码器不可用时退回 H.264 会改为 false）。 */
+    /** HEVC actually in use (becomes false when the encoder is unavailable and we fall back to H.264). */
     @Volatile
     private var useHevc = hevc && !AdapterMode.active
 
@@ -84,19 +94,19 @@ class VideoSender(
     private var lastConfigMessage: ByteArray? = null
     private var rePrimeDropped = 0
 
-    /** AES-CTR 密钥流实例：状态必须跨帧连续（每帧新建会导致对端解出乱码）。 */
+    /** AES-CTR keystream instance: state must continue across frames (a fresh one per frame makes the peer decrypt garbage). */
     private val aesStream: AirPlayCrypto.Aes128CtrStream? =
         (frameCipher as? StreamFrameCipher.AesCtr)?.let { AirPlayCrypto.Aes128CtrStream(it.key, it.iv) }
 
-    /** 上一次屏幕流 keepAlive 的时刻（uptimeMillis；0 = 尚未发过）。 */
+    /** Time of the last in-stream keepAlive (uptimeMillis; 0 = never sent). */
     private var lastKeepAliveAt = 0L
 
-    /** 两次 keepAlive 之间的帧数/字节数（统计体用，catplay ScreenSenderStats 同义）。 */
+    /** Frames/bytes between two keepAlives (for the stats body, same meaning as catplay ScreenSenderStats). */
     private var framesSinceKeepAlive = 0
     private var bytesSinceKeepAlive = 0L
     private var keepAliveCount = 0L
 
-    /** 日志统计窗口（两条 keepAlive 日志之间的累计）。 */
+    /** Log statistics window (accumulated between two keepAlive log lines). */
     private var statWindowFrames = 0L
     private var statWindowBytes = 0L
     private var statWindowStartAt = 0L
@@ -105,47 +115,52 @@ class VideoSender(
     private var framesSent = 0L
     private var keyFramesSent = 0L
 
-    /** 推流是否活跃（静默降噪守卫判断用：start 失败时保持 false）。 */
+    /** Whether streaming is active (used by the silent log-noise guard: stays false when start fails). */
     val isRunning: Boolean get() = running.get()
 
-    /** 已发送帧总数（英雄卡实时帧率 = 1s 轮询取差值）。 */
+    /** Total frames sent (hero-card live frame rate = difference over a 1s poll). */
     val framesSentTotal: Long get() = framesSent
 
     /**
-     * 提前建立屏幕数据端口 TCP 连接（幂等）。
+     * Establishes the screen data-port TCP connection early (idempotent).
      *
-     * 车机看门狗（2026-10-17 奥迪实测）：屏幕流 SETUP 之后 ~2s 内数据端口必须连上，
-     * 否则直接 reset 控制通道拆掉整轮会话。音频 SETUP 本身要 ~2.1s，若排在它后面，
-     * 端口连接必然迟到——所以协商音频前先调本方法。catplay 亦然（视频 SETUP 后立即
-     * finish_tx 连流，再协商音频）。
+     * Head-unit watchdog (Audi field test 2026-10-17): after the screen-stream SETUP the data port must be connected within ~2s,
+     * otherwise the control channel is reset and the whole session torn down. The audio SETUP itself takes ~2.1s; if it came
+     * first the port connection would necessarily be late, so call this before negotiating audio. catplay does the same
+     * (finish_tx connects the stream right after the video SETUP, then negotiates audio).
      */
     fun openDataPort(): Boolean {
         val existing = socket
         if (existing != null && !existing.isClosed) return true
         return try {
-            val client = Socket()
-            // 发送缓冲限到 256KB（connect 前设置才影响窗口协商）：内核默认会自动调到数 MB，
-            // WiFi 吞吐一掉帧就在缓冲里排队，12Mbps 下 1MB ≈ 0.7s 延迟、恢复时又一口气涌出
-            // （「延迟 + 时不时卡」）。缓冲小时写入早阻塞，合成器那端会跳过来不及编的帧，
-            // 画面保持新鲜——交互场景宁可丢帧不可积压。
+            val client = Socket().also { CarNetwork.bind(it, "video data port") }
+            // Cap the send buffer at 256KB (it must be set before connect to affect window negotiation): the kernel default auto-tunes
+            // to several MB, so when WiFi throughput dips frames queue in the buffer, 1MB at 12Mbps is ~0.7s of latency and
+            // then floods out on recovery ("latency + occasional stutter"). With a small buffer writes block early, the composer
+            // skips frames the encoder cannot keep up with and the picture stays fresh: for interaction, dropping
+            // frames beats building a backlog.
             runCatching { client.sendBufferSize = SEND_BUFFER_BYTES }
             client.connect(InetSocketAddress(host, dataPort), 5_000)
             client.tcpNoDelay = true
-            // 推流是长连接：车机熄火/走出热点时链路常不发 RST，写入会阻塞在满窗口上，
-            // 编码器线程随之卡死（表现为「画面停在最后一帧」）。
-            TcpLiveness.configure(client, "视频数据口", log)
+            // Streaming is a long-lived connection: when the car shuts down or the phone leaves the hotspot the link
+            // often sends no RST, and writes
+            // block on a full window, stalling the encoder thread (seen as "picture stuck on the last frame").
+            TcpLiveness.configure(client, "video data port", log)
             socket = client
-            log("VIDEO: 数据端口已连通 $host:$dataPort sndbuf=${runCatching { client.sendBufferSize }.getOrNull()}（等 RECORD 后启动编码器）")
+            log(
+                "VIDEO: data port connected $host:$dataPort " +
+                    "sndbuf=${runCatching { client.sendBufferSize }.getOrNull()} (encoder starts after RECORD)",
+            )
             true
         } catch (error: Exception) {
-            log("VIDEO: 数据端口连接失败 - ${error.message}")
+            log("VIDEO: data port connection failed - ${error.message}")
             false
         }
     }
 
     /**
-     * 启动编码与推流。编码器输入 Surface 通过 [onSurfaceReady] 交给调用方渲染
-     * （隐形屏模式下由 DualDisplayComposer 的合成画布填充）。
+     * Starts encoding and streaming. The encoder input Surface is handed to the caller via [onSurfaceReady] for rendering
+     * (in invisible-display mode filled by the composition canvas of DualDisplayComposer).
      */
     fun start(onSurfaceReady: (Surface) -> Unit): Boolean {
         if (running.get()) return true
@@ -155,13 +170,13 @@ class VideoSender(
                 return false
             }
             val bitrate = encoderBitrate(width, height, targetFps)
-            log("VIDEO: 启动编码器 ${width}x$height@$targetFps ${bitrate / 1_000_000}Mbps（端口已连通）")
+            log("VIDEO: starting encoder ${width}x$height@$targetFps ${bitrate / 1_000_000}Mbps (port connected)")
 
-            // 依次尝试：[High（清晰优先）+ level 4.0] → [level 4.0] → [全自动]。
-            // 固定 level 4.0（SPS level_idc=40，真 iPhone 同款流形态）：不固定时编码器按
-            // 「分辨率+帧率」自动选，30fps 下 1412x654 落入 level 3.2——奥迪 DELPHI 解码器对该
-            // level 静默不渲染（2026-10-22 奥迪 0628 真机日志）。个别编码器不接受 profile/level
-            // 指定（configure 抛异常=视频全灭），故逐级降级。
+            // Tried in order: [High (clarity first) + level 4.0] -> [level 4.0] -> [fully automatic].
+            // Level 4.0 is fixed (SPS level_idc=40, the same stream shape as a real iPhone): when not fixed the encoder picks from
+            // "resolution + frame rate", and at 30fps 1412x654 lands in level 3.2, which the Audi DELPHI decoder silently does not
+            // render (2026-10-22 Audi 0628 real-device log). Some encoders do not accept profile/level
+            // (configure throws = no video at all), hence the stepwise degradation.
             val attempts =
                 buildList {
                     if (useHevc) {
@@ -178,12 +193,14 @@ class VideoSender(
             for (attempt in attempts) {
                 val candidate = runCatching { MediaCodec.createEncoderByType(attempt.mime) }.getOrNull()
                 if (candidate == null) {
-                    log("VIDEO: 无 ${attempt.mime} 编码器——降级")
+                    log("VIDEO: no ${attempt.mime} encoder - degrading")
                     continue
                 }
-                // CBR：高通 VBR 实测 10 秒平均超目标 75~80%（H.264 目标 12 → 21Mbps、HEVC 7.8 → 14），
-                // 峰值让接收端背压卡顿。用户取舍「稳定、不卡顿」优先于拖动时的清晰度（2026-11-20）。
-                // 静止画面靠 QP 下限兜住，CBR 不会为凑码率而重编。编码器不支持时照旧 VBR。
+                // CBR: Qualcomm VBR measured a 10-second average 75~80% above target (H.264 target 12 -> 21Mbps, HEVC 7.8 -> 14),
+                // and the peaks made the receiver back-pressure and stutter. The user's trade-off: "stable, no
+                // stutter" over clarity while dragging (2026-11-20).
+                // Static pictures are held down by the QP floor, so CBR does not re-encode to fill the bitrate. Falls
+                // back to VBR when the encoder lacks CBR.
                 val cbr =
                     attempt.level4 &&
                         runCatching {
@@ -205,20 +222,21 @@ class VideoSender(
                     break
                 } catch (rejected: Exception) {
                     runCatching { candidate.release() }
-                    log("VIDEO: 编码器拒绝 ${attempt.label}（${rejected.message}）——降级重试")
+                    log("VIDEO: encoder rejected ${attempt.label} (${rejected.message}) - degrading and retrying")
                 }
             }
-            if (codec == null || chosen == null) error("编码器全部配置方案均被拒绝")
+            if (codec == null || chosen == null) error("every encoder configuration was rejected")
             if (useHevc && !chosen.hevc) {
-                log("VIDEO: HEVC 编码器不可用——本次会话退回 H.264")
+                log("VIDEO: HEVC encoder unavailable - falling back to H.264 for this session")
                 useHevc = false
             }
             log(
-                "VIDEO: 画质 缩放=$scalePercent% 画布=${width}x$height@$targetFps 码率=${"%.1f".format(chosen.bitrateFrom(bitrate) / 1e6)}Mbps " +
-                    "请求=${chosen.label}${if (chosen.level4) " QPmin=$QP_I_MIN/$QP_P_MIN" else ""} " +
-                    "码控=${if (chosenCbr) "CBR" else "默认(VBR)"} " +
-                    "编码器=${codec.name} 清晰优先=$clarityFirst" +
-                    "（实际 profile/level 见 VideoConfig 行：66=Baseline 77=Main 100=High）",
+                "VIDEO: quality scale=$scalePercent% canvas=${width}x$height@$targetFps " +
+                    "bitrate=${"%.1f".format(chosen.bitrateFrom(bitrate) / 1e6)}Mbps " +
+                    "requested=${chosen.label}${if (chosen.level4) " QPmin=$QP_I_MIN/$QP_P_MIN" else ""} " +
+                    "rate-control=${if (chosenCbr) "CBR" else "default(VBR)"} " +
+                    "encoder=${codec.name} clarityFirst=$clarityFirst" +
+                    " (actual profile/level: see the VideoConfig line: 66=Baseline 77=Main 100=High)",
             )
             val surface = codec.createInputSurface()
             codec.start()
@@ -236,7 +254,7 @@ class VideoSender(
             }
             true
         } catch (error: Exception) {
-            log("VIDEO: 启动失败 - ${error.message}")
+            log("VIDEO: start failed - ${error.message}")
             stop()
             false
         }
@@ -262,11 +280,12 @@ class VideoSender(
     }
 
     /**
-     * 立即编码一个关键帧（车机 `/command` 的 `forceKeyFrame` 请求）。
+     * Encodes a key frame immediately (the car's `/command` `forceKeyFrame` request).
      *
-     * 车机解不出画面时会反复要 I 帧；我们本身每秒一个，但**要帧请求必须立即响应**——
-     * 否则车机可能一直卡在「等下一个 I 帧」的状态，表现就是「连上了但没画面」
-     * （宝马 iD9 2026-10-20 实测：会话刚起时收到一次 forceKeyFrame）。
+     * When the car cannot decode the picture it asks for I-frames repeatedly; we send one periodically, but a **key-
+     * frame request must be answered immediately**,
+     * otherwise the car may sit in "waiting for the next I-frame" and show "connected but no picture"
+     * (BMW iD9 2026-10-20: one forceKeyFrame arrived right after the session started).
      */
     fun requestKeyFrame(): Boolean {
         if (adapterMode && lastConfigMessage != null) return reprime("forceKeyFrame")
@@ -277,7 +296,7 @@ class VideoSender(
             codec.setParameters(params)
             true
         } catch (error: Exception) {
-            log("VIDEO: 请求关键帧失败 - ${error.message}")
+            log("VIDEO: key frame request failed - ${error.message}")
             false
         }
     }
@@ -303,12 +322,12 @@ class VideoSender(
         }
     }
 
-    // ---- 编码输出 → 协议封装发送 ----
+    // ---- Encoder output -> protocol framing and sending ----
 
     private fun drainEncoder() {
         val codec = encoder ?: return
-        // 缓冲包一层：128B 头与帧体合并成一次发送（tcpNoDelay 下原先是两个 TCP 段），
-        // 每帧末尾本来就会 flush，不引入额外延迟
+        // Buffered wrapper: the 128B header and the frame body go out as one send (they used to be two TCP segments under tcpNoDelay);
+        // every frame ends with a flush anyway, so no extra latency is added
         val output = java.io.BufferedOutputStream(socket?.getOutputStream() ?: return, 64 * 1024)
         val bufferInfo = MediaCodec.BufferInfo()
         try {
@@ -317,9 +336,9 @@ class VideoSender(
                     try {
                         codec.dequeueOutputBuffer(bufferInfo, 10_000)
                     } catch (error: Exception) {
-                        // 编码器进错误态（如非法尺寸首帧）：必须留痕——静默 break 曾让
-                        // 「零帧推流 4 秒后断开」无从排查（接收端只见 peer EOF）
-                        log("VIDEO: 编码器取帧异常，停止推流 - ${error.message}")
+                        // Encoder in an error state (e.g. illegal-size first frame): must leave a trace; a silent break once made
+                        // "zero-frame streaming, disconnect after 4 seconds" impossible to diagnose (the receiver only saw peer EOF)
+                        log("VIDEO: encoder dequeue error, stopping stream - ${error.message}")
                         break
                     }
                 when {
@@ -342,13 +361,14 @@ class VideoSender(
                 }
             }
         } catch (error: Exception) {
-            // 视频数据口断开（如接收端屏幕关闭收摊会话）：只终止推流，绝不冒泡——
-            // 后台线程未捕获异常会杀死整个进程（曾导致锁屏后 app 消失）
-            log("VIDEO: 推流中止 - ${error.message}（等待接收端恢复后重连）")
+            // Video data port disconnected (e.g. the receiver screen turned off and the session was wound up): only
+            // end streaming, never propagate;
+            // an uncaught exception on a background thread kills the whole process (once made the app vanish after screen lock)
+            log("VIDEO: stream aborted - ${error.message} (waiting for the receiver to recover, then reconnect)")
         } finally {
             val byPeer = !stopRequested
             stopInternal()
-            // 会话真实结束信号（静默降噪解除 / 状态收尾）
+            // Real session-end signal (lifts silent log-noise suppression / state cleanup)
             runCatching { onEnded?.invoke(byPeer) }
         }
     }
@@ -360,16 +380,16 @@ class VideoSender(
     ) {
         val mime: String get() = if (hevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
 
-        /** 该方案的目标码率：HEVC 按 [hevcBitrate] 折算。 */
+        /** Target bitrate of this plan: HEVC is scaled by [hevcBitrate]. */
         fun bitrateFrom(h264Bitrate: Int): Int = if (hevc) hevcBitrate(h264Bitrate) else h264Bitrate
 
         val label: String
             get() =
                 when {
-                    hevc -> if (level4) "HEVC Main" else "HEVC 自动"
+                    hevc -> if (level4) "HEVC Main" else "HEVC auto"
                     high -> "High+L4.0"
                     level4 -> "L4.0"
-                    else -> "自动"
+                    else -> "auto"
                 }
     }
 
@@ -385,7 +405,7 @@ class VideoSender(
             setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_S)
             when {
-                // HEVC：Main profile，level 交给编码器（H.264 的 level 4.0 约定不适用）
+                // HEVC: Main profile, level left to the encoder (the H.264 level 4.0 convention does not apply)
                 attempt.hevc -> setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
                 // The smartBox's hardware decoder showed black for a non-Baseline stream and
                 // displayed Baseline (profile 66) in the reference field run; ask for it explicitly.
@@ -394,15 +414,18 @@ class VideoSender(
             }
             if (attempt.level4) {
                 if (!attempt.hevc) setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
-                // QP 下限：画质够好就不许再加位元。2026-11-20 WinPlay 实测：仪表盘只有 Google 地图
-                // 定位点在动时，高通编码器仍把 16.6Mbps 预算用满（每帧 16~30KB、整屏反复精修），
-                // 真 iPhone 同类动画每帧 ~3KB。下限 20/22 对文字仍清晰；不支持的编码器会忽略。
-                // 「全自动」那一档不带，留作万一某编码器因此拒绝 configure 的退路。
+                // QP floor: once quality is good enough, do not spend more bits. 2026-11-20 WinPlay: with only the Google Maps
+                // location dot moving on the dashboard the Qualcomm encoder still used the full 16.6Mbps budget
+                // (16~30KB per frame, re-refining the whole
+                // screen), while a real iPhone spends ~3KB per frame on the same animation. A floor of 20/22 keeps
+                // text sharp; encoders that do not support it ignore it.
+                // The "fully automatic" plan omits it, kept as the way out if some encoder rejects configure because of it.
                 setInteger(MediaFormat.KEY_VIDEO_QP_I_MIN, QP_I_MIN)
                 setInteger(MediaFormat.KEY_VIDEO_QP_P_MIN, QP_P_MIN)
                 setInteger(MediaFormat.KEY_VIDEO_QP_B_MIN, QP_P_MIN)
-                // 低延迟提示：实时优先级、编码器最多压 1 帧（不做多帧前瞻）、按目标帧率供算力。
-                // 均为提示，不支持的编码器忽略。
+                // Low-latency hints: realtime priority, encoder buffers at most 1 frame (no multi-frame lookahead),
+                // compute supplied for the target frame rate.
+                // All are hints; encoders that do not support them ignore them.
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_LATENCY, 1)
                 setInteger(MediaFormat.KEY_OPERATING_RATE, targetFps)
@@ -410,13 +433,13 @@ class VideoSender(
         }
 
     /**
-     * 屏幕流 keepAlive 帧（catplay `ScreenTransmitSession::create_keep_alive`，1s 间隔）。
+     * In-stream keepAlive frame (catplay `ScreenTransmitSession::create_keep_alive`, 1s interval).
      *
-     * 与 UDP keepAlive / RTSP feedback 是三条相互独立的存活信号；接收端（奥迪 3315）
-     * 只看视频帧不够——缺这条时 RECORD 后约 10s 会 reset 整轮会话（2026-10-19 两轮
-     * 实测）。帧是**明文**的（catplay 仅对 opcode=VideoFrame 加密），因此不消耗 ChaCha
-     * 帧计数；带统计体时 opcode=5，并把 body 长度写进头部 params[14] 的后 4 字节
-     * （f32 LE），与 catplay 逐字节一致。
+     * One of three independent liveness signals alongside the UDP keepAlive / RTSP feedback; for the receiver (Audi 3315)
+     * video frames alone are not enough: without this the whole session is reset about 10s after RECORD (2026-10-19, two rounds
+     * of field tests). The frame is **plaintext** (catplay encrypts only opcode=VideoFrame), so it consumes no ChaCha
+     * frame counter; with a stats body the opcode is 5 and the body length is written into the last 4 bytes of header params[14]
+     * (f32 LE), byte-for-byte identical to catplay.
      */
     private fun maybeSendKeepAlive(output: java.io.OutputStream) {
         if (!running.get()) return
@@ -434,8 +457,9 @@ class VideoSender(
         val frame = buildKeepAliveFrame(keepAliveWithStats, frames, bytesPerSecond, framesPerSecond)
         output.write(frame)
         output.flush()
-        // 日志用「自上一条日志以来」的窗口平均（前 3 条约 1s、之后约 10s），而不是最后 1 秒的
-        // 瞬时值——瞬时值取样时机一错开，同样操作的两轮（如 HEVC/H.264 对照）就比不出差别。
+        // Logs use the window average "since the previous log line" (~1s for the first 3 lines, ~10s afterwards) rather than the last
+        // second's instantaneous value: sampling at slightly different moments makes two runs of the same operation
+        // (e.g. HEVC vs H.264) incomparable.
         statWindowFrames += frames
         statWindowBytes += bytes
         if (keepAliveCount <= 3 || keepAliveCount % 10 == 0L) {
@@ -444,8 +468,8 @@ class VideoSender(
                 "VIDEO: keepAlive #$keepAliveCount " +
                     "opcode=${if (keepAliveWithStats) OP_KEEP_ALIVE_WITH_BODY else OP_KEEP_ALIVE} " +
                     "body=${frame.size - HEADER_LEN}B " +
-                    "近${"%.0f".format(windowMs / 1000.0)}s平均 fps=${statWindowFrames * 1000 / windowMs} " +
-                    "码率=${"%.2f".format(statWindowBytes * 8.0 / windowMs / 1000.0)}Mbps",
+                    "avg over last ${"%.0f".format(windowMs / 1000.0)}s fps=${statWindowFrames * 1000 / windowMs} " +
+                    "bitrate=${"%.2f".format(statWindowBytes * 8.0 / windowMs / 1000.0)}Mbps",
             )
             statWindowFrames = 0
             statWindowBytes = 0
@@ -468,18 +492,18 @@ class VideoSender(
         val rawSps = nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 }
         val pps = nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 }
         if (rawSps == null || pps == null) {
-            log("VIDEO: csd 缺少 SPS/PPS（${nalUnits.size} 个 NAL），跳过 config")
+            log("VIDEO: csd lacks SPS/PPS (${nalUnits.size} NALs), skipping config")
             return
         }
-        // level_idc 补丁到 4.0（关键帧内嵌 SPS 同样会打补丁，见 sendVideoFrame）
+        // Patch level_idc to 4.0 (the SPS embedded in key frames is patched too, see sendVideoFrame)
         val sps = patchSpsLevel(rawSps)
         val avcc = ByteArrayOutputStream(8 + sps.size + pps.size)
         avcc.write(1)
         avcc.write(sps[1].toInt()) // profile
         avcc.write(sps[2].toInt()) // compat
         avcc.write(sps[3].toInt()) // level
-        avcc.write(0xFF) // 6 位保留 + 2 位长度尺寸-1（4 字节）
-        avcc.write(0xE1) // 3 位保留 + 5 位 SPS 数
+        avcc.write(0xFF) // 6 reserved bits + 2-bit length size - 1 (4 bytes)
+        avcc.write(0xE1) // 3 reserved bits + 5-bit SPS count
         avcc.write((sps.size ushr 8) and 0xFF)
         avcc.write(sps.size and 0xFF)
         avcc.write(sps)
@@ -488,13 +512,14 @@ class VideoSender(
         avcc.write(pps.size and 0xFF)
         avcc.write(pps)
         val body = avcc.toByteArray()
-        // 头部必须与 catplay `ScreenFrame::config` 一致，否则部分车机（Audi/DELPHI 实测：
-        // 连接与触摸都正常、车机屏全黑）会把后续加密帧按明文 NAL 解析 → 解码失败：
-        //  - small_param[1] |= ScreenFlag::Encrypted(0x04)：声明「视频帧是加密的」
-        //  - params[1] = (width, height) 两个 f32 LE：车机据此建立解码器画布
-        //  - params[0] 归零（catplay 的 config 不带 PTS；只有 VideoFrame 才写 params[0]）
-        // 旧实现三项都没写——DiPlay/WinPlay 只读 body、不校验头，所以测试台一直正常，
-        // 真车（Audi 4851）却黑屏（2026-10-19 用户日志）。
+        // The header must match catplay `ScreenFrame::config`, otherwise some head units (Audi/DELPHI field test:
+        // connection and touch fine, car screen all black) parse later encrypted frames as plaintext NALs -> decode failure:
+        //  - small_param[1] |= ScreenFlag::Encrypted(0x04): declares "video frames are encrypted"
+        //  - params[1] = (width, height) as two f32 LE: the car builds its decoder canvas from them
+        //  - params[0] zeroed (catplay's config carries no PTS; only VideoFrame writes params[0])
+        // The old code wrote none of the three; DiPlay/WinPlay read only the body and do not check the header, so the
+        // test bench was always fine
+        // while a real car (Audi 4851) went black (2026-10-19 user log).
         val header = buildVideoConfigHeader(body.size, width, height)
         output.write(header)
         output.write(body)
@@ -502,10 +527,10 @@ class VideoSender(
         configSent = true
         if (adapterMode) lastConfigMessage = header + body
         log(
-            "VIDEO: ✓ VideoConfig 已发送 avcC=${body.size}B（SPS ${sps.size}B/PPS ${pps.size}B，" +
+            "VIDEO: OK VideoConfig sent avcC=${body.size}B (SPS ${sps.size}B/PPS ${pps.size}B, " +
                 "profile=${sps[1].toInt() and 0xFF} level=${sps[3].toInt() and 0xFF} " +
-                "flags=0x%02x ${width}x$height）".format(header[6].toInt() and 0xFF) +
-                "\n  ↳ 头部前 24 字节=" + header.take(24).joinToString(" ") { "%02x".format(it) },
+                "flags=0x%02x ${width}x$height)".format(header[6].toInt() and 0xFF) +
+                "\n  -> first 24 header bytes=" + header.take(24).joinToString(" ") { "%02x".format(it) },
         )
     }
 
@@ -519,7 +544,7 @@ class VideoSender(
         val pps = ofType(HevcConfig.NAL_PPS)
         val record = if (vps != null && sps != null && pps != null) HevcConfig.record(vps, sps, pps) else null
         if (vps == null || sps == null || pps == null || record == null) {
-            log("VIDEO: HEVC csd 缺少 VPS/SPS/PPS（${nalUnits.size} 个 NAL），跳过 config")
+            log("VIDEO: HEVC csd lacks VPS/SPS/PPS (${nalUnits.size} NALs), skipping config")
             return
         }
         val body = HevcConfig.configBody(record)
@@ -529,9 +554,9 @@ class VideoSender(
         output.flush()
         configSent = true
         log(
-            "VIDEO: ✓ VideoConfig(HEVC) 已发送 hvcC=${record.size}B（VPS ${vps.size}B/SPS ${sps.size}B/PPS ${pps.size}B，" +
+            "VIDEO: OK VideoConfig(HEVC) sent hvcC=${record.size}B (VPS ${vps.size}B/SPS ${sps.size}B/PPS ${pps.size}B, " +
                 "profile=${record[1].toInt() and 0x1F} level=${record[12].toInt() and 0xFF} " +
-                "flags=0x%02x ${width}x$height）".format(header[6].toInt() and 0xFF),
+                "flags=0x%02x ${width}x$height)".format(header[6].toInt() and 0xFF),
         )
     }
 
@@ -542,7 +567,7 @@ class VideoSender(
         output: java.io.OutputStream,
     ) {
         if (!configSent) {
-            log("VIDEO: 丢弃一帧（config 尚未发送）")
+            log("VIDEO: dropping a frame (config not sent yet)")
             return
         }
         if (adapterMode && rePrimeGate.pending) {
@@ -560,7 +585,7 @@ class VideoSender(
                         output.flush()
                     }
                     log(
-                        "VIDEO: re-prime → VideoConfig resent before " +
+                        "VIDEO: re-prime: VideoConfig resent before " +
                             (if (keyFrame) "IDR" else "a non-key frame (no IDR within ${RePrimeGate.DEFAULT_MAX_WAIT_MS}ms)") +
                             ", $rePrimeDropped old-GOP frames held back",
                     )
@@ -570,17 +595,18 @@ class VideoSender(
         }
         val annexB = ByteArray(size)
         buffer.get(annexB)
-        // Annex-B → 4 字节长度前缀，一次扫描直接写进定长数组；关键帧内嵌的 SPS 同步打
-        // level 补丁（车机会用帧内 SPS 更新解码器参数，只改 csd 不改帧内 SPS 的话，
-        // 收到第一个关键帧就又变回低 level 了）。此前拆 NAL 逐个复制再经
-        // ByteArrayOutputStream 拼接，一个 ~550KB 的 I 帧要复制 4 次。
+        // Annex-B -> 4-byte length prefix, written into a fixed-size array in one scan; the SPS embedded in key frames gets the
+        // level patch too (the car updates decoder parameters from the in-frame SPS, so patching only csd would let the first
+        // key frame turn it back to a low level). The old code split NALs, copied each one and joined them via
+        // ByteArrayOutputStream, copying a ~550KB I-frame 4 times.
         val plain = annexBToLengthPrefixed(annexB, patchH264Level = !useHevc) ?: return
 
-        // 加密方式按会话的 et 选择（catplay ScreenFrameCodec）：
-        //  - ChaCha：header 作 AAD，body 长度含 16B tag；
-        //  - AES-128-CTR：无 tag、不改长度，密钥流跨帧连续。
-        // keepAlive/config 帧在两种模式下都不加密。头只能构造一次——ChaCha 的 AAD
-        // 必须是最终发出的那 128 字节（重复构造会带不同时间戳，对端解密必然失败）。
+        // Encryption mode is chosen by the session's et (catplay ScreenFrameCodec):
+        //  - ChaCha: header is the AAD, body length includes the 16B tag;
+        //  - AES-128-CTR: no tag, length unchanged, keystream continues across frames.
+        // keepAlive/config frames are unencrypted in both modes. The header may be built only once: ChaCha's AAD
+        // must be the exact 128 bytes sent (rebuilding it would carry a different timestamp and the peer's decryption
+        // would necessarily fail).
         val header =
             buildHeader(
                 OP_FRAME,
@@ -591,7 +617,7 @@ class VideoSender(
                 is StreamFrameCipher.ChaCha ->
                     AirPlayCrypto.chachaSeal(cipher.key, AirPlayCrypto.nonce64(frameCounter), plain, header)
                 is StreamFrameCipher.AesCtr -> {
-                    // CTR 不改长度、plain 之后只用到 size：原地加密，省一次整帧复制
+                    // CTR does not change the length and only size is used after plain: encrypt in place, saving one whole-frame copy
                     aesStream?.applyKeystream(plain)
                     plain
                 }
@@ -604,14 +630,14 @@ class VideoSender(
         framesSinceKeepAlive++
         bytesSinceKeepAlive += plain.size.toLong()
         if (keyFrame) keyFramesSent++
-        // 留痕节流：此前每个 I 帧都记一行（1 行/秒，且日志是同步落盘的）。
-        // 现在只记开头几帧、每 150 帧一次、以及每 20 个 I 帧一次（足够看出码率与 I 帧大小）。
+        // Log throttling: every I-frame used to log a line (1 line/s, and logging was a synchronous disk write).
+        // Now only the first few frames, once every 150 frames and once every 20 I-frames (enough to see bitrate and I-frame size).
         if (framesSent <= 3 || framesSent % 150 == 0L || (keyFrame && keyFramesSent % 20 == 1L)) {
-            log("VIDEO: 帧 #$framesSent ${plain.size}B${if (keyFrame) " (key #$keyFramesSent)" else ""} 已发送")
+            log("VIDEO: frame #$framesSent ${plain.size}B${if (keyFrame) " (key #$keyFramesSent)" else ""} sent")
         }
     }
 
-    /** 128 字节消息头：u32LE body 长度、opcode、NTP 32.32 LE 时间戳，其余为零。 */
+    /** 128-byte message header: u32LE body length, opcode, NTP 32.32 LE timestamp, rest zero. */
     private fun buildHeader(
         opcode: Int,
         bodyLength: Int,
@@ -643,7 +669,7 @@ class VideoSender(
         output.flush()
     }
 
-    /** 按 00 00 00 01 / 00 00 01 起始码切分 AnnexB 码流为 NAL 列表。 */
+    /** Splits an AnnexB stream into a NAL list by 00 00 00 01 / 00 00 01 start codes. */
     private fun splitAnnexB(bytes: ByteArray): List<ByteArray> {
         val units = ArrayList<ByteArray>()
         val starts = ArrayList<Int>()
@@ -679,18 +705,19 @@ class VideoSender(
 
     companion object {
         /**
-         * 周期 I 帧间隔（秒）。原为 1s：I 帧 ~550KB、P 帧 5–20KB（S24 实测），每秒一个 I 帧
-         * 约占 4Mbps 并造成周期性发送尖峰；后改 3s。车机解码出错时会发 `forceKeyFrame`，由
-         * [requestKeyFrame] 即时补 I 帧，所以周期 I 帧只是兜底。
-         * 2026-11-20 WinPlay 诊断：真 iPhone 静止时 10 秒窗口内流量≈0，即**没有短周期 I 帧**
-         * ——改 30s，只留极低成本的兜底（未请求关键帧的车机最坏 30s 自愈）。
+         * Periodic I-frame interval (seconds). It was 1s: I-frame ~550KB, P-frame 5-20KB (S24 field test), so one I-frame per second
+         * cost about 4Mbps and caused periodic send spikes; later changed to 3s. When the car decodes badly it sends `forceKeyFrame`,
+         * and [requestKeyFrame] supplies an I-frame at once, so periodic I-frames are only a backstop.
+         * 2026-11-20 WinPlay diagnostics: a real iPhone at rest carries ~0 traffic in a 10-second window, i.e. **no
+         * short-period I-frames**,
+         * so this is now 30s, leaving only a very cheap backstop (worst case 30s self-heal for a car that never requests key frames).
          */
         private const val KEYFRAME_INTERVAL_S = 30
 
-        /** 视频数据口发送缓冲上限（见 [openDataPort]）。 */
+        /** Upper bound for the video data-port send buffer (see [openDataPort]). */
         private const val SEND_BUFFER_BYTES = 256 * 1024
 
-        /** QP 下限（H.264 0~51，越小越细）：I 帧 20、P/B 帧 22。 */
+        /** QP floor (H.264 0~51, smaller = finer): I-frame 20, P/B-frame 22. */
         private const val QP_I_MIN = 20
         private const val QP_P_MIN = 22
 
@@ -702,26 +729,26 @@ class VideoSender(
         private const val TAG_SIZE = 16
 
         /**
-         * 头部位标志（catplay `ScreenFlag`）：写进 `small_param[1]`（头部偏移 6）。
-         * `Encrypted = 1<<2`：视频帧是 ChaCha 密封的；VideoConfig 里必须声明，
-         * 否则车机按明文 NAL 解析 → 解码失败黑屏（会话与触摸仍正常）。
+         * Header bit flags (catplay `ScreenFlag`): written to `small_param[1]` (header offset 6).
+         * `Encrypted = 1<<2`: video frames are ChaCha-sealed; it must be declared in VideoConfig,
+         * otherwise the car parses plaintext NALs -> decode failure, black screen (session and touch stay normal).
          */
         private const val SCREEN_FLAG_ENCRYPTED = 0x04
 
-        /** VideoConfig 头偏移 6 的 HEVC 标志（CarPlayStation 接收端按此位识别 H.265）。 */
+        /** HEVC flag at VideoConfig header offset 6 (the CarPlayStation receiver recognizes H.265 by this bit). */
         private const val SCREEN_FLAG_HEVC = 0x08
 
-        /** VideoConfig 头部 `params[1]` 的偏移：8 + 1×8，两个 f32 LE = 宽、高。 */
+        /** Offset of VideoConfig header `params[1]`: 8 + 1x8, two f32 LE = width, height. */
         private const val CONFIG_WIDTH_HEIGHT_OFFSET = 16
 
-        /** 屏幕流 keepAlive 间隔（catplay `DEFAULT_KEEP_ALIVE` = 1s）。 */
+        /** In-stream keepAlive interval (catplay `DEFAULT_KEEP_ALIVE` = 1s). */
         private const val KEEPALIVE_INTERVAL_MS = 1_000L
 
         /**
-         * 构造屏幕流 keepAlive 帧（明文头 + 可选 bplist 统计体）。
+         * Builds the in-stream keepAlive frame (plaintext header + optional bplist stats body).
          *
-         * 拆成纯函数是为了单测：帧格式一旦写错（opcode/body 长度字段/统计体键名），
-         * 接收端会静默忽略而不报错——现象仍是 10 秒后被拆链，排查成本极高。
+         * Extracted as a pure function for unit tests: if the frame format is wrong (opcode / body-length field / stats key names)
+         * the receiver ignores it silently with no error; the symptom is still a teardown after 10 seconds, at very high diagnostic cost.
          */
         internal fun buildKeepAliveFrame(
             withStats: Boolean,
@@ -731,7 +758,7 @@ class VideoSender(
         ): ByteArray {
             val body =
                 if (withStats) {
-                    // 字段名对照 catplay ScreenSenderStats（serde camelCase）
+                    // Field names per catplay ScreenSenderStats (serde camelCase)
                     BinaryPlist.encode(
                         linkedMapOf(
                             "txUsageAvg" to bytesPerSecond,
@@ -745,14 +772,14 @@ class VideoSender(
                     ByteArray(0)
                 }
             val header = ByteArray(HEADER_LEN)
-            // 头部布局：u32LE body 长度、u8 opcode、3 字节小参数、15 × 8 字节参数
+            // Header layout: u32LE body length, u8 opcode, 3 bytes of small params, 15 x 8 bytes of params
             header[0] = (body.size and 0xFF).toByte()
             header[1] = ((body.size ushr 8) and 0xFF).toByte()
             header[2] = ((body.size ushr 16) and 0xFF).toByte()
             header[3] = ((body.size ushr 24) and 0xFF).toByte()
             header[4] = (if (body.isEmpty()) OP_KEEP_ALIVE else OP_KEEP_ALIVE_WITH_BODY).toByte()
             if (body.isNotEmpty()) {
-                // params[14]（偏移 8+14*8=120）：前 4 字节 0.0f，后 4 字节 body 长度 f32 LE
+                // params[14] (offset 8+14*8=120): first 4 bytes 0.0f, last 4 bytes body length as f32 LE
                 writeLittleEndianFloat(header, 120, 0f)
                 writeLittleEndianFloat(header, 124, body.size.toFloat())
             }
@@ -760,13 +787,14 @@ class VideoSender(
         }
 
         /**
-         * VideoConfig 帧头（catplay `ScreenFrame::config` 逐字节对齐）：
-         *  - `small_param[1]`（偏移 6）置 Encrypted(0x04) —— 声明后续视频帧是密封的
-         *  - `params[1]`（偏移 16）= 宽、高两个 f32 LE —— 车机据此建解码器画布
-         *  - `params[0]`（偏移 8..16）保持 0 —— config 不带 PTS
+         * VideoConfig frame header (aligned byte-for-byte with catplay `ScreenFrame::config`):
+         *  - `small_param[1]` (offset 6) set to Encrypted(0x04): declares that later video frames are sealed
+         *  - `params[1]` (offset 16) = width, height as two f32 LE: the car builds its decoder canvas from them
+         *  - `params[0]` (offset 8..16) stays 0: config carries no PTS
          *
-         * 拆成纯函数是为了单测：真车（Audi 4851）缺这两项时**会话不断、触摸正常、屏全黑**，
-         * 日志里看不出任何错误，极难排查。
+         * Extracted as a pure function for unit tests: when a real car (Audi 4851) lacks these two the **session
+         * stays up, touch works and the screen is all black**,
+         * with no error in the log, which is very hard to diagnose.
          */
         internal fun buildVideoConfigHeader(
             bodySize: Int,
@@ -804,13 +832,14 @@ class VideoSender(
 }
 
 /**
- * 编码目标码率：像素 ×8（下限 4、上限 12Mbps），60fps 再 ×1.5，总上限 12Mbps。
+ * Encoder target bitrate: pixels x8 (floor 4, cap 12Mbps), x1.5 more at 60fps, overall cap 12Mbps.
  *
- * 旧公式「像素 ×6、2~10Mbps、上限 15」在 1264×640@60 只给 ~7Mbps，大众 MIB3 车主反馈
- * 文字比原生 CarPlay 发虚（上游 shaonialife/cardeck#26），故小画布提到 ~9.7Mbps。
- * 总上限 12Mbps：2026-11-20 WinPlay 实测，1920×720@60 目标 16.6Mbps 时移动地图峰值到
- * 19~20Mbps，接收端反复背压暂停（卡顿），同场景真 iPhone 峰值 ~13Mbps 且更顺。
- * 静止画面由 QP 下限压低，不靠这里。
+ * The old formula "pixels x6, 2~10Mbps, cap 15" gave only ~7Mbps at 1264x640@60, and a VW MIB3 owner reported text blurrier than
+ * native CarPlay (upstream shaonialife/cardeck#26), so small canvases are raised to ~9.7Mbps.
+ * Overall cap 12Mbps: 2026-11-20 WinPlay: with a 16.6Mbps target at 1920x720@60 a moving map peaked at
+ * 19~20Mbps and the receiver repeatedly back-pressured and paused (stutter), while a real iPhone in the same scene
+ * peaks ~13Mbps and is smoother.
+ * Static pictures are held down by the QP floor, not by this.
  */
 internal fun encoderBitrate(
     width: Int,
@@ -823,42 +852,44 @@ internal fun encoderBitrate(
 }
 
 /**
- * HEVC 目标码率 = H.264 的 65%（下限 3Mbps）。同目标码率下 HEVC 的收益只体现为画质，流量不变
- * （2026-11-20 CarPlayStation 实测两者实际码率相近）；按「同画质约省三到五成」取中间偏保守，
- * 1920×720@60 由 12 → 7.8Mbps，减轻 WiFi 与接收端解码负担。
+ * HEVC target bitrate = 65% of H.264 (floor 3Mbps). At the same target bitrate HEVC's gain shows only as quality, with no traffic change
+ * (2026-11-20 CarPlayStation: actual bitrates were similar); "about 30-50% saving at equal quality" is taken conservatively,
+ * 1920x720@60 goes from 12 to 7.8Mbps, easing WiFi and receiver decode load.
  */
 internal fun hevcBitrate(h264Bitrate: Int): Int = (h264Bitrate.toLong() * 65 / 100).coerceAtLeast(3_000_000L).toInt()
 
-/** H.264 level_idc 目标值：4.0（0x28）。真 iPhone 同款流形态。 */
+/** H.264 level_idc target: 4.0 (0x28). Same stream shape as a real iPhone. */
 private const val TARGET_LEVEL_IDC = 40
 
 /**
- * 把 SPS 的 level_idc 补丁到 4.0（3.1→4.0 是放宽约束，安全）。
+ * Patches the SPS level_idc to 4.0 (3.1->4.0 relaxes constraints, so it is safe).
  *
- * 为什么不改用 MediaFormat.KEY_LEVEL：实测（MagicOS/Android 17）编码器**静默忽略**
- * 该键——不抛异常、SPS 里仍是 3.1。只能后处理。
+ * Why not MediaFormat.KEY_LEVEL: measured (MagicOS/Android 17) the encoder **silently ignores**
+ * that key: no exception, and the SPS still says 3.1. Only post-processing works.
  *
- * 为什么安全：① level_idc 在 SPS 的固定偏移（nal[3]），单字节改值不改长度；
- * ② 3.1→4.0 只放宽 maxMBPS/maxFS/maxBR 上限，解码器按 4.0 分配的资源对 3.1 编码
- * 的流只多不少；③ 0x28 非零且不会引入 emulation prevention 序列（00 00 0x）。
- * 若 SPS 本来就 ≥4.0（如 60fps 时自动选 4.2），保持原值不降级。
+ * Why it is safe: 1) level_idc sits at a fixed SPS offset (nal[3]), a one-byte change that keeps the length;
+ * 2) 3.1->4.0 only relaxes the maxMBPS/maxFS/maxBR limits, so resources the decoder allocates for 4.0 are never fewer
+ * than a 3.1 stream needs; 3) 0x28 is non-zero and introduces no emulation-prevention sequence (00 00 0x).
+ * If the SPS is already >=4.0 (e.g. auto-selected 4.2 at 60fps) the original value is kept, never downgraded.
  *
- * 动机：奥迪 DELPHI 解码器对 level 3.1/3.2 的流静默不渲染（TCP 照收、会话正常、
- * 车机黑屏；2026-10-22 奥迪 0628 真机日志：同机 level=40 全部成功、level=32 首例黑屏）。
+ * Motivation: the Audi DELPHI decoder silently does not render level 3.1/3.2 streams (TCP received, session normal,
+ * car screen black; 2026-10-22 Audi 0628 real-device log: on the same unit level=40 always succeeded, level=32 gave
+ * the first black screen).
  */
 
 /**
- * Annex-B（起始码分隔）→ 每个 NAL 前加 4 字节大端长度（AVCC 样式），并就地把 SPS 的
- * level_idc 抬到 [TARGET_LEVEL_IDC]。起始码识别与旧 `splitAnnexB` 完全一致（3/4 字节、
- * 尾部 3 字节内不认），空 NAL 跳过；找不到起始码时整块当一个 NAL。没有任何 NAL 返回 null。
- * 结果与「splitAnnexB → patchSpsLevel → 逐个写长度+数据」逐字节相同（单测对照）。
+ * Annex-B (start-code delimited) -> prefix every NAL with a 4-byte big-endian length (AVCC style) and raise the SPS
+ * level_idc in place to [TARGET_LEVEL_IDC]. Start-code recognition is identical to the old `splitAnnexB` (3/4 bytes,
+ * not recognized within the last 3 bytes), empty NALs are skipped; with no start code the whole block is one NAL.
+ * Returns null if there is no NAL.
+ * The result is byte-for-byte identical to "splitAnnexB -> patchSpsLevel -> write length+data one by one" (unit tests compare).
  */
 internal fun annexBToLengthPrefixed(
     bytes: ByteArray,
     patchH264Level: Boolean = true,
 ): ByteArray? {
     if (bytes.isEmpty()) return null
-    // 记录每个 NAL 的 [体起点, 体终点)
+    // Record each NAL's [body start, body end)
     val bodies = ArrayList<Long>()
     var index = 0
     var pendingStart = -1
@@ -880,7 +911,7 @@ internal fun annexBToLengthPrefixed(
         index++
     }
     if (pendingStart < 0) {
-        bodies += bytes.size.toLong() // 无起始码：[0, size)
+        bodies += bytes.size.toLong() // No start code: [0, size)
     } else if (bytes.size > pendingStart) {
         bodies += (pendingStart.toLong() shl 32) or bytes.size.toLong()
     }

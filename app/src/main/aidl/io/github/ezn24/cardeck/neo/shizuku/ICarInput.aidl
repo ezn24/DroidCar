@@ -1,5 +1,5 @@
-// Shizuku UserService 接口：跑在常驻 shell 进程中，以毫秒级延迟注入触摸事件。
-// 相比每次 spawn `input` 命令（约 200-400ms），injectInputEvent 直连系统服务。
+// Shizuku UserService interface: runs in a resident shell process and injects touch events with millisecond latency.
+// Compared with spawning `input` per event (~200-400ms), injectInputEvent talks to the system service directly.
 package io.github.ezn24.cardeck.neo.shizuku;
 
 import android.view.Surface;
@@ -10,67 +10,84 @@ interface ICarInput {
     boolean tap(int displayId, int x, int y);
     boolean swipe(int displayId, int startX, int startY, int endX, int endY, int durationMs);
 
-    // 连续拖拽原语：整段滑动共用一次 DOWN，MOVE 逐事件直注（真实时间戳），
-    // 应用侧速度跟踪器才能算出正确的滚动惯性。一次只支持单指。
+    // Continuous-drag primitive: one DOWN shared by the whole swipe, MOVE events injected one by one (real timestamps),
+    // so the app-side velocity tracker computes correct fling inertia. Single pointer only.
     boolean pointerDown(int displayId, int x, int y);
     boolean pointerMove(int displayId, int x, int y);
     boolean pointerUp(int displayId, int x, int y);
 
-    // 按键注入（iDrive 旋钮 → 方向键/确认键）：与触摸同一条 injectInputEvent 通路，
-    // KeyEvent 带 targetDisplayId 直注虚拟屏，毫秒级、不碰手机主屏。
-    // 失败返回 false（调用方回退 `input -d <id> keyevent <code>`）。
+    // Key injection (iDrive knob -> DPAD/confirm keys): same injectInputEvent path as touch;
+    // KeyEvent carries targetDisplayId and goes straight to the virtual display, ms-level, never touches the phone display.
+    // Returns false on failure (caller falls back to `input -d <id> keyevent <code>`).
     boolean keyEvent(int displayId, int keyCode);
 
-    // 受信虚拟屏（shell 权限）：第三方应用的新任务可落在其上，
-    // 解决「应用内跳转的任务被重定向到手机主屏」问题（AOSP 安全策略）。
-    // trusted=false：不声明 FLAG_TRUSTED——第三方任务无法被系统安置到该屏
-    // （dock 屏只承载自有 DockActivity，去掉受信可杜绝其它应用任务逃逸上来）。
+    // Trusted virtual display (shell privilege): new tasks of third-party apps can land on it,
+    // which fixes "tasks started from inside an app get redirected to the phone display" (AOSP security policy).
+    // trusted=false: do not declare FLAG_TRUSTED, so the system cannot place third-party tasks on this display
+    // (the dock display only hosts our own DockActivity; dropping trust stops other apps' tasks from escaping onto it).
     int createDisplay(String name, int width, int height, int dpi, in Surface surface, boolean trusted);
     boolean releaseDisplay(int displayId);
 
-    // 动态调整虚拟屏尺寸（创建者才可调）：屏上应用的配置变更由系统派发，
-    // 应用自行 relayout——地图屏「分屏 ⇄ 全屏」切换即用此能力（任务不动，状态不丢）。
+    // Resize a virtual display dynamically (creator only): the system dispatches the config change to the apps on it,
+    // which relayout themselves. The map display's split <-> fullscreen switch uses this (task stays, state is kept).
     boolean resizeDisplay(int displayId, int width, int height, int dpi);
 
-    // 物理主屏硬件电源（SurfaceControl.setDisplayPowerMode）：false=断电（真息屏），
-    // true=恢复点亮。系统逻辑上仍保持唤醒（不锁屏、不进 Doze），虚拟屏照常渲染。
-    // 原理同 scrcpy -S/--turn-screen-off；失败返回 false（ROM 未授权/取不到 display token）。
+    // Hardware power of the physical main display (SurfaceControl.setDisplayPowerMode): false = power off (real screen-off),
+    // true = power back on. The system logically stays awake (no lock, no Doze) and virtual displays keep rendering.
+    // Same principle as scrcpy -S/--turn-screen-off; returns false on failure (ROM denied / display token unavailable).
     boolean setPhysicalScreenPower(boolean on);
 
     boolean ping();
     String diag();
 
-    // 真·假息屏：SurfaceControl 层直接断/上内置屏电源（POWER_MODE_OFF/NORMAL）。
-    // 系统保持交互态（不睡眠、无 keyguard、虚拟屏零影响），物理面板真正断电。
-    // 需要 ACCESS_SURFACE_FLINGER——shell 已持有（实测荣耀 Magic7 Pro granted=true）。
-    // 反射链 SurfaceControl → DisplayControl（新系统 token 入口迁移），逐级回退。
+    // True fake screen-off: power the built-in panel off/on at SurfaceControl level (POWER_MODE_OFF/NORMAL).
+    // The system stays interactive (no sleep, no keyguard, virtual displays unaffected) while the panel is really off.
+    // Needs ACCESS_SURFACE_FLINGER, which shell already holds (Honor Magic7 Pro measured granted=true).
+    // Reflection chain SurfaceControl -> DisplayControl (token entry point migrated in newer systems), falling back level by level.
     boolean setScreenPower(boolean on);
 
-    // 服务进程 PID：应用侧清理「非当前绑定进程」的陈旧 UserService 时用于排除自己
-    // （旧进程持有的虚拟屏跨进程无法 release，杀进程是唯一释放途径，见 CarInputClient）。
+    // PID of the service process: lets the app exclude itself when cleaning stale UserService processes other than the bound one
+    // (virtual displays held by an old process cannot be released cross-process; killing the process is the only way, see CarInputClient).
     int pid();
-    // 仅系统输出 REMOTE_SUBMIX；不采集麦克风。
+    // System output only (REMOTE_SUBMIX); does not capture the microphone.
     ParcelFileDescriptor startAudioCapture(int sampleRate, int channels);
     void stopAudioCapture();
 
-    // 语音助理是否正在开麦：查 Google 应用 / Gemini 的 RECORD_AUDIO 与 RECORD_AUDIO_HOTWORD
-    // 两个 AppOp 是否 active（AppOpsManager.isOpActive，shell 持有 WATCH_APPOPS）。
-    // 2026-11-15 S24 实测：录音配置列表看不到 Gemini 的 HOTWORD 录音，但这两个 op 可靠。
+    // Whether a voice assistant is listening: checks whether the RECORD_AUDIO and RECORD_AUDIO_HOTWORD AppOps of the
+    // Google app / Gemini are active (AppOpsManager.isOpActive; shell holds WATCH_APPOPS).
+    // 2026-11-15 S24: the recording-config list does not show Gemini's HOTWORD recording, but these two ops are reliable.
     boolean isAssistantListening();
 
-    // 车机麦克风注入（2026-11-17，见 docs/MIC-RESEARCH.md）：注册 AudioPolicy 录音注入
-    // （loopback + capture preset 规则，需 MODIFY_AUDIO_ROUTING——shell 持有），返回管道写端；
-    // 应用往里写 s16le 单声道 PCM（sampleRate），期间其它应用的 MIC / 语音识别 / 通话录音
-    // 都录到这路声音。管道 EOF（应用死掉）或 stopMicInjection 即注销，恢复真实麦克风。
+    // Car microphone injection (2026-11-17, see docs/MIC-RESEARCH.md): registers an AudioPolicy recording injection
+    // (loopback + capture preset rule, needs MODIFY_AUDIO_ROUTING, which shell holds) and returns the pipe write end;
+    // the app writes s16le mono PCM (sampleRate) into it, and meanwhile other apps' MIC / speech recognition / call recording
+    // capture this audio. Pipe EOF (app died) or stopMicInjection unregisters it and restores the real microphone.
     ParcelFileDescriptor startMicInjection(int sampleRate);
     void stopMicInjection();
 
-    // 当前正在录音（RECORD_AUDIO op active）的应用，"uid:包名" 逗号分隔。
-    // 用 AppOpsManager.startWatchingActive（shell 持有 WATCH_APPOPS）维护，首次调用时开始监听。
+    // Apps currently recording (RECORD_AUDIO op active), "uid:package" comma-separated.
+    // Maintained with AppOpsManager.startWatchingActive (shell holds WATCH_APPOPS); watching starts on the first call.
     String activeMicApps();
 
-    // 彻底移除任务（含手机「最近使用」记录）：IActivityTaskManager.removeTask，shell 持有
-    // REMOVE_TASKS。`am stack remove` 只删任务、最近使用记录仍留在手机（2026-11-18 实测）。
-    // 返回成功移除的个数。
+    // Remove a task completely (including the phone's Recents entry): IActivityTaskManager.removeTask, shell holds
+    // REMOVE_TASKS. `am stack remove` only deletes the task and the Recents entry stays on the phone (2026-11-18 measured).
+    // Returns the number of tasks removed.
     int removeTasks(in int[] taskIds);
+
+    // Leave the virtual display and its tasks alive, with no compositor surface while disconnected.
+    boolean detachDisplaySurface(int displayId);
+
+    // Car call card fallback when the call notification has no CallStyle actions: 1 = answer the ringing call,
+    // 2 = end the call, through ITelecomService (shell holds ANSWER_PHONE_CALLS / MODIFY_PHONE_STATE). Returns 1 on success.
+    int callControl(int action);
+
+    // VoIP far-end voice for the car: loopback capture of USAGE_VOICE_COMMUNICATION playback (taken off the phone
+    // speaker), 16-bit mono PCM at sampleRate through the returned pipe. Closing the pipe stops it.
+    ParcelFileDescriptor startCallCapture(int sampleRate);
+    void stopCallCapture();
+
+    // Apps (uid >= 10000) playing USAGE_NOTIFICATION_RINGTONE right now, comma-separated packages. WeChat rings without
+    // any call notification while its screen is up (2026-11-22), so its ringtone is the only sign of the call. Shell
+    // holds MODIFY_AUDIO_ROUTING, so AudioService reports real client uids to it.
+    String ringingApps();
 }

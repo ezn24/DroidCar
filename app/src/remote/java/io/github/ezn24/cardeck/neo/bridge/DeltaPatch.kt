@@ -5,7 +5,7 @@ import java.io.RandomAccessFile
 import java.security.MessageDigest
 
 /**
- * 块差分补丁应用（与服务端 deltadiff.ts 的二进制格式硬约定，勿单独改动）：
+ * Block-delta patch application (a hard binary-format contract with the server's deltadiff.ts; never change it on its own):
  *
  *   "CDDELTA1"  8B magic
  *   targetLen   u64 LE
@@ -14,34 +14,34 @@ import java.security.MessageDigest
  *   baseSha256  32B
  *   ops: 0x01 COPY(u64 oldOffset,u64 len) | 0x02 LITERAL(u64 len + bytes)
  *
- * 安全性不依赖补丁本身可信：应用后强制校验产物 sha256，不符即整包作废走
- * 全量回退。基线固定用本进程自己的 sourceDir（唯一能读到且与服务器基线
- * 逐字节一致的来源）。
+ * Safety does not rely on the patch being trusted: the output sha256 is verified after applying, and a mismatch voids it and falls
+ * back to the full package. The base is always this process's own sourceDir (the only source that is readable and
+ * byte-identical to the server baseline).
  */
 object DeltaPatch {
     private const val MAGIC = "CDDELTA1"
 
     /**
-     * 把 [patch] 应用到 [base]（必须与服务器差分基线逐字节一致）写出 [out]。
-     * 返回 null = 成功；否则返回失败原因（调用方回退全量下载）。
+     * Apply [patch] onto [base] (must be byte-identical to the server delta baseline) and write [out].
+     * Returns null = success; otherwise the failure reason (the caller falls back to the full download).
      */
     fun apply(
         patch: File,
         base: File,
         out: File,
     ): String? {
-        if (!base.isFile) return "基线 APK 不存在"
+        if (!base.isFile) return "base APK does not exist"
         val sha = MessageDigest.getInstance("SHA-256")
         RandomAccessFile(patch, "r").use { pf ->
             val magic = ByteArray(8)
             pf.readFully(magic)
-            if (!String(magic, Charsets.US_ASCII).startsWith(MAGIC)) return "补丁格式不对"
+            if (!String(magic, Charsets.US_ASCII).startsWith(MAGIC)) return "bad patch format"
             val targetLen = pf.readLong()
             val targetSha = ByteArray(32).also { pf.readFully(it) }
             val baseLen = pf.readLong()
             val baseSha = ByteArray(32).also { pf.readFully(it) }
-            if (base.length() != baseLen) return "基线长度不符（${base.length()}/$baseLen）"
-            if (!sha256Of(base).contentEquals(baseSha)) return "基线 sha256 不符"
+            if (base.length() != baseLen) return "base length mismatch (${base.length()}/$baseLen)"
+            if (!sha256Of(base).contentEquals(baseSha)) return "base sha256 mismatch"
             RandomAccessFile(base, "r").use { bf ->
                 out.outputStream().use { output ->
                     val buf = ByteArray(64 * 1024)
@@ -49,13 +49,13 @@ object DeltaPatch {
                     while (true) {
                         when (pf.readByte().toInt()) {
                             0x01 -> {
-                                // COPY：从基线 seek+复制
+                                // COPY: seek in the base and copy
                                 val off = pf.readLong()
                                 var len = pf.readLong()
                                 bf.seek(off)
                                 while (len > 0) {
                                     val n = bf.read(buf, 0, minOf(buf.size.toLong(), len).toInt())
-                                    if (n < 0) return "基线读取越界"
+                                    if (n < 0) return "base read out of range"
                                     output.write(buf, 0, n)
                                     sha.update(buf, 0, n)
                                     written += n
@@ -64,11 +64,11 @@ object DeltaPatch {
                             }
 
                             0x02 -> {
-                                // LITERAL：补丁内联字节
+                                // LITERAL: bytes inlined in the patch
                                 var len = pf.readLong()
                                 while (len > 0) {
                                     val n = pf.read(buf, 0, minOf(buf.size.toLong(), len).toInt())
-                                    if (n < 0) return "补丁读取越界"
+                                    if (n < 0) return "patch read out of range"
                                     output.write(buf, 0, n)
                                     sha.update(buf, 0, n)
                                     written += n
@@ -76,12 +76,12 @@ object DeltaPatch {
                                 }
                             }
 
-                            else -> return "未知指令"
+                            else -> return "unknown opcode"
                         }
-                        if (written > targetLen) return "产物超长"
+                        if (written > targetLen) return "output too long"
                         if (written == targetLen) break
                     }
-                    if (!sha.digest().contentEquals(targetSha)) return "产物 sha256 不符（补丁与基线可能不配套）"
+                    if (!sha.digest().contentEquals(targetSha)) return "output sha256 mismatch (patch and base may not belong together)"
                     return null
                 }
             }

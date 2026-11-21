@@ -5,20 +5,20 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 自动暗幕的生效条件。
+ * Conditions under which the auto dim curtain takes effect.
  *
- * 2026-10-19 用户反馈：「暗幕开启后，即使会话已经断开，仍然会过一会儿启动暗幕」。
- * 根因是应用启动时 attach 就排了 45 秒定时器，而车机侧断开走的是
- * `VideoSender.onEnded`——它不释放 VirtualLauncher，定时器照常触发。
+ * 2026-10-19 user feedback: "after the dim curtain is enabled, even after the session has disconnected, it still starts the dim curtain after a while".
+ * The root cause was that attach scheduled a 45-second timer at app startup, while the head-unit-side disconnect goes through
+ * `VideoSender.onEnded` -- which does not release VirtualLauncher, so the timer fired as usual.
  *
- * 现在自动暗幕必须同时满足：设置开启 + 会话活跃 + 已附着（有悬浮窗权限）。
- * 任意一条不满足都不得弹暗幕；手动「假息屏」不受会话限制（用户显式操作）。
+ * Now the auto dim curtain must satisfy all of: setting enabled + session active + attached (overlay permission held).
+ * If any one is unmet the curtain must not show; manual "fake screen-off" is not limited by the session (explicit user action).
  */
 class ScreenDimmerTest {
     @Test
     fun autoDimRequiresActiveSession() {
         assertFalse(
-            "会话结束后绝不能再弹暗幕（本次 bug）",
+            "The dim curtain must never show again after the session ends (this bug)",
             ScreenDimmer.shouldAutoDim(enabled = true, sessionActive = false, attached = true),
         )
         assertTrue(
@@ -33,7 +33,7 @@ class ScreenDimmerTest {
 
     @Test
     fun autoDimRequiresAttachment() {
-        // 缺悬浮窗权限时 windowManager 为 null，showDim 也加不上窗口
+        // Without the overlay permission windowManager is null, and showDim cannot add a window either
         assertFalse(ScreenDimmer.shouldAutoDim(enabled = true, sessionActive = true, attached = false))
     }
 
@@ -53,7 +53,7 @@ class ScreenDimmerTest {
         cases.forEach { (input, expected) ->
             val (enabled, session, attached) = input
             assertTrue(
-                "enabled=$enabled session=$session attached=$attached 期望 $expected",
+                "enabled=$enabled session=$session attached=$attached expected $expected",
                 ScreenDimmer.shouldAutoDim(enabled, session, attached) == expected,
             )
         }

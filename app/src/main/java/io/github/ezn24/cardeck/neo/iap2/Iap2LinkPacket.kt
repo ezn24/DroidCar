@@ -1,23 +1,23 @@
 package io.github.ezn24.cardeck.neo.iap2
 
 /**
- * iAP2 链路层（Link Layer）包编解码。
+ * iAP2 link layer packet codec.
  *
- * 无线（蓝牙 RFCOMM）与有线（USB bulk）承载的是同一套链路层字节流：
+ * Wireless (Bluetooth RFCOMM) and wired (USB bulk) carry the same link layer byte stream:
  *
- *   FF 5A | u16 长度 | u8 控制 | u8 seq | u8 ack | u8 会话ID | u8 头校验和 | 载荷 | u8 载荷校验和
+ *   FF 5A | u16 length | u8 control | u8 seq | u8 ack | u8 session ID | u8 header checksum | payload | u8 payload checksum
  *
- * SYN 同步包以 FF 55 开头。校验和为「字节和的补码」：把包括校验和在内的所有字节
- * 相加（mod 256）结果必须为 0。
+ * SYN sync packets start with FF 55. The checksum is the two's complement of the byte sum: adding all bytes including the checksum
+ * (mod 256) must give 0.
  *
- * 格式出处（公开逆向资料，字节级一致）：
- *  - reference/carplay-wifi-extractor example/iap2/link_layer.py（Struct(">HHBBBB") + gen_checksum）
- *  - Oligo Security《Pwn My Ride》对 iAP2 链路层的描述
+ * Format source (public reverse-engineering material, byte-for-byte consistent):
+ *  - reference/carplay-wifi-extractor example/iap2/link_layer.py (Struct(">HHBBBB") + gen_checksum)
+ *  - Oligo Security "Pwn My Ride" description of the iAP2 link layer
  *
- * 会话ID约定：0 = 控制/认证，1 = 数据，2+ = External Accessory 流。
+ * Session ID convention: 0 = control/authentication, 1 = data, 2+ = External Accessory streams.
  *
- * Phase 1 待办：SYN/ACK 状态机（收发序号、重传、参数协商 LinkSynchronizationPayload
- * ">BBHHHBB"：version=1, maxOutgoing, maxLen, retransTimeout, ackTimeout, maxRetrans, maxAck）。
+ * Phase 1 TODO: SYN/ACK state machine (send/receive sequence numbers, retransmission, LinkSynchronizationPayload
+ * ">BBHHHBB" negotiation: version=1, maxOutgoing, maxLen, retransTimeout, ackTimeout, maxRetrans, maxAck).
  */
 object Iap2LinkPacket {
     const val START_DATA = 0xFF5A
@@ -28,7 +28,7 @@ object Iap2LinkPacket {
     const val CTRL_EAK: Int = 0x20
     const val CTRL_RST: Int = 0x10
 
-    /** FF5A + len(2) + ctrl(1) + seq(1) + ack(1) + sessionId(1) + 头校验和(1) */
+    /** FF5A + len(2) + ctrl(1) + seq(1) + ack(1) + sessionId(1) + header checksum(1) */
     const val HEADER_BYTES = 9
     const val CHECKSUM_BYTES = 1
 
@@ -56,7 +56,7 @@ object Iap2LinkPacket {
         override fun hashCode(): Int = control * 31 + seq * 961 + ack * 31 + sessionId + payload.contentHashCode()
     }
 
-    /** 所有字节（含校验和）相加 mod 256 应为 0；因此校验和 = -(载荷和) & 0xFF。 */
+    /** Sum of all bytes (including the checksum) mod 256 should be 0, so checksum = -(payload sum) & 0xFF. */
     fun checksum(
         bytes: ByteArray,
         from: Int = 0,
@@ -92,7 +92,10 @@ object Iap2LinkPacket {
         return out
     }
 
-    /** 单个数据包（FF5A）的定长解析；不定长/流式重组见 [Iap2Csm] 与 Phase 1 的链路状态机。 */
+    /**
+     * Fixed-length parse of a single data packet (FF5A); variable-length/streaming reassembly is in [Iap2Csm] and the Phase 1 link
+     * state machine.
+     */
     fun decode(bytes: ByteArray): LinkPacket? {
         if (bytes.size < HEADER_BYTES + CHECKSUM_BYTES) return null
         if (readU16(bytes, 0) != START_DATA) return null

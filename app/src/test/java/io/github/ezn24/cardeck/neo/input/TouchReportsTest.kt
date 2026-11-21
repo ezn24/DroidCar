@@ -6,14 +6,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 触摸报文格式判定（按设备 HID 描述符，不按车机型号/uuid 写死）。
+ * Touch report format determination (by device HID descriptor, not hard-coded to head-unit model/uuid).
  *
- * 两类设备实测：
- *  - 奥迪 MIB3 eso_touchScreen：单指 5 字节 [tip][X u16LE][Y u16LE]，描述符 62B
- *  - DiPlay 测试台 Touchscreen：双槽 12 字节，描述符含两个 Finger Collection
+ * Two kinds of devices measured:
+ *  - Audi MIB3 eso_touchScreen: single finger, 5 bytes [tip][X u16LE][Y u16LE], descriptor 62B
+ *  - DiPlay test bench Touchscreen: two slots, 12 bytes, descriptor contains two Finger Collections
  */
 class TouchReportsTest {
-    /** 奥迪触摸屏描述符（Digitizer 页，单指，X/Y 16bit）。 */
+    /** Audi touchscreen descriptor (Digitizer page, single finger, X/Y 16bit). */
     private val audiTouchDescriptor =
         byteArrayOf(
             0x05,
@@ -80,7 +80,7 @@ class TouchReportsTest {
             0xc0.toByte(),
         )
 
-    /** DiPlay 双指描述符（两个 Finger Collection）。 */
+    /** DiPlay two-finger descriptor (two Finger Collections). */
     private val diplayTouchDescriptor =
         byteArrayOf(
             0x05,
@@ -140,7 +140,7 @@ class TouchReportsTest {
             0x81.toByte(),
             0x02,
             0xc0.toByte(),
-            // 第二个手指 Collection
+            // Second finger Collection
             0x05,
             0x0d,
             0x09,
@@ -213,7 +213,7 @@ class TouchReportsTest {
 
     @Test
     fun nonDigitizerDescriptorIsNotTouch() {
-        // Consumer Control（媒体键）不是触摸设备
+        // Consumer Control (media keys) is not a touch device
         val consumer =
             byteArrayOf(
                 0x05,
@@ -259,7 +259,7 @@ class TouchReportsTest {
 
     @Test
     fun diplayMultiSlotReportParses() {
-        // 槽0 按下 (100,200)、槽1 抬起 (0,0)
+        // Slot 0 down (100,200), slot 1 up (0,0)
         val report =
             byteArrayOf(
                 0x00,
@@ -289,7 +289,7 @@ class TouchReportsTest {
 
     @Test
     fun lengthFallbackWhenDescriptorMissing() {
-        // 描述符不可得：5B → 单指；12B → 多槽；其它 → 不解析
+        // Descriptor unavailable: 5B -> single finger; 12B -> multi-slot; otherwise -> not parsed
         assertEquals(1, TouchReports.parse(byteArrayOf(0x01, 0x00, 0x02, 0x00, 0x01), null)!!.size)
         assertEquals(2, TouchReports.parse(ByteArray(12), null)!!.size)
         assertNull(TouchReports.parse(byteArrayOf(0x00, 0x00, 0x00, 0x00), null))

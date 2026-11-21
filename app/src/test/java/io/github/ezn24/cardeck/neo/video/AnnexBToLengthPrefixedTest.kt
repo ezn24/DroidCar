@@ -5,9 +5,9 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 
-/** 新的一次扫描转换必须与旧实现（拆 NAL → 补丁 SPS → 逐个写长度+数据）逐字节一致。 */
+/** The new single-scan conversion must be byte-for-byte identical to the old implementation (split NALs -> patch SPS -> write length+data one by one). */
 class AnnexBToLengthPrefixedTest {
-    /** 旧实现原样搬过来作对照。 */
+    /** The old implementation moved over verbatim for comparison. */
     private fun reference(bytes: ByteArray): ByteArray? {
         val units = ArrayList<ByteArray>()
         val starts = ArrayList<Int>()
@@ -58,7 +58,7 @@ class AnnexBToLengthPrefixedTest {
         val frame =
             bytes(0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1F, 0xAA) + // SPS level 31 → 40
                 bytes(0, 0, 0, 1, 0x68, 0xEE, 0x3C) + // PPS
-                bytes(0, 0, 1, 0x65) + ByteArray(300) { (it * 7 + 3).toByte() } // IDR（3 字节起始码）
+                bytes(0, 0, 1, 0x65) + ByteArray(300) { (it * 7 + 3).toByte() } // IDR (3-byte start code)
         assertArrayEquals(reference(frame), annexBToLengthPrefixed(frame))
     }
 
@@ -66,11 +66,11 @@ class AnnexBToLengthPrefixedTest {
     fun edgeCases() {
         val cases =
             listOf(
-                bytes(0x41, 0x9A, 0x01), // 无起始码 → 整块一个 NAL
-                bytes(0, 0, 0, 1), // 只有起始码（尾部 3 字节内不认）→ 整块
-                bytes(0, 0, 0, 1, 0, 0, 0, 1, 0x41, 0x01), // 空 NAL 被跳过
-                bytes(0x09, 0x10, 0, 0, 1, 0x41, 0x02, 0, 0, 1), // 起始码前的杂字节被丢弃、尾部起始码不认
-                bytes(0, 0, 0, 1, 0x67, 0x64, 0x00, 0x33), // SPS level 已 ≥40 不改
+                bytes(0x41, 0x9A, 0x01), // No start code -> whole block is one NAL
+                bytes(0, 0, 0, 1), // Only a start code (not recognized within the last 3 bytes) -> whole block
+                bytes(0, 0, 0, 1, 0, 0, 0, 1, 0x41, 0x01), // Empty NAL is skipped
+                bytes(0x09, 0x10, 0, 0, 1, 0x41, 0x02, 0, 0, 1), // Stray leading bytes dropped; trailing start code not recognized
+                bytes(0, 0, 0, 1, 0x67, 0x64, 0x00, 0x33), // SPS level already >= 40 is left unchanged
             )
         for (c in cases) assertArrayEquals(c.joinToString(), reference(c), annexBToLengthPrefixed(c))
     }
@@ -80,7 +80,7 @@ class AnnexBToLengthPrefixedTest {
         val rnd = java.util.Random(42)
         repeat(500) {
             val len = rnd.nextInt(200)
-            // 偏置随机：大量 0 让起始码频繁出现
+            // Biased random: lots of zeros make start codes appear frequently
             val data =
                 ByteArray(len) {
                     if (rnd.nextInt(3) == 0) {

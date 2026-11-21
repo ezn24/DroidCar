@@ -1,6 +1,6 @@
 package io.github.ezn24.cardeck.neo.input
 
-/** 仪表盘位于应用页左侧，向左滑才前进到应用页。 */
+/** The dashboard sits to the left of the app pages; only a leftward swipe advances to the app pages. */
 internal fun dashboardLeftSwipe(
     dx: Float,
     dy: Float,
@@ -8,39 +8,44 @@ internal fun dashboardLeftSwipe(
 ): Boolean = dx <= -threshold && -dx > kotlin.math.abs(dy) * 1.2f
 
 /**
- * 仪表盘手势（2026-11-17 重做）：
+ * Dashboard gesture (reworked 2026-11-17):
  *
- * 1. **跟手翻页**：向左拖过 slop 即认领为翻页，之后每个 MOVE 的位移交给 pager 的
- *    fakeDrag——页面与 GL 地图层跟着手指走，松手由 pager 按位置/速度决定落到哪页
- *    （此前是「滑够距离就触发一段固定动画」，没有拖动进度）。
- * 2. **防误触**：按下先**不注入**（媒体卡/嵌入音乐 App 收不到 down），等手势定性——
- *    抬起且没怎么移动 = 点按，补发 down+up；竖向或向右移动 = 交还给应用（补发 down 后照常注入）；
- *    向左拖 = 翻页，应用全程收不到任何事件。此前 down 立即注入，翻页时音乐卡已被按下，
- *    认领后补的 pointerUp 常被当成一次点击把音乐 App 叫出来。
+ * 1. **Finger-following page flip**: a leftward drag past the slop is claimed as a page flip, then each MOVE's
+ * displacement goes to the pager's
+ *    fakeDrag, so the page and the GL map layer follow the finger and the pager decides on release which page to
+ *    settle on by position/velocity
+ *    (before, "drag far enough to trigger a fixed animation" had no drag progress).
+ * 2. **Anti mis-touch**: on press **do not inject** at first (the media card / embedded music app never receives
+ * down) and wait for the gesture to be classified:
+ *    lift with little movement = tap, replay down+up; vertical or rightward movement = hand back to the app (replay
+ *    down, then inject as usual);
+ *    leftward drag = page flip, and the app receives no event at all. Previously down was injected immediately, so
+ *    during a flip the music card had already been pressed,
+ *    and the pointerUp replayed after claiming was often taken as a click that summoned the music app.
  *
- * HID 的抬手可能回传 0,0：拖动中的抬手坐标一律不用。
+ * A HID lift may report 0,0: the lift coordinates during a drag are never used.
  */
 internal class DashboardSwipeGesture {
     enum class Result {
-        /** 不归本手势管，照常注入。 */
+        /** Not handled by this gesture, inject as usual. */
         NONE,
 
-        /** 吞掉（定性中 / 拖动中的多余事件）。 */
+        /** Swallowed (surplus events while classifying / dragging). */
         CONSUME,
 
-        /** 认领为翻页：开始 fakeDrag，并按 [dragDelta] 拖第一段。 */
+        /** Claimed as a page flip: start fakeDrag and drag the first segment by [dragDelta]. */
         BEGIN_DRAG,
 
-        /** 拖动中：按 [dragDelta]（相对上一事件）继续拖。 */
+        /** Dragging: keep dragging by [dragDelta] (relative to the previous event). */
         DRAG,
 
-        /** 松手：结束 fakeDrag，由 pager 落定。 */
+        /** Release: end fakeDrag and let the pager settle. */
         END_DRAG,
 
-        /** 点按：调用方在 [startX]/[startY] 补发 down + up。 */
+        /** Tap: the caller replays down + up at [startX]/[startY]. */
         TAP,
 
-        /** 交还给应用：调用方在 [startX]/[startY] 补发 down，再照常注入当前事件。 */
+        /** Handed back to the app: the caller replays down at [startX]/[startY], then injects the current event as usual. */
         RELEASE,
     }
 
@@ -54,7 +59,7 @@ internal class DashboardSwipeGesture {
         private set
     private var lastX = 0f
 
-    /** [Result.BEGIN_DRAG]/[Result.DRAG] 的横向位移（流像素，向左为负）。 */
+    /** Horizontal displacement of [Result.BEGIN_DRAG]/[Result.DRAG] (stream pixels, negative = leftward). */
     var dragDelta = 0f
         private set
 

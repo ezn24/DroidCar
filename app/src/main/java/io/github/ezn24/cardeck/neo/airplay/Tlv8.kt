@@ -1,6 +1,6 @@
 package io.github.ezn24.cardeck.neo.airplay
 
-/** HomeKit/AirPlay 风格 TLV8 编解码（独立实现，语义与参考接收端一致）。 */
+/** HomeKit/AirPlay-style TLV8 codec (independent implementation, same semantics as the reference receiver). */
 object Tlv8 {
     private const val SEPARATOR_TYPE = 0xFF
     private const val MAX_FRAGMENT = 255
@@ -52,7 +52,7 @@ object Tlv8 {
         return output
     }
 
-    // 常用类型
+    // Common types
     const val TYPE_METHOD = 0x00
     const val TYPE_IDENTIFIER = 0x01
     const val TYPE_SALT = 0x02

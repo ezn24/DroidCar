@@ -6,14 +6,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 音频档位记忆的排序规则（[AudioProfileMemory.order]）。
+ * Sort rules of the audio profile memory ([AudioProfileMemory.order]).
  *
- * 背景（2026-10-19 Honda HFT / Alpine 实测）：选「视频+音频」后会话能建立、视频正常，
- * 但音频起流约 6s 后车机拆掉整条 AirPlay 会话；只推视频则稳定。车机不会说明是哪一档
- * 音频不兼容，只能按「起流后的存活时间」反推，并把结论按车机持久化，下次连接换档。
+ * Background (2026-10-19 Honda HFT / Alpine measured): after choosing "video + audio" the session establishes and video is fine,
+ * but about 6s after audio starts the head unit tears down the whole AirPlay session; video only is stable. The head unit does not say which profile of
+ * audio is incompatible, so it can only be inferred from "survival time after streaming starts", and the conclusion is persisted per head unit so the next connection switches profile.
  */
 class AudioProfileMemoryTest {
-    // 这台车机的真实声明：media 档只有 44.1k，compatibility 档 48k/44.1k 都有
+    // This head unit's real declaration: the media profile only has 44.1k, the compatibility profile has both 48k/44.1k
     private val hondaCandidates =
         listOf(
             AudioProfile("media", 1L shl 11, 44_100, 250),
@@ -40,7 +40,7 @@ class AudioProfileMemoryTest {
         val ordered =
             AudioProfileMemory.order(hondaCandidates, AudioProfileMemory.Entry(rejected = setOf(media44)))
         assertEquals(media44, ordered.last().key)
-        // 仍然保留在候选里：换固件后还有机会用
+        // Still kept among candidates: it may work after a firmware change
         assertEquals(hondaCandidates.size, ordered.size)
     }
 
@@ -48,7 +48,7 @@ class AudioProfileMemoryTest {
     fun allRejectedKeepsTryingInsteadOfGoingSilent() {
         val all = hondaCandidates.map { it.key }.toSet()
         val ordered = AudioProfileMemory.order(hondaCandidates, AudioProfileMemory.Entry(rejected = all))
-        // 全被判死说明与记忆矛盾（换车机/固件升级沿用同一身份键）——照常全试，避免永久无声
+        // All judged dead contradicts the memory (swapped head unit/firmware upgrade reusing the same identity key) -- try everything as usual, avoiding permanent silence
         assertEquals(hondaCandidates.size, ordered.size)
     }
 
@@ -67,8 +67,8 @@ class AudioProfileMemoryTest {
         val a = AudioProfile("media", 1L shl 11, 44_100, 250)
         val b = AudioProfile("media", 1L shl 11, 44_100, 400)
         assertEquals(a.key, b.key)
-        // 大小写差异（/info 里出现过 Media/media）不能造成两套记忆；
-        // 键里同时带流类型与编码：同格式在 102/AAC 与 100/PCM 上是完全不同的通路
+        // Case differences (Media/media have appeared in /info) must not create two memories;
+        // the key carries both stream type and codec: the same format on 102/AAC and 100/PCM are entirely different paths
         assertEquals("100|media|2048|PCM", AudioProfile("Media", 1L shl 11, 44_100, 250).key)
         assertEquals(
             "102|media|4194304|AAC_LC",
@@ -94,7 +94,7 @@ class AudioProfileMemoryTest {
 
     @Test
     fun setupFailureAloneNeverDisablesAudio() {
-        // SETUP 被拒/超时可能只是车机资源仲裁或网络抖动：只降级排序，不能判死整台车机
+        // A rejected/timed-out SETUP may just be head-unit resource arbitration or network jitter: only demote the ordering, do not declare the whole head unit dead
         val id = "test receive setup-fail"
         AudioProfileMemory.recordRejected(null, id, "media|2048", setOf("media|2048"), markExhausted = false)
         val entry = AudioProfileMemory.load(null, id)
@@ -104,7 +104,7 @@ class AudioProfileMemoryTest {
 
     @Test
     fun teardownOfEveryProfileDisablesAudio() {
-        // 只有「起流后整链被拆」这种确定性证据才允许把车机音频判死
+        // Only deterministic evidence like "the whole link was torn down after streaming starts" may declare a head unit's audio dead
         val id = "test receive teardown-all"
         val all = setOf("media|2048", "compatibility|32768")
         AudioProfileMemory.recordRejected(null, id, "media|2048", all)

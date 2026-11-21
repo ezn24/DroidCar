@@ -322,6 +322,12 @@
     <string name="phase_34">接收端拒絕了會話建立（SETUP 未透過）</string>
     <string name="phase_35">等待手機加入車機熱點 %1$s…</string>
     <string name="phase_36">手機不在車機熱點——請到 WLAN 設定加入 %1$s</string>
+    <string name="phase_37">車機未開放影像通道，本輪結束（等待車機重新邀請）</string>
+    <string name="hint_vpn_blocks_car">VPN 正在攔截車機連線——請在 VPN App 中排除 CarDeck（分應用代理）或允許繞過區域網路</string>
+    <string name="nav_accessibility_label">CarDeck 導航資訊</string>
+    <string name="nav_accessibility_description">讓車機儀表板/抬頭顯示顯示 Waze、高德地圖的轉彎提示：只在連接車機時讀取這兩個 App 導航畫面上的距離、轉彎與到達時間文字，不讀取其他 App，也不會記錄或上傳。</string>
+    <string name="ui_nav_cluster_title">儀表板導航資訊</string>
+    <string name="ui_nav_cluster_note">在支援的儀表板顯示轉彎提示。讀取高德和 Waze 需要無障礙權限。</string>
     <string name="phase_paired">配對完成，建立 CarPlay 會話…</string>
     <string name="phase_legacy">建立明文會話…</string>
     <string name="search_desktop_apps">搜尋應用名稱或套件名稱</string>
@@ -379,7 +385,7 @@
     <string name="disclaimer_s3_title">駕駛安全（請務必閱讀）</string>
     <string name="disclaimer_s3_body">本應用程式不是安全關鍵系統，不能取代原廠導航與車輛儀表。\n\n· 請在停車狀態下完成連線、配對與所有設定；\n· 行駛中如需操作，必須由車上乘客進行，駕駛人不得手持或操作手機；\n· 無線連線可能因訊號干擾、系統休眠、熱點切換、藍牙重連等原因隨時中斷，表現為畫面凍結、黑屏、觸控失靈或導航中斷；\n· 行駛中斷線可能導致錯過路口、路線遺失或分心。請始終以原廠導航作為安全備援，並對實際駕駛行為負全部責任。</string>
     <string name="disclaimer_s4_title">系統權限與資料</string>
-    <string name="disclaimer_s4_body">為了正常運作，本應用程式會要求並使用以下能力，請確認你理解後再授權：\n\n· Shizuku（shell 權限）：用於建立受信任的虛擬螢幕、注入觸控事件、寫入系統相容性設定（如強制應用橫屏）、讀取視窗與顯示狀態。本應用程式不會用它執行與本服務無關的指令；\n· 通知存取權 / 媒體工作階段：僅用於在車機桌面顯示目前播放的音樂資訊（歌名、歌手、封面、播放進度）；\n· 藍牙：用於與接收端配對（只配對，不建立藍牙音訊連線）；\n· 螢幕錄製（投放）授權：僅在開啟「車機端聲音」時用於擷取音訊。\n\n配對資訊、目標裝置名稱、桌布與設定僅儲存在本機，不會上傳到任何伺服器；本應用程式不含統計分析或廣告 SDK。</string>
+    <string name="disclaimer_s4_body">為了正常運作，本應用程式會要求並使用以下能力，請確認你理解後再授權：\n\n· Shizuku（shell 權限，必要）：建立受信任的虛擬螢幕、注入車機觸控、寫入系統相容性設定（如強制應用橫屏）、讀取視窗與顯示狀態；通話時代為接聽/掛斷、靜音麥克風，並把通話對方的聲音轉到車機；把車機麥克風注入為手機麥克風（語音助理與通話）；代為開啟本應用程式的通知存取權與導航無障礙服務。不會執行與本服務無關的指令；\n· 通知存取權：在車機桌面顯示正在播放的音樂；讀取來電通知（來電者名稱、頭像、接聽/掛斷按鈕）以顯示車機通話卡片；讀取 Google 地圖導航通知以在儀表顯示轉彎提示；可選的車機通知橫幅。通知內容不寫入日誌、不上傳；\n· 麥克風：Android 要求有此權限才能擷取手機播放的聲音推到車機；語音或通話時以車機麥克風代替手機麥克風。不錄音儲存、不上傳；\n· 位置 / 附近的 Wi-Fi 裝置：Android 加入車機 Wi-Fi 熱點時要求（Android 12 為位置，13 起為附近的裝置）。本應用程式不讀取、不儲存你的位置；\n· 藍牙：與車機配對並建立 CarPlay 連線（只配對，不建立藍牙音訊連線）；\n· 螢幕錄製（投放）授權：僅在開啟「車機端聲音」時用於擷取音訊；\n· 顯示在其他應用程式上層：車機藍牙連上時在背景自動開始連線，以及手機端的息屏遮罩；\n· 無障礙服務（選用，預設關閉）：僅讀取高德地圖與 Waze 畫面上的導航文字和轉彎/車道箭頭，且只在車機訂閱導航時讀取，用於儀表轉彎提示；\n· 通知：顯示連線狀態的常駐通知。\n\n配對資訊、目標裝置名稱、桌布與設定僅儲存在本機，不會上傳到任何伺服器；本應用程式不含統計分析或廣告 SDK。</string>
     <string name="disclaimer_s5_title">免責條款</string>
     <string name="disclaimer_s5_body">本應用程式依「現狀」提供，不附帶任何明示或默示的擔保，包括但不限於適售性、特定用途適用性與不侵權擔保。\n\n在適用法律允許的最大範圍內，作者與貢獻者不對因使用或無法使用本應用程式而產生的任何直接或間接損失負責，包括但不限於：連線中斷、導航或通話中斷、資料遺失、裝置異常、車輛系統異常，以及因駕駛中操作或分心所導致的事故與損失。\n\n是否使用本應用程式、如何設定與操作、以及在何種情境下使用，完全由你自行判斷並自行承擔風險。若你不同意上述任何一條，請點選「放棄使用」並解除安裝本應用程式。</string>
     <string name="disclaimer_s6_title">開源與回饋</string>
@@ -451,4 +457,12 @@
     <string name="clarity_first_note">畫面編碼改用 High profile，文字更清晰。少數車機可能因此黑屏，遇到請關閉。下次連線生效。</string>
     <string name="hevc_video">HEVC 編碼（實驗）</string>
     <string name="hevc_video_note">車機支援時改用 H.265，同畫質下流量約省三到五成。目前只在測試台驗證過，車機黑屏請關閉。下次連線生效。</string>
+    <string name="call_incoming">來電</string>
+    <string name="call_active">通話中</string>
+    <string name="call_unknown">未知來電</string>
+    <string name="call_answer">接聽</string>
+    <string name="call_decline">拒接</string>
+    <string name="call_hang_up">掛斷</string>
+    <string name="call_mute">靜音</string>
+    <string name="call_unmute">取消靜音</string>
 </resources>

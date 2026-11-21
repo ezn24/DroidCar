@@ -19,29 +19,31 @@ import io.github.ezn24.cardeck.neo.shizuku.Shell
 import io.github.ezn24.cardeck.neo.util.Bg
 
 /**
- * 常亮 + 暗幕：替代息屏的锁屏规避方案。
+ * Always-on + dim overlay: a lock-screen-avoidance scheme replacing screen-off.
  *
- * 车机场景下手机锁屏会冻结非默认屏的输入（系统硬边界），且安全锁无法被命令解除。
- * 本方案让屏幕永不自动息屏（屏幕超时设为极大值，断开时恢复原值），
- * 无操作 45 秒后盖一层近黑全屏 View（模拟息屏观感），触摸手机任意位置即移除并重新计时。
+ * In the car scenario a phone lock screen freezes input on non-default displays (a hard system boundary), and a secure lock cannot be
+ * dismissed by commands.
+ * This scheme keeps the screen from ever turning off (screen timeout set very large, original value restored on disconnect),
+ * and after 45 seconds without interaction covers it with a near-black full-screen View (imitating screen-off); touching anywhere on the
+ * phone removes it and restarts the timer.
  *
- * 触摸探针：1px 窗口 + FLAG_WATCH_OUTSIDE_TOUCH，捕获屏幕任意处的真实触摸（含第三方 app），
- * 仅用于重置计时，不拦截、不消费任何事件。
+ * Touch probe: a 1px window + FLAG_WATCH_OUTSIDE_TOUCH captures real touches anywhere on screen (including third-party apps),
+ * used only to reset the timer; it never intercepts or consumes events.
  */
 object ScreenDimmer {
     private const val TAG = "ScreenDimmer"
     private const val IDLE_TIMEOUT_MS = 45_000L
     private const val TIMEOUT_MAX = 2_147_483_647
 
-    /** 由设置项控制（默认开）。 */
+    /** Controlled by a setting (default on). */
     @Volatile
     var enabled: Boolean = true
 
     /**
-     * 自动暗幕总开关（45s 无操作假息屏/盖暗幕）。remote 调试变体在 Application
-     * 启动时置 false——排障需要实时看手机屏幕，「过一会儿黑屏」恰好挡住正在排查的
-     * 现场（2026-10-24 用户要求）；常亮不受影响，手动假息屏（[enterDimNow] 的
-     * force 路径）也不受影响。
+     * Master switch for the automatic dim overlay (45s idle fake screen-off / dim). The remote-debug variant sets it false
+     * at Application start: troubleshooting needs a live view of the phone screen, and "going black after a while" hides exactly
+     * the scene being investigated (user request 2026-10-24); always-on is unaffected, as is manual fake screen-off (the
+     * force path of [enterDimNow]).
      */
     @Volatile
     var autoDimAllowed: Boolean = true
@@ -65,9 +67,9 @@ object ScreenDimmer {
     private var dimShown = false
 
     /**
-     * 真·假息屏：物理面板已由我们断电（SurfaceControl POWER_MODE_OFF）。
-     * 只在本对象置位时才会在收口路径恢复供电；系统真休眠（按电源键）时由
-     * SCREEN_OFF 广播清零——此后面板归 DisplayPowerController 管，不要去抢。
+     * True fake screen-off: the physical panel has been powered down by us (SurfaceControl POWER_MODE_OFF).
+     * Power is restored on the teardown paths only when this object set the flag; on a real system sleep (power key) the
+     * SCREEN_OFF broadcast clears it, after which the panel belongs to DisplayPowerController, so do not fight it.
      */
     @Volatile
     private var panelOffByUs = false
@@ -75,20 +77,20 @@ object ScreenDimmer {
     private var screenOffReceiver: BroadcastReceiver? = null
 
     /**
-     * 当前是否有活跃的投屏会话。
+     * Whether a casting session is currently active.
      *
-     * **自动暗幕与常亮只在会话期间生效**（2026-10-19 用户实测反馈）：
-     * 应用启动时就会 attach（为了让「手动假息屏」随时可用），但车机侧断开
-     * （`VideoSender.onEnded`）不会释放 VirtualLauncher，暗幕的 45s 定时器仍在——
-     * 表现为「会话早就断了，过一会儿手机屏突然变黑」。所以自动调度必须由会话驱动，
-     * 手动 [enterDimNow] 不受此限制（用户显式操作）。
+     * **Auto dim and always-on apply only during a session** (user feedback 2026-10-19):
+     * the app attaches at launch (so "manual fake screen-off" is always available), but a head-unit-side disconnect
+     * (`VideoSender.onEnded`) does not release VirtualLauncher and the 45s dim timer keeps running,
+     * which showed up as "the session ended long ago, then the phone screen suddenly goes black". So automatic scheduling
+     * must be session-driven; manual [enterDimNow] is exempt (explicit user action).
      */
     @Volatile
     private var sessionActive = false
 
     private val showRunnable = Runnable { showDim() }
 
-    /** 暗幕显隐监听（主线程回调）：手机界面被盖住时应停掉自己的动画/轮询，否则在暗幕下照画。 */
+    /** Dim show/hide listeners (called on the main thread): when the phone UI is covered it should stop its own animations/polling, or it keeps drawing under the overlay. */
     private val coverListeners = java.util.concurrent.CopyOnWriteArrayList<(Boolean) -> Unit>()
 
     fun addCoverListener(listener: (Boolean) -> Unit) {
@@ -99,14 +101,14 @@ object ScreenDimmer {
         coverListeners.remove(listener)
     }
 
-    /** 手机屏当前是否被暗幕盖住（含物理面板已断电）。 */
+    /** Whether the phone screen is currently covered by the dim overlay (including physical panel powered down). */
     fun isCovering(): Boolean = dimShown
 
     private fun notifyCover(covered: Boolean) {
         coverListeners.forEach { runCatching { it(covered) } }
     }
 
-    /** 会话开始/结束（由 SessionController 在推流起停时调用）。 */
+    /** Session start/stop (called by SessionController when streaming starts/stops). */
     fun setSessionActive(active: Boolean) {
         if (sessionActive == active) return
         sessionActive = active
@@ -116,21 +118,22 @@ object ScreenDimmer {
             if (!enabled) return
             syncScreenTimeout(ctx)
             h?.post { schedule() }
-            Log.i("CarPlaySender", "DIMMER: 会话开始——常亮/自动暗幕生效（${IDLE_TIMEOUT_MS / 1000}s 无操作后变暗）")
+            Log.i("CarPlaySender", "DIMMER: session started -- always-on/auto dim in effect (dims after ${IDLE_TIMEOUT_MS / 1000}s idle)")
         } else {
             h?.removeCallbacks(showRunnable)
             manualDimActive = false
-            // 会话结束时如果暗幕正盖着（车机自己断开），立即撤掉，让用户看到手机正常界面
+            // If the dim overlay is covering when the session ends (head unit disconnected by itself), remove it at once so the user sees
+            // the normal phone UI
             h?.post { hideDim() }
             restorePanelIfNeeded()
             syncScreenTimeout(ctx)
-            Log.i("CarPlaySender", "DIMMER: 会话结束——自动暗幕已停、已排程恢复屏幕超时")
+            Log.i("CarPlaySender", "DIMMER: session ended -- auto dim stopped, screen timeout restore scheduled")
         }
     }
 
     fun attach(context: Context) {
         if (appContext != null) {
-            // 已附着：本次若为「启用」切换，补齐常亮与自动计时（触摸探针此前已挂）
+            // Already attached: if this is an "enable" toggle, complete always-on and the auto timer (the touch probe was already attached)
             if (enabled && sessionActive) {
                 syncScreenTimeout(context)
                 handler?.post { schedule() }
@@ -138,7 +141,7 @@ object ScreenDimmer {
             return
         }
         if (!Settings.canDrawOverlays(context)) {
-            Log.w(TAG, "缺少悬浮窗权限，暗幕/触摸探针不可用（常亮不可用）")
+            Log.w(TAG, "Overlay permission missing, dim/touch probe unavailable (always-on unavailable)")
             appContext = context.applicationContext
             windowManager = null
             handler = Handler(Looper.getMainLooper())
@@ -147,8 +150,8 @@ object ScreenDimmer {
         appContext = context.applicationContext
         windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         handler = Handler(Looper.getMainLooper())
-        // 常亮只在会话期间打开：应用启动时 attach 不把屏幕超时改成「永不」，
-        // 否则未连接时手机也永不熄屏（车机断开后同样收不回来）。
+        // Always-on is switched on only during a session: attach at app launch does not set the screen timeout to "never",
+        // otherwise the phone never sleeps while unconnected (and it would not be restored after a head-unit disconnect either).
         if (enabled && sessionActive) syncScreenTimeout(context)
         handler?.post {
             addWatcher()
@@ -156,15 +159,15 @@ object ScreenDimmer {
             if (enabled && sessionActive) schedule()
         }
         if (!enabled) {
-            Log.i("CarPlaySender", "DIMMER: 触摸探针已启动（常亮/暗幕关闭）")
+            Log.i("CarPlaySender", "DIMMER: touch probe started (always-on/dim off)")
         } else if (sessionActive) {
-            Log.i("CarPlaySender", "DIMMER: 已启动（常亮 + ${IDLE_TIMEOUT_MS / 1000}s 无操作后暗幕，点击恢复）")
+            Log.i("CarPlaySender", "DIMMER: started (always-on + dim after ${IDLE_TIMEOUT_MS / 1000}s idle, tap to restore)")
         } else {
-            Log.i("CarPlaySender", "DIMMER: 触摸探针已启动（未在投屏——常亮/自动暗幕待会话开始后生效）")
+            Log.i("CarPlaySender", "DIMMER: touch probe started (not casting -- always-on/auto dim take effect after a session starts)")
         }
     }
 
-    /** 关闭常亮/暗幕但保留触摸探针（重新开启时无需重建窗口）。 */
+    /** Turn off always-on/dim but keep the touch probe (no window rebuild needed when re-enabled). */
     fun disableDim() {
         enabled = false
         val ctx = appContext ?: return
@@ -172,14 +175,14 @@ object ScreenDimmer {
         handler?.removeCallbacks(showRunnable)
         handler?.post { hideDim() }
         restorePanelIfNeeded()
-        Log.i("CarPlaySender", "DIMMER: 常亮/暗幕已关闭（触摸探针保留）")
+        Log.i("CarPlaySender", "DIMMER: always-on/dim turned off (touch probe kept)")
     }
 
     /**
-     * 自动暗幕是否应当生效（纯函数，见 [shouldAutoDim]）。
+     * Whether auto dim should be in effect (pure function, see [shouldAutoDim]).
      *
-     * 拆出来是为了单测：这三者任一为假都必须**不**弹暗幕。用户实测的 bug 正是
-     * 「会话已结束（sessionActive=false）但定时器还在」——手机屏无故变黑。
+     * Split out for unit tests: if any of the three is false it must **not** show the dim overlay. The user-reported bug was
+     * exactly "session ended (sessionActive=false) but the timer still running", the phone screen going black for no reason.
      */
     fun shouldAutoDim(
         enabled: Boolean,
@@ -190,8 +193,8 @@ object ScreenDimmer {
     fun detach() {
         val h = handler
         handler = null
-        // 会话标记必须一并清零：否则下次 attach（未连接时启动 App）会沿用上一轮的
-        // true 而立即排程，又变回「没会话也自动变暗」的老问题。
+        // The session flag must be cleared too: otherwise the next attach (app launched while unconnected) would reuse the previous
+        // true and schedule at once, bringing back the old "auto dim without a session" problem.
         sessionActive = false
         manualDimActive = false
         restorePanelIfNeeded()
@@ -211,16 +214,16 @@ object ScreenDimmer {
         val ctx = appContext
         appContext = null
         if (ctx != null) syncScreenTimeout(ctx)
-        Log.i("CarPlaySender", "DIMMER: 已停止（排程恢复屏幕超时）")
+        Log.i("CarPlaySender", "DIMMER: stopped (screen timeout restore scheduled)")
     }
 
-    /** 暗幕是否已就绪（attach 完成且具备悬浮窗能力）。 */
+    /** Whether the dim overlay is ready (attach completed and overlay capability present). */
     fun isAttached(): Boolean = handler != null && windowManager != null
 
-    /** 手动进入假息屏（主页面按钮触发；点击暗幕或手机屏幕任意处恢复）。 */
+    /** Enter manual fake screen-off (triggered by the main page button; tapping the overlay or anywhere on the phone screen restores). */
     fun enterDimNow() {
         val h = handler ?: return
-        // attach 时缺权限、之后才授予的：此处补建窗口管理器与触摸探针
+        // Permission missing at attach but granted later: build the window manager and touch probe here
         if (windowManager == null) {
             val ctx = appContext ?: return
             if (!android.provider.Settings.canDrawOverlays(ctx)) return
@@ -230,11 +233,11 @@ object ScreenDimmer {
         h.post { showDim(force = true) }
     }
 
-    /** 物理触摸（任意 app/界面）或暗幕点击时调用：重置自动暗幕计时。 */
+    /** Called on a physical touch (any app/UI) or a dim overlay tap: resets the auto-dim timer. */
     fun onUserInteraction() {
         val h = handler ?: return
         if (panelOffByUs) {
-            // 真·假息屏下的唤醒：先把面板电供上，再走暗幕移除（否则用户看到的是黑屏）
+            // Wake-up under true fake screen-off: power the panel first, then remove the overlay (otherwise the user sees a black screen)
             restorePanelIfNeeded()
         }
         if (dimShown) hideDim()
@@ -248,18 +251,20 @@ object ScreenDimmer {
     }
 
     private fun showDim(force: Boolean = false) {
-        // 自动路径必须有活跃会话：会话已结束（尤其车机侧断开）时绝不弹暗幕
+        // The automatic path needs an active session: never show the dim overlay once the session has ended (especially a head-unit
+        // disconnect)
         if (!force && !shouldAutoDim(enabled, sessionActive, isAttached())) return
-        // remote 调试变体：自动假息屏/暗幕一律不排程（排障要看屏幕），手动路径不受限
+        // remote debug variant: automatic fake screen-off/dim is never scheduled (troubleshooting needs the screen); the manual path is
+        // unrestricted
         if (!force && !autoDimAllowed) return
         val ctx = appContext
         if (ctx == null) {
-            android.util.Log.w("ScreenDimmer", "showDim: appContext 为空（attach 未执行）")
+            android.util.Log.w("ScreenDimmer", "showDim: appContext is null (attach did not run)")
             return
         }
         val wm = windowManager
         if (wm == null) {
-            android.util.Log.w("ScreenDimmer", "showDim: windowManager 为空（悬浮窗权限缺失？）")
+            android.util.Log.w("ScreenDimmer", "showDim: windowManager is null (overlay permission missing?)")
             return
         }
         if (dimShown) return
@@ -287,12 +292,13 @@ object ScreenDimmer {
                     manualDimActive = true
                     syncScreenTimeout(ctx)
                 }
-                Log.i("CarPlaySender", "DIMMER: 暗幕已显示")
+                Log.i("CarPlaySender", "DIMMER: dim overlay shown")
                 notifyCover(true)
-                // 真·假息屏：暗幕上好后直接断物理屏电源。系统保持交互态（常亮超时已设
-                // 为永不，不会真睡下去），虚拟屏完全不受影响；触摸经探针唤醒。
+                // True fake screen-off: once the overlay is up, cut physical panel power directly. The system stays interactive (the
+                // always-on timeout is set
+                // to never, so it will not really sleep), virtual displays are unaffected; touches wake it through the probe.
                 setPanelPower(false)
-            }.onFailure { Log.w(TAG, "暗幕添加失败：${it.message}") }
+            }.onFailure { Log.w(TAG, "Failed to add dim overlay: ${it.message}") }
     }
 
     private fun hideDim() {
@@ -307,7 +313,7 @@ object ScreenDimmer {
         notifyCover(false)
     }
 
-    /** 1px 触摸探针：捕获屏幕上任意处的 DOWN 事件用于重置计时，不消费事件。 */
+    /** 1px touch probe: captures DOWN events anywhere on screen to reset the timer, consumes nothing. */
     private fun addWatcher() {
         val ctx = appContext ?: return
         val wm = windowManager ?: return
@@ -339,43 +345,43 @@ object ScreenDimmer {
                 }
         runCatching { wm.addView(view, params) }
             .onSuccess { watchView = view }
-            .onFailure { Log.w(TAG, "触摸探针添加失败：${it.message}") }
+            .onFailure { Log.w(TAG, "Failed to add touch probe: ${it.message}") }
     }
 
-    // ---- 真·假息屏：SurfaceControl 层断/上物理屏电源（经 Shizuku UserService） ----
+    // ---- True fake screen-off: cut/restore physical panel power at the SurfaceControl layer (via Shizuku UserService) ----
 
-    /** 断电/恢复面板电。AIDL 是阻塞 binder 调用，一律后台执行；失败时留在暗幕态（旧行为）。 */
+    /** Cut/restore panel power. The AIDL call is a blocking binder call, always run in the background; on failure stay in the dim-overlay state (old behavior). */
     private fun setPanelPower(on: Boolean) {
         Bg.run("dimmer-panel") {
             val svc = CarInputClient.service
             if (svc == null) {
-                Log.i(TAG, "面板电源跳过（UserService 未就绪，仅暗幕）")
+                Log.i(TAG, "Panel power skipped (UserService not ready, dim overlay only)")
                 return@run
             }
             val ok =
                 runCatching { svc.setScreenPower(on) }
-                    .onFailure { Log.w(TAG, "setScreenPower($on) 调用失败：$it") }
+                    .onFailure { Log.w(TAG, "setScreenPower($on) call failed: $it") }
                     .getOrDefault(false)
             if (ok) {
                 panelOffByUs = !on
-                Log.i("CarPlaySender", "DIMMER: 面板电源 ${if (on) "恢复" else "断开"}（真·假息屏）")
+                Log.i("CarPlaySender", "DIMMER: panel power ${if (on) "restored" else "cut"} (true fake screen-off)")
             } else {
-                Log.i(TAG, "面板电源 $on 失败（ROM 不支持？保持暗幕态）")
+                Log.i(TAG, "Panel power $on failed (ROM unsupported? staying in dim-overlay state)")
             }
         }
     }
 
-    /** 收口路径统一出口：只有「我们断的电」才恢复，避免与系统电源管理抢面板。 */
+    /** Single exit for teardown paths: restore power only if "we cut it", to avoid fighting system power management for the panel. */
     private fun restorePanelIfNeeded() {
         if (panelOffByUs) setPanelPower(true)
     }
 
     /**
-     * 「连接时真息屏」的收口出口（SessionController 恢复路径调用）：
-     * 撤暗幕 + 恢复面板供电 + 清断电标记（幂等——没断过电时只是无害空跑）。
-     * 与 [onUserInteraction] 的区别：这里是**程序化收口**（关开关/会话退役/启动恢复），
-     * 不重排自动计时；断电期间暗幕承载触摸检测（点击暗幕即唤醒，用户实测触摸
-     * IC 在面板断电后仍工作），所以撤暗幕必须与恢复供电同步做。
+     * Exit for "true screen-off on connect" teardown (called by SessionController restore paths):
+     * remove the overlay + restore panel power + clear the powered-down flag (idempotent: a harmless no-op if power was never cut).
+     * Unlike [onUserInteraction], this is a **programmatic teardown** (switch off / session retired / startup recovery)
+     * and does not reschedule the auto timer; while powered down the overlay carries touch detection (tapping it wakes the phone; the touch
+     * IC was observed to keep working after panel power-off), so removing the overlay must happen together with restoring power.
      */
     fun exitPanelOff() {
         val h = handler ?: return
@@ -387,11 +393,12 @@ object ScreenDimmer {
     }
 
     /**
-     * 真休眠（按电源键）与解锁的生命周期收口：
-     * - SCREEN_OFF：面板交还系统电源管理（清标记）、撤暗幕、停计时——锁屏界面自己就是
-     *   「遮蔽 + 防误触」，暗幕留着只会在解锁后变成要多点一下的残留（2026-10-23 用户实测）。
-     * - USER_PRESENT：解锁后重排自动假息屏计时——指纹/人脸解锁不产生屏幕触摸事件，
-     *   探针收不到，不在这里补排的话解锁后计时器是停着的。
+     * Lifecycle teardown for real sleep (power key) and unlock:
+     * - SCREEN_OFF: hand the panel back to system power management (clear the flag), remove the overlay, stop the timer; the lock screen
+     * itself is
+     *   "cover + anti-mistouch", and a lingering overlay would become a leftover needing an extra tap after unlock (user test 2026-10-23).
+     * - USER_PRESENT: reschedule the auto fake screen-off timer after unlock; fingerprint/face unlock produces no screen touch events,
+     *   so the probe cannot see them, and without rescheduling here the timer stays stopped after unlock.
      */
     private fun registerScreenOffReceiver(context: Context) {
         if (screenOffReceiver != null) return
@@ -405,19 +412,22 @@ object ScreenDimmer {
                         Intent.ACTION_SCREEN_OFF -> {
                             if (panelOffByUs) {
                                 panelOffByUs = false
-                                Log.i(TAG, "系统真休眠——面板交还系统电源管理（假息屏标记已清）")
+                                Log.i(
+                                    TAG,
+                                    "Real system sleep -- panel handed back to system power management (fake screen-off flag cleared)",
+                                )
                             }
                             if (dimShown) {
                                 handler?.removeCallbacks(showRunnable)
                                 hideDim()
-                                Log.i(TAG, "真休眠——暗幕已撤（锁屏接管遮蔽职责）")
+                                Log.i(TAG, "Real sleep -- dim overlay removed (lock screen takes over covering)")
                             }
                         }
 
                         Intent.ACTION_USER_PRESENT -> {
                             if (enabled && sessionActive && isAttached()) {
                                 schedule()
-                                Log.i(TAG, "解锁——重新排程自动假息屏计时")
+                                Log.i(TAG, "Unlocked -- rescheduling the auto fake screen-off timer")
                             }
                         }
                     }
@@ -451,25 +461,25 @@ object ScreenDimmer {
 
             val current = readScreenTimeout()
             if (current == null) {
-                Log.w(TAG, "读取屏幕超时失败，保留待恢复记录")
+                Log.w(TAG, "Failed to read screen timeout, keeping the pending-restore record")
                 return@execute
             }
 
             if (keepAwake) {
                 if (current == TIMEOUT_MAX) return@execute
                 if (!prefs.edit().putInt(TIMEOUT_BACKUP, current).commit()) {
-                    Log.w(TAG, "无法保存原屏幕超时，跳过常亮")
+                    Log.w(TAG, "Cannot save the original screen timeout, skipping always-on")
                     return@execute
                 }
                 val result = Shell.exec("settings put system screen_off_timeout $TIMEOUT_MAX")
-                if (!result.ok) Log.w(TAG, "设置常亮失败")
+                if (!result.ok) Log.w(TAG, "Failed to set always-on")
             } else {
                 val backup = prefs.getInt(TIMEOUT_BACKUP, 60_000)
                 // If the timeout changed outside CarDeck, keep the user's new setting.
                 if (current == TIMEOUT_MAX &&
                     (!Shell.exec("settings put system screen_off_timeout $backup").ok || readScreenTimeout() != backup)
                 ) {
-                    Log.w(TAG, "恢复屏幕超时失败，Shizuku 重新可用后重试")
+                    Log.w(TAG, "Failed to restore screen timeout, will retry when Shizuku is available again")
                     return@execute
                 }
                 prefs.edit().remove(TIMEOUT_BACKUP).commit()

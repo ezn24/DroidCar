@@ -1,50 +1,50 @@
 package io.github.ezn24.cardeck.neo.audio
 
 /**
- * AirPlay 音频**同步包**（RTCP PT=84 / 字节 0xD4，发往该音频流的 `controlPort`）。
+ * AirPlay audio **sync packet** (RTCP PT=84 / byte 0xD4, sent to the audio stream's `controlPort`).
  *
- * 为什么必须有它（2026-10-20 Honda HFT / Alpine 8A250-30A 第三次实测定位）：
- * 音频 RTP 只是「样本流」，接收端还需要知道 **RTP 时间戳 ↔ 墙钟（NTP）** 的对应关系，
- * 才能算出「第 N 个样本应在什么时刻送到 DAC」。这条信息不在音频包里，而是由同步包
- * 单独下发（对照《Unofficial AirPlay Specification》audio/rtp_streams：
+ * Why it is required (2026-10-20, Honda HFT / Alpine 8A250-30A, located in the third field test):
+ * audio RTP is only a stream of samples; the receiver also needs the **RTP timestamp <-> wall clock (NTP)**
+ * mapping to work out when the Nth sample must reach the DAC. That information is not in the audio packets;
+ * it comes only from the sync packet (see "Unofficial AirPlay Specification" audio/rtp_streams:
  * "Sync packets are sent once per second to the control port. They are used to
- * correlate the RTP timestamps currently used in the audio stream to the NTP time"）。
+ * correlate the RTP timestamps currently used in the audio stream to the NTP time").
  *
- * 缺失时的典型症状正是我们遇到的那一版：车机 SETUP 给端口、照收 UDP、`/feedback` 里
- * `sampleTime` 按 44.1k 一路推进（时钟在跑），但喇叭一个样本都不出——排播锚点没建立。
- * 视频不受影响，因为每个视频帧自带呈现时间戳，不需要跨时钟锚定。
+ * Typical symptom when it is missing, exactly what we hit: the car gives a port in SETUP, accepts UDP, and `/feedback`
+ * `sampleTime` advances at 44.1k (the clock runs) but the speaker plays not one sample: no playback anchor was established.
+ * Video is unaffected because every video frame carries its own presentation timestamp and needs no cross-clock anchor.
  *
- * 线格式（20 字节，**无 SSRC 字段**）：
+ * Wire format (20 bytes, **no SSRC field**):
  * ```
  * 0      1      2..3        4..7                8..15      16..19
- * 0x80   0xD4   seq(BE)     RTP ts(BE,当前)     NTP(BE)    RTP ts(BE,下一包)
+ * 0x80   0xD4   seq(BE)     RTP ts(BE, current)     NTP(BE)    RTP ts(BE, next packet)
  * ```
- *  - 字节 0：V=2（0x80）；**首个包（RECORD/FLUSH 之后）置 X 位 = 0x90**
- *  - 字节 1：M=1 + PT=84 → 0xD4
- *  - 字节 8..15：当前 NTP 时间（秒<<32 | 2^32 分数），与 [io.github.ezn24.cardeck.neo.airplay.TimingServer]
- *    应答给车机的是同一时间基（单调时钟），否则车机算出的锚点会整体偏移。
+ *  - Byte 0: V=2 (0x80); **the first packet (after RECORD/FLUSH) sets the X bit = 0x90**
+ *  - Byte 1: M=1 + PT=84 -> 0xD4
+ *  - Bytes 8..15: current NTP time (seconds<<32 | 2^32 fraction), on the same time base (monotonic clock) as the
+ *    [io.github.ezn24.cardeck.neo.airplay.TimingServer] replies to the car, otherwise the anchor the car computes is shifted.
  */
 object AudioSyncPacket {
-    /** 同步包定长（规范：8B 头 + 8B NTP + 4B 下一包时间戳）。 */
+    /** Fixed sync packet length (spec: 8B header + 8B NTP + 4B next-packet timestamp). */
     const val SIZE = 20
 
-    /** RTP 负载类型：84 = 时间同步（AirPlay 私有 RTCP 类型）。 */
+    /** RTP payload type: 84 = time sync (AirPlay private RTCP type). */
     private const val PT_SYNC = 0xD4
 
-    /** 版本 2 + Marker=1。 */
+    /** Version 2 + Marker=1. */
     private const val BASE_FIRST_BYTE = 0x80
 
-    /** 扩展位（X）：RECORD/FLUSH 之后的首个同步包要置上。 */
+    /** Extension bit (X): set on the first sync packet after RECORD/FLUSH. */
     private const val EXTENSION_BIT = 0x10
 
     /**
-     * 组包。
+     * Builds the packet.
      *
-     * @param sequence 同步包自己的序号（与音频 RTP 序号无关，独立递增）
-     * @param currentRtpTimestamp 刚发出的音频包的时间戳（与 [ntp] 对应的那个时刻）
-     * @param nextRtpTimestamp 下一个音频包的 RTP 时间戳（= current + 每包样本数）
-     * @param ntp 8 字节大端 NTP 时间
-     * @param first 是否为 RECORD 之后的首个同步包（置扩展位）
+     * @param sequence the sync packet's own sequence (independent of the audio RTP sequence, increments on its own)
+     * @param currentRtpTimestamp timestamp of the audio packet just sent (the instant [ntp] corresponds to)
+     * @param nextRtpTimestamp RTP timestamp of the next audio packet (= current + samples per packet)
+     * @param ntp 8-byte big-endian NTP time
+     * @param first whether this is the first sync packet after RECORD (sets the extension bit)
      */
     fun build(
         sequence: Int,
@@ -53,7 +53,7 @@ object AudioSyncPacket {
         ntp: ByteArray,
         first: Boolean,
     ): ByteArray {
-        require(ntp.size == 8) { "NTP 时间必须是 8 字节，实际 ${ntp.size}" }
+        require(ntp.size == 8) { "NTP time must be 8 bytes, got ${ntp.size}" }
         val packet = ByteArray(SIZE)
         packet[0] = (BASE_FIRST_BYTE or (if (first) EXTENSION_BIT else 0)).toByte()
         packet[1] = PT_SYNC.toByte()

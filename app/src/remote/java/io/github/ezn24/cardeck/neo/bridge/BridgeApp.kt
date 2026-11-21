@@ -8,21 +8,26 @@ import io.github.ezn24.cardeck.neo.util.Bg
 import io.github.ezn24.cardeck.neo.util.DebugFileLog
 
 /**
- * remote 变体的 Application（manifest 覆盖 android:name）。
+ * Application of the remote variant (the manifest overrides android:name).
  *
- * 在进程最早入口安装日志 tap 与调试桥；standard 变体不含本文件，一切无从谈起。
+ * Installs the log tap and the debug bridge at the earliest process entry point; the standard variant does not contain this file, so none
+ * of it exists there.
  */
 class BridgeApp : SenderApp() {
     private val main = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
-        // 远程排障需要实时看手机屏幕：自动假息屏/暗幕（45s 无操作黑屏）在此变体
-        // 一律禁用，只保留常亮；手动假息屏不受影响（2026-10-24 用户要求）。
+        // Remote troubleshooting needs a live view of the phone screen: automatic fake screen-off/dim (black screen after 45s idle) is
+        // always disabled in this variant, keeping only always-on; manual fake screen-off is unaffected (user request 2026-10-24).
         ScreenDimmer.autoDimAllowed = false
-        DebugFileLog.append(this, "BRIDGE: 远程调试变体启动（${io.github.ezn24.cardeck.neo.BuildConfig.VERSION_NAME}，自动暗幕已禁用）")
-        // 断连对用户可见：悬浮提示 + 设置页状态行的自动重连倒计时（2026-10-22
-        // 用户要求）。恢复时短提示收口，反复震荡由悬浮窗单例自然去重（新弹覆盖旧弹）。
+        DebugFileLog.append(
+            this,
+            "BRIDGE: remote debug variant started (${io.github.ezn24.cardeck.neo.BuildConfig.VERSION_NAME}, auto dim disabled)",
+        )
+        // Disconnects are visible to the user: overlay hint + auto-reconnect countdown in the settings status line (2026-10-22
+        // user request). On recovery a short hint closes it out; repeated flapping is naturally de-duplicated by the overlay singleton (a
+        // new popup replaces the old one).
         BridgeClient.connectionEvents = { connected ->
             main.post {
                 if (connected) {
@@ -36,13 +41,13 @@ class BridgeApp : SenderApp() {
                 }
             }
         }
-        // 先清掉卡死的旧安装会话（防堵后续安装），再决定连接/续接
+        // First clear any stuck old install session (so it cannot block later installs), then decide connect/resume
         Bg.run("bridge-clean-sessions") { ReinstallFlow.abandonStaleSessions(this) }
 
-        // 重装后的续接：上次安装前置位 → 拉起设置页弹「继续进入调试模式？」
-        // （正规弹窗而非悬浮窗——悬浮窗易被忽略，用户实测反馈）
+        // Resume after reinstall: the flag set before the last install -> launch the settings page and ask "Continue into debug mode?"
+        // (a proper dialog rather than an overlay, since overlays are easily ignored; user feedback)
         if (BridgePrefs.resumePending(this)) {
-            DebugFileLog.append(this, "BRIDGE: 检测到重装前标记——询问是否继续调试")
+            DebugFileLog.append(this, "BRIDGE: pre-reinstall marker detected -- asking whether to continue debugging")
             BridgeSetupActivity.startForResume(this)
         } else if (BridgePrefs.autoConnect(this) && BridgePrefs.serverUrl(this).isNotBlank()) {
             Bg.run("bridge-start") { BridgeClient.start(this) }

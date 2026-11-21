@@ -11,13 +11,13 @@ import android.view.animation.LinearInterpolator
 import io.github.ezn24.cardeck.neo.R
 
 /**
- * 英雄卡「连接状态」视觉（design/phone-ui-proto.html 的 waves SVG 还原）：
- * 外圈虚线轨道 + 三层以正上方为轴、左右各 45° 的 WiFi 式信号弧。
- * 三种状态：
- *  IDLE       静止灰弧
- *  CONNECTING 青弧脉冲呼吸（1.5s，相位错开）+ 轨道快旋（2.6s/圈）
- *  CONNECTED  青弧慢呼吸（2.8s）+ 轨道慢旋（9s/圈）
- * 设计稿坐标以 210×176 为基准，按实际宽度等比缩放。
+ * Hero-card "connection status" visual (recreates the waves SVG of design/phone-ui-proto.html):
+ * outer dashed orbit + three WiFi-like signal arcs centered on straight up, 45 degrees to each side.
+ * Three states:
+ *  IDLE       still gray arcs
+ *  CONNECTING cyan arcs pulsing (1.5s, phase-staggered) + orbit spinning fast (2.6s/turn)
+ *  CONNECTED  cyan arcs breathing slowly (2.8s) + orbit spinning slowly (9s/turn)
+ * Design coordinates are based on 210x176 and scaled proportionally to the actual width.
  */
 class SignalWavesView
     @JvmOverloads
@@ -45,7 +45,7 @@ class SignalWavesView
                 strokeCap = Paint.Cap.ROUND
             }
 
-        // 设计稿基准：圆心 (105,88)，三层弧半径 50/68/86，跨 -135°..-45°（12 点方向 ±45°）
+        // Design baseline: center (105,88), three arc radii 50/68/86, spanning -135..-45 deg (12 o'clock +-45 deg)
         private val designWidth = 210f
         private val designHeight = 176f
         private val cx = 105f
@@ -57,9 +57,11 @@ class SignalWavesView
         private var orbitRotation = 0f
 
         /**
-         * 暂停循环动画（手机界面不可见 / 被暗幕盖住时）。车机连接期间手机主页常驻前台，
-         * 物理面板断电后 App 仍以 60fps 重画这个动画——2026-11-16 实测是整个进程里
-         * 最耗 CPU 的线程（RenderThread ~7%）。
+         * Pause the looping animation (when the phone UI is invisible / covered by the dim overlay). While the car is connected the phone
+         * home page
+         * stays in the foreground; after the physical panel is powered down the app still redraws this animation at 60fps; on 2026-11-16
+         * it was measured
+         * as the most CPU-hungry thread in the whole process (RenderThread ~7%).
          */
         var paused: Boolean = false
             set(value) {
@@ -116,11 +118,12 @@ class SignalWavesView
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            // 按**较短边**等比缩放：横屏下英雄卡被压矮时，只按宽度缩放会让弧线
-            // 溢出视图（高度只剩 70dp、宽度仍是半屏）。取 min 后图形始终内接视图。
+            // Scale proportionally by the **shorter side**: in landscape when the hero card is squashed, scaling by width only makes the
+            // arcs
+            // overflow the view (height only 70dp while width is still half the screen). With min the graphic always stays inscribed.
             val scale = minOf(width / designWidth, height / designHeight)
             val centerX = width / 2f
-            // 竖直居中：设计稿圆心 88/176 恰为正中，缩放后同样居中
+            // Vertically centered: the design center 88/176 is exactly the middle, still centered after scaling
             val centerY = height / 2f
 
             canvas.save()
@@ -135,7 +138,7 @@ class SignalWavesView
                     State.CONNECTED -> currentColor(R.color.m3_wave_connected)
                 }
             for (i in radii.indices) {
-                // 相位错开：连接中 0.25s/层，已连接 0.4s/层；IDLE 不做明暗变化
+                // Phase stagger: 0.25s/layer while connecting, 0.4s/layer when connected; IDLE has no brightness change
                 val offset = if (state == State.CONNECTING) i * 0.25f else i * 0.4f
                 val alpha =
                     if (state == State.IDLE) {

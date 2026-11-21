@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Limited to the navigation apps whose turn-by-turn card is read (NavAccessibilityService). -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/nav_accessibility_description"
+    android:isAccessibilityTool="false"
+    android:notificationTimeout="300"
+    android:packageNames="com.waze,com.autonavi.minimap,com.google.android.apps.maps" />

@@ -4,14 +4,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * `am compat` 失败分类测试。
+ * `am compat` failure classification test.
  *
- * 这个分类决定「偏好要不要落盘」：永久拒绝（user build 限制）落盘只会让下次连接
- * 白跑一轮 applyAll，且面板显示「已开启」而系统实际没生效；临时故障则相反，应保留
- * 用户意愿以便重试。实测样本取自 2026-10-18 红米 Android 13 user build 的真实输出。
+ * This classification decides "whether the preference is persisted": persisting a permanent rejection (user build restriction) only makes the next connection
+ * waste an applyAll round, with the panel showing "enabled" while the system actually has no effect; a transient failure is the opposite, the
+ * user's intent should be kept so it can be retried. Measured samples come from real output of a Redmi Android 13 user build on 2026-10-18.
  */
 class CompatFailureClassifyTest {
-    /** 已安装的普通第三方应用在 user build 上被拒（本次问题的真实输出）。 */
+    /** An installed ordinary third-party app rejected on a user build (the real output of this issue). */
     @Test
     fun nonDebuggableOnUserBuildIsUnsupported() {
         assertEquals(
@@ -20,7 +20,7 @@ class CompatFailureClassifyTest {
         )
     }
 
-    /** 目标是该 ChangeId 的默认对象时的另一种拒绝措辞。 */
+    /** Another rejection wording when the target is the default object of that ChangeId. */
     @Test
     fun defaultChangeOnUserBuildIsUnsupported() {
         assertEquals(
@@ -30,11 +30,11 @@ class CompatFailureClassifyTest {
     }
 
     /**
-     * **本机 ROM 未注册该 ChangeId**（红米 Android 13 实测输出）。
+     * **This ROM has not registered the ChangeId** (Redmi Android 13 measured output).
      *
-     * 这是「荣耀能改、红米不能」的真正原因：这两个 ChangeId 是 OEM 定制项，
-     * 荣耀注册了（392 个）、红米没注册（173 个）。未注册时 `am compat` 先给
-     * `is not known yet` 警告，再以 user build 的措辞拒绝。
+     * This is the real reason for "Honor can change it, Redmi cannot": these two ChangeIds are OEM-customized items,
+     * Honor registered them (392 in total), Redmi did not (173). When unregistered, `am compat` first emits an
+     * `is not known yet` warning, then rejects with the user-build wording.
      */
     @Test
     fun unregisteredChangeIdIsUnsupported() {
@@ -45,14 +45,14 @@ class CompatFailureClassifyTest {
                     "Cannot override a change on a non-debuggable app and user build.",
             ),
         )
-        // 仅警告行（某些 ROM 只回警告）同样判永久
+        // A warning-only line (some ROMs reply with only the warning) is also judged permanent
         assertEquals(
             AppOrientationCompat.WriteResult.UNSUPPORTED,
             classifyCompatFailure("Warning! Change 265464455 is not known yet."),
         )
     }
 
-    /** Shizuku 未连接：临时故障，可重试。 */
+    /** Shizuku not connected: transient failure, retryable. */
     @Test
     fun shizukuNotConnectedIsTemporary() {
         assertEquals(
@@ -61,7 +61,7 @@ class CompatFailureClassifyTest {
         )
     }
 
-    /** 超时/进程被杀：临时故障。 */
+    /** Timeout/process killed: transient failure. */
     @Test
     fun emptyOrTimeoutIsTemporary() {
         assertEquals(AppOrientationCompat.WriteResult.FAILED, classifyCompatFailure(""))
@@ -71,7 +71,7 @@ class CompatFailureClassifyTest {
         )
     }
 
-    /** 成功输出不该被判成永久拒绝（防御：调用方仅在失败时才分类）。 */
+    /** Successful output must not be judged a permanent rejection (defensive: the caller classifies only on failure). */
     @Test
     fun successTextIsNotPermanent() {
         assertEquals(
@@ -81,12 +81,12 @@ class CompatFailureClassifyTest {
     }
 
     /**
-     * 版本门槛：这两个 ChangeId 自 **Android 14 / SDK 34** 起才进 AOSP
-     * （`android.content.pm.ActivityInfo`）。Android 13 及更早的 ActivityInfo 里
-     * 一个 orientation 类 ChangeId 都没有（实测 A13=0、A14=9），因此低版本
-     * 不必跑 dumpsys 即可判定不支持。
+     * Version threshold: these two ChangeIds only entered AOSP (`android.content.pm.ActivityInfo`) from **Android 14 / SDK 34**.
+     * Android 13 and earlier ActivityInfo has
+     * not a single orientation ChangeId (measured A13=0, A14=9), so lower versions
+     * can be judged unsupported without running dumpsys.
      *
-     * 实测对照：红米 K40（SDK 33）不支持；荣耀 Magic7 Pro（SDK 37）支持。
+     * Measured comparison: Redmi K40 (SDK 33) unsupported; Honor Magic7 Pro (SDK 37) supported.
      */
     @Test
     fun minSupportedSdkIsAndroid14() {

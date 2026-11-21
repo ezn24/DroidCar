@@ -3,15 +3,16 @@ package io.github.ezn24.cardeck.neo.launcher.settings
 import android.content.Context
 
 /**
- * 「显示」面板偏好：视频流/虚拟屏的分辨率缩放与目标帧率。
+ * "Display" panel preferences: resolution scale and target frame rate of the video stream / virtual displays.
  *
- * - 分辨率缩放（30%–160%）：按车机通告分辨率的百分比生成流画布与虚拟屏，
- *   密度同步缩放（逻辑布局不变，只改像素量）。**仅下次连接生效**——
- *   编码器与全部虚拟屏按会话建立时的尺寸创建，运行中改无意义。
- * - 帧率（30/60）：合成器出帧节奏上限，运行中可实时切换。
+ * - Resolution scale (30%-160%): the stream canvas and virtual displays are generated as a percentage of the head unit's advertised
+ * resolution,
+ *   with density scaled in step (logical layout unchanged, only the pixel count changes). **Takes effect on the next connection only** -
+ *   the encoder and all virtual displays are created with the size at session setup, so changing it at runtime is meaningless.
+ * - Frame rate (30/60): upper bound of the compositor's output cadence, switchable live at runtime.
  *
- * 「实际生效值」由 SessionController 在会话建立时记录（activeScalePercent /
- * activeTargetFps），英雄卡显示运行时值而非偏好值。
+ * The "effective values" are recorded by SessionController at session setup (activeScalePercent /
+ * activeTargetFps); the hero card shows runtime values rather than preference values.
  */
 object DisplayPrefs {
     const val SCALE_MIN = 30
@@ -22,7 +23,8 @@ object DisplayPrefs {
     const val FPS_DEFAULT = 30
 
     /**
-     * 车机通知只显示这些 App（包名）；空集合 = 全部 App。与桌面显示哪些 App 无关，是独立名单。
+     * Head-unit notifications show only these apps (package names); empty set = all apps. Independent of which apps the desktop shows - a
+     * separate list.
      */
     fun notificationApps(context: Context): Set<String> =
         context
@@ -42,7 +44,7 @@ object DisplayPrefs {
             .apply()
     }
 
-    /** 连接时推送车机侧声音（连线页开关；取代每次连接前的弹窗）。 */
+    /** Push head-unit-side audio on connect (switch on the connection page; replaces the per-connection dialog). */
     fun carAudio(context: Context): Boolean = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("carAudio", true)
 
     fun setCarAudio(
@@ -56,7 +58,10 @@ object DisplayPrefs {
             .apply()
     }
 
-    /** 车机主动断开后是否继续等待它回连（默认否：直接收起蓝牙/热点）。 */
+    /**
+     * Whether to keep waiting for the head unit to reconnect after it disconnects on its own (default no: shut down Bluetooth / hotspot
+     * directly).
+     */
     fun waitForReconnect(context: Context): Boolean =
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("waitForReconnect", false)
 
@@ -91,7 +96,10 @@ object DisplayPrefs {
         }
     }
 
-    /** 窄屏仪表盘版面偏好（[io.github.ezn24.cardeck.neo.render.DashLayout] 的 PREF_*；默认左右分屏；宽屏不看）。下次连接生效。 */
+    /**
+     * Narrow-screen dashboard layout preference (PREF_* of [io.github.ezn24.cardeck.neo.render.DashLayout]; default side-by-side; ignored
+     * on wide screens). Takes effect on the next connection.
+     */
     fun dashboardLayout(context: Context): String =
         context
             .getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -110,9 +118,10 @@ object DisplayPrefs {
     }
 
     /**
-     * 清晰优先（默认关）：编码改用 H.264 High profile（8×8 变换，同码率下文字边缘更锐）。
-     * 部分车机解码器可能不认 High（奥迪 DELPHI 对 level 不符就黑屏），故默认关、下次连接生效；
-     * 转接盒模式恒为 Baseline，不受此开关影响。
+     * Clarity first (default off): encode with H.264 High profile (8x8 transform, sharper text edges at the same bitrate).
+     * Some head-unit decoders may not accept High (Audi DELPHI shows a black screen on a level mismatch), so it defaults off and takes
+     * effect on the next connection;
+     * adapter-box mode is always Baseline and unaffected by this switch.
      */
     fun clarityFirst(context: Context): Boolean =
         context
@@ -131,9 +140,10 @@ object DisplayPrefs {
     }
 
     /**
-     * HEVC（H.265，实验，默认关）：接收端在 /info 声明 hevcInfo 且 SETUP 接受 "hevc" 时改用 H.265，
-     * 同画质码率约省三到五成。只在 CarPlayStation 测试台验证过，真车（下一代 CarPlay）形态未验证；
-     * 不支持的接收端不受影响。下次连接生效。
+     * HEVC (H.265, experimental, default off): use H.265 when the receiver declares hevcInfo in /info and SETUP accepts "hevc";
+     * saves roughly 30-50% bitrate at the same quality. Verified only on the CarPlayStation test bench; real-car (next-generation CarPlay)
+     * behavior is unverified;
+     * receivers that do not support it are unaffected. Takes effect on the next connection.
      */
     fun hevc(context: Context): Boolean =
         context
@@ -151,7 +161,10 @@ object DisplayPrefs {
             .apply()
     }
 
-    /** 语音助理上车（实验）：默认关——要额外镜像手机主屏，且只在真机验证过的 ROM 上可靠。 */
+    /**
+     * Voice assistant in the car (experimental): default off - it needs an extra mirror of the phone main screen and is reliable only on
+     * ROMs verified on real devices.
+     */
     fun showAssistOverlay(context: Context): Boolean =
         context
             .getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -170,7 +183,7 @@ object DisplayPrefs {
             .onPrefChanged(context, enabled)
     }
 
-    /** 部分 ROM 的播放捕获受媒体流音量影响，默认不全局静音。 */
+    /** On some ROMs playback capture is affected by the media stream volume, so global muting is off by default. */
     fun mutePhoneAudio(context: Context): Boolean =
         context
             .getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -187,16 +200,18 @@ object DisplayPrefs {
             .apply()
     }
 
-    /** 触摸 move 注入节流默认值（ms）：0=默认关闭，交互滞后时在「显示」面板调高试验。 */
+    /**
+     * Default touch move-injection throttle (ms): 0 = off by default; raise it in the "Display" panel experimentally if interaction lags.
+     */
     const val MOVE_THROTTLE_DEFAULT = 0
     const val MOVE_THROTTLE_MAX = 48
 
-    /** 连接时真息屏（物理面板断电）默认值。 */
-    // 默认**关**（2026-10-24 用户要求）：连接成功就断面板对多数人太激进，
-    // 想要的人在 设置→显示 手动开启（开关保留，只改默认值）
+    /** Default for real screen-off on connect (physical panel powered down). */
+    // Default **off** (user request 2026-10-24): cutting the panel as soon as it connects is too aggressive for most people;
+    // those who want it turn it on manually in Settings -> Display (the switch stays, only the default changed)
     const val SCREEN_OFF_DEFAULT = false
 
-    /** HID 原始报文日志默认值：默认关（校准键位时临时打开，避免刷屏）。 */
+    /** Default for the raw HID report log: off (turn on temporarily while calibrating key mappings, to avoid log spam). */
     const val HID_RAW_LOG_DEFAULT = false
 
     private const val PREFS_NAME = "settings"
@@ -207,8 +222,8 @@ object DisplayPrefs {
     private const val KEY_HID_RAW_LOG = "hid_raw_log"
 
     /**
-     * HID 原始报文日志（键位校准用）：打开后每帧 `hidSendReport` 会写一行
-     * `HID-RAW: uuid=… bytes=…` 到主日志，用来对照按下某个键时的字节。
+     * Raw HID report log (for key-mapping calibration): when on, every `hidSendReport` frame writes a line
+     * `HID-RAW: uuid=... bytes=...` to the main log, to compare against the bytes when a given key is pressed.
      */
     fun hidRawLog(context: Context): Boolean =
         context
@@ -228,9 +243,9 @@ object DisplayPrefs {
     }
 
     /**
-     * 连接时真息屏（默认开）：会话建立后把物理面板硬件断电（同 scrcpy `-S`），
-     * 系统保持唤醒、虚拟屏照常渲染；关闭则只用暗幕。
-     * 切换在会话中立即生效（见 SessionController.applyScreenOffPreference）。
+     * Real screen-off on connect: after the session is set up, power the physical panel down in hardware (same as scrcpy `-S`);
+     * the system stays awake and virtual displays keep rendering; when off, only the dim curtain is used.
+     * Toggling takes effect immediately during a session (see SessionController.applyScreenOffPreference).
      */
     fun screenOffOnConnect(context: Context): Boolean =
         context
@@ -248,7 +263,7 @@ object DisplayPrefs {
             .apply()
     }
 
-    /** 流分辨率缩放百分比（30–160，步进 5；默认 100）。 */
+    /** Stream resolution scale percent (30-160, step 5; default 100). */
     fun scalePercent(context: Context): Int =
         context
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -266,7 +281,7 @@ object DisplayPrefs {
             .apply()
     }
 
-    /** 目标帧率（30/60；驱动合成器出帧节奏，运行中切换实时生效）。 */
+    /** Target frame rate (30/60; drives the compositor's output cadence, switching at runtime takes effect live). */
     fun fps(context: Context): Int =
         context
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -283,7 +298,7 @@ object DisplayPrefs {
             .apply()
     }
 
-    /** 触摸 move 注入节流（ms；0=关闭）。 */
+    /** Touch move-injection throttle (ms; 0 = off). */
     fun moveThrottleMs(context: Context): Int =
         context
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

@@ -7,12 +7,12 @@ import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 
-/** 阻塞式双向字节流抽象：蓝牙 RFCOMM socket 与内存回环测试共用。 */
+/** Blocking bidirectional byte stream: shared by the Bluetooth RFCOMM socket and the in-memory loopback used in tests. */
 interface DuplexStream : Closeable {
-    /** 阻塞读取；返回 -1 表示流结束。 */
+    /** Blocking read; returns -1 at end of stream. */
     fun read(buffer: ByteArray): Int
 
-    /** 阻塞写入全部字节或抛异常。 */
+    /** Blocking write of all bytes, or throws. */
     fun write(bytes: ByteArray)
 
     override fun close()
@@ -24,10 +24,10 @@ class StreamDuplexStream(
     private val onClose: () -> Unit = {},
 ) : DuplexStream {
     /**
-     * 注意：read/write 不能共享一把锁——读线程会阻塞在 read() 里持锁等待数据，
-     * 写线程将永久拿不到锁（真机蓝牙上实际触发过）。写入的并发安全由
-     * Iap2LinkChannel 的通道锁保证（所有写入都在 lock 内串行），读只发生在
-     * 唯一的读线程，蓝牙 socket 的输入/输出流彼此独立，跨线程读写是安全的。
+     * Note: read/write must not share a lock. The reader blocks inside read() holding it while
+     * waiting for data, so the writer would never get the lock (this did happen on real Bluetooth).
+     * Write concurrency is already serialized by the Iap2LinkChannel lock (all writes happen under
+     * it); reads only come from the single reader thread, and the Bluetooth socket's input and
      */
     override fun read(buffer: ByteArray): Int = input.read(buffer)
 
@@ -43,7 +43,7 @@ class StreamDuplexStream(
     }
 }
 
-/** 内存回环流对：两端各持一个 DuplexStream，用于单元测试。 */
+/** In-memory loopback stream pair: each end holds one DuplexStream; for unit tests. */
 class InMemoryStreamPair {
     private val aToB = Pipe()
     private val bToA = Pipe()
@@ -90,7 +90,7 @@ class InMemoryStreamPair {
             runCatching { source.close() }
         }
 
-        /** 关闭对端出口，让对方读到 EOF。 */
+        /** Closes the peer-facing end so the other side reads EOF. */
         fun closePartner() {
             runCatching { source.close() }
         }

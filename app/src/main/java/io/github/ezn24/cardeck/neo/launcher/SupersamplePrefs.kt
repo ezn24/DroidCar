@@ -4,15 +4,15 @@ import android.content.Context
 import android.content.pm.ActivityInfo
 
 /**
- * 每应用超采样偏好（三态，SharedPreferences 持久化）。
+ * Per-app supersampling preference (tri-state, persisted in SharedPreferences).
  *
- *  自动（默认）：检测到「竖屏锁定」的启动 Activity 时启用超采样——
- *      这类应用在我们的横屏应用屏上被系统 letterbox 成窄窗，且按手机状态栏
- *      物理像素预留顶部空带；超采样（渲染 ×1.5 再缩回）能压小固定像素占比。
- *      横屏应用（地图类）不需要超采样——原生分辨率更清晰、更流畅。
- *  开启/关闭：用户显式指定，压过自动检测。
+ *  Auto (default): supersample when the launch Activity is "portrait-locked" -
+ *      such apps get letterboxed into a narrow window on our landscape app display by the system, and reserve a top band
+ *      by the phone status-bar physical pixels; supersampling (render x1.5 then scale back) shrinks the share of fixed pixels.
+ *      Landscape apps (maps) do not need it - native resolution is sharper and smoother.
+ *  On / Off: explicit user choice, overriding auto detection.
  *
- * 竖屏检测读启动 Activity 的 screenOrientation（PORTRAIT/REVERSE/SENSOR/USER）。
+ * Portrait detection reads the launch Activity's screenOrientation (PORTRAIT/REVERSE/SENSOR/USER).
  */
 object SupersamplePrefs {
     const val MODE_AUTO = 0
@@ -22,7 +22,7 @@ object SupersamplePrefs {
     private const val PREFS_NAME = "settings"
     private const val KEY_PREFIX = "ss_"
 
-    /** 读偏好（默认自动）。 */
+    /** Reads the preference (default auto). */
     fun mode(
         context: Context,
         component: android.content.ComponentName,
@@ -43,7 +43,7 @@ object SupersamplePrefs {
             .apply()
     }
 
-    /** 本次启动是否走超采样应用屏（三态解析后的最终结果）。 */
+    /** Whether this launch uses the supersampled app display (final result after tri-state resolution). */
     fun shouldSupersample(
         context: Context,
         component: android.content.ComponentName,
@@ -54,7 +54,7 @@ object SupersamplePrefs {
             else -> isPortraitActivity(context, component)
         }
 
-    /** 自动检测：启动 Activity 是否竖屏锁定（在横屏应用屏上会被 letterbox 的形态）。 */
+    /** Auto detection: whether the launch Activity is portrait-locked (the form that gets letterboxed on a landscape app display). */
     fun isPortraitActivity(
         context: Context,
         component: android.content.ComponentName,

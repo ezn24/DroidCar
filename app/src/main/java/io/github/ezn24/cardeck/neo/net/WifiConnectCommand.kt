@@ -1,27 +1,27 @@
 package io.github.ezn24.cardeck.neo.net
 
 /**
- * 构造 Shizuku 静默入网用的 `cmd wifi connect-network` 命令（纯函数，单测覆盖）。
+ * Builds the `cmd wifi connect-network` command used for silent Shizuku network join (pure function, unit-tested).
  *
- * 语法（AOSP `WifiShellCommand#connect-network`）：
+ * Syntax (AOSP `WifiShellCommand#connect-network`):
  * ```
  * cmd wifi connect-network <ssid> open|owe|wpa2|wpa3 [<passphrase>] [-m] [-d] [-b <bssid>]
  * ```
- * 要点：
- *  - SSID/密码一律走 [quote]（单引号 + 内嵌单引号转义），名字带空格/中文/引号都不会被
- *    shell 拆开，也不存在命令注入；
- *  - 安全类型按 0x5703 的 `Iap2WirelessSecurity` 映射（0=NONE 1=WEP 2=WPA/WPA2
- *    3=WPA3 过渡 4=WPA3）。WEP 没有对应关键字，按 `wpa2` 试一次（与旧兜底路径一致）；
- *    WPA3 过渡模式同时接受 WPA2，故与 specifier 路径一样用 `wpa2`；
- *  - **命令的 exit=0 不代表已连上**：它只把配置投给 WifiService 就返回，调用方必须
- *    轮询 `cmd wifi status` 等 SSID（见 `SessionController.waitForCarSsid`）。
+ * Key points:
+ *  - SSID/password always go through [quote] (single quotes + escaped embedded single quotes), so names with spaces/CJK/quotes
+ *    are never split by the shell and there is no command injection;
+ *  - Security type maps from the 0x5703 `Iap2WirelessSecurity` (0=NONE 1=WEP 2=WPA/WPA2
+ *    3=WPA3 transition 4=WPA3). WEP has no matching keyword, so try `wpa2` once (same as the old fallback path);
+ *    WPA3 transition mode also accepts WPA2, so it uses `wpa2` like the specifier path;
+ *  - **The command's exit=0 does not mean connected**: it returns once the config is handed to WifiService, so the caller must
+ *    poll `cmd wifi status` for the SSID (see `SessionController.waitForCarSsid`).
  */
 object WifiConnectCommand {
-    /** POSIX shell 单引号字面量（`$`/空格/中文/双引号都原样保留）。 */
+    /** POSIX shell single-quoted literal (`$`/spaces/CJK/double quotes are kept verbatim). */
     fun quote(raw: String): String = "'" + raw.replace("'", "'\\''") + "'"
 
     /**
-     * 完整命令行。`passphrase` 为空（或 [securityType] 为 0=NONE）时按开放热点处理。
+     * Full command line. An empty `passphrase` (or [securityType] 0=NONE) is treated as an open hotspot.
      */
     fun build(
         ssid: String,
@@ -40,9 +40,10 @@ object WifiConnectCommand {
     }
 
     /**
-     * `-d`：写入的配置标记「不自动连线」。connect-network 会覆盖同名已保存网络的配置——不带它时，
-     * 用户在系统设置里关掉的「自动连线」每次连接都被改回开（2026-11-20 WinPlay 实测，车机主动断开
-     * 或 CarDeck 断开都一样）。车机热点无互联网，系统自动连它只会抢走手机的正常网络。
+     * `-d`: mark the written config as "no auto-join". connect-network overwrites the config of a same-named saved network, so without it
+     * the user's system-level "auto-join" switch was turned back on on every connection (WinPlay measured 2026-11-20, both when the head
+     * unit and when CarDeck disconnected). The car hotspot has no internet, so a system auto-join would only steal the phone's
+     * normal network.
      */
     const val AUTOJOIN_DISABLED = " -d"
 }

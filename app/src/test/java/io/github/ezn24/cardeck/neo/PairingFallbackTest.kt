@@ -7,12 +7,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 配对失败兜底路径决策测试：场景全部来自真机 sysdiagnose 对照
- * （2026-10-21/17，docs/PROTOCOL-NOTES.md §13）。
+ * Pairing-failure fallback path decision tests: all scenarios come from real-device sysdiagnose comparison
+ * (2026-10-21/17, docs/PROTOCOL-NOTES.md section 13).
  */
 class PairingFallbackTest {
     @Test
-    fun `配对成功则无兜底`() {
+    fun `pairing success means no fallback`() {
         val f =
             pairingFallback(
                 true,
@@ -27,8 +27,8 @@ class PairingFallbackTest {
     }
 
     @Test
-    fun `奥迪首连 403 - verify 段被拒 - 禁断 BT 且禁明文 - 原地退避等重邀`() {
-        // 真机抓包：pair-verify 通过后认证段 403（对客户端表现为 verify/认证 IOException）
+    fun `Audi first-connect 403 - verify phase rejected - forbid BT drop and plaintext - back off in place and wait for re-invite`() {
+        // Real-device capture: 403 in the auth phase after pair-verify passes (seen by the client as a verify/auth IOException)
         val f =
             pairingFallback(
                 false,
@@ -38,12 +38,12 @@ class PairingFallbackTest {
                 attemptedPairing = true,
                 pairingUnsupported = false,
             )
-        assertFalse("403=车机未就绪，断 BT 会错过 18~20s 后的自动重邀", f.useBtRetireHack)
-        assertFalse("403=信任已建立，明文必被拒", f.usePlainSession)
+        assertFalse("403 = head unit not ready; dropping BT would miss the automatic re-invite 18~20s later", f.useBtRetireHack)
+        assertFalse("403 = trust already established, plaintext is certain to be rejected", f.usePlainSession)
     }
 
     @Test
-    fun `pair-setup 403 - 走快路径后仍失败 - 同样禁断 BT`() {
+    fun `pair-setup 403 - still fails after the fast path - likewise forbid BT drop`() {
         val f =
             pairingFallback(
                 false,
@@ -58,7 +58,7 @@ class PairingFallbackTest {
     }
 
     @Test
-    fun `DiPlay 断链形态 - 无 403 - 保留二段 hack`() {
+    fun `DiPlay link-drop form - no 403 - keep the second-stage hack`() {
         val f =
             pairingFallback(
                 false,
@@ -73,7 +73,7 @@ class PairingFallbackTest {
     }
 
     @Test
-    fun `pre-HomeKit 老车机 - 不支持配对 - 明文兜底`() {
+    fun `pre-HomeKit old head unit - pairing unsupported - plaintext fallback`() {
         val f =
             pairingFallback(
                 false,
@@ -88,7 +88,7 @@ class PairingFallbackTest {
     }
 
     @Test
-    fun `端点未解析 - RTSP 未连上 - 两条兜底都不启用`() {
+    fun `endpoint unresolved - RTSP not connected - neither fallback enabled`() {
         val f =
             pairingFallback(
                 false,
@@ -103,7 +103,7 @@ class PairingFallbackTest {
     }
 
     @Test
-    fun `重试退避 - 403 长 - 其余短`() {
+    fun `retry backoff - long for 403 - short for the rest`() {
         assertEquals(5_000L, pairingRetryBackoffMs("RTSP/1.0 403 Forbidden"))
         assertEquals(5_000L, pairingRetryBackoffMs("HTTP/1.1 403"))
         assertEquals(500L, pairingRetryBackoffMs("RTSP/1.0 500 Internal"))

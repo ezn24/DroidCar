@@ -4,7 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 0x4300：默认单群组（群组 1），通用车机为 iPhone 同款双群组（群组 0 设备标识 + 群组 1 蓝牙 MAC）。 */
+/** 0x4300: default single group (group 1); generic head units use the same two groups as an iPhone (group 0 device identifier + group 1 Bluetooth MAC). */
 class CarPlayAvailabilityTest {
     private val mac = "A4:A4:90:D6:CA:25"
 

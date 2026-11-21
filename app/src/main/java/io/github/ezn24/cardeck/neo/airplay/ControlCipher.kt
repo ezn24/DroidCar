@@ -1,16 +1,16 @@
 package io.github.ezn24.cardeck.neo.airplay
 
 /**
- * 控制通道加密帧（与参考接收端 ControlCipher 逐字节兼容）：
- * 每帧 = [2 字节小端密文长度(作 AAD)][密文][16 字节 tag]，
- * nonce = 4 字节零 + 8 字节小端计数器，收发方向各自的密钥与计数器独立递增。
+ * Control-channel encrypted frames (byte-compatible with the reference receiver's ControlCipher):
+ * each frame = [2-byte little-endian ciphertext length (used as AAD)][ciphertext][16-byte tag],
+ * nonce = 4 zero bytes + 8-byte little-endian counter; each direction has its own key and counter, incremented independently.
  *
- * 单帧明文上限取 **1422**（1440 MTU - 2 字节 AAD - 16 字节 tag）。对照 catplay
- * `AirPlayCipherCodec`：它按「以太网 1500 - IPv6 头 40 - TCP 头 20 = 1440」分片，
- * 且**解码侧遇到 len > 1422 直接判协议违规**。真 iPhone 的老版本用 1024 字节分片，
- * 两者都在接收端接受范围内；超过 1440 的帧则可能被严格车机拒收（旧实现用 0x4000，
- * 一旦某请求超过 MTU 就会被拆成非法帧——2026-10-19 按 catplay 对齐）。
- * 读方向保持宽松（车机自己发的分片长度由其决定，不应因超出我们的 MTU 而丢帧）。
+ * Max plaintext per frame is **1422** (1440 MTU - 2-byte AAD - 16-byte tag). Per catplay
+ * `AirPlayCipherCodec`: it fragments at "Ethernet 1500 - IPv6 header 40 - TCP header 20 = 1440",
+ * and **its decoder treats len > 1422 as a protocol violation**. Older real iPhones fragment at 1024 bytes;
+ * both are within what receivers accept, but frames above 1440 may be rejected by strict head units (the old code used 0x4000,
+ * so any request exceeding the MTU was split into illegal frames; aligned with catplay on 2026-10-19).
+ * The read direction stays lenient (fragment sizes sent by the head unit are its own choice; do not drop frames for exceeding our MTU).
  */
 class ControlCipher(
     private val readKey: ByteArray,
@@ -71,7 +71,7 @@ class ControlCipher(
         const val HEADER_SIZE = 2
         const val TAG_SIZE = 16
 
-        /** 1440 MTU - 2B AAD - 16B tag（catplay AIRPLAY_CIPHER_MTU_MAX 同口径）。 */
+        /** 1440 MTU - 2B AAD - 16B tag (same basis as catplay AIRPLAY_CIPHER_MTU_MAX). */
         const val MAX_PAYLOAD = 1422
     }
 }

@@ -7,21 +7,21 @@ import io.github.ezn24.cardeck.neo.shizuku.Shell
 import io.github.ezn24.cardeck.neo.util.Bg
 
 /**
- * 「强制横屏未生效」提示的编排：事件驱动探测 → 定位黑边 → 生成卡片 → 一键重启。
+ * Orchestration of the "forced landscape not in effect" hint: event-driven probe -> locate black bars -> build the card -> one-tap restart.
  *
- * 为什么会需要它（2026-10-18 荣耀真机复现）：应用先运行、连接车机后才写入
- * `am compat` 强制横屏时，系统虽然杀掉了进程，但保留下来的任务会按**旧配置**恢复
- * ActivityRecord（`displayChangedWithoutRestart=true`），于是 `overrideOrientation`
- * 仍是 PORTRAIT、`isLetterboxRunning=true`、`letterboxReason=FIXED_ORIENTATION`。
- * 只有 force-stop 后重新启动才会按新的方向覆盖重建。
+ * Why it is needed (reproduced on an Honor real device 2026-10-18): when the app runs first and `am compat` forced landscape
+ * is written only after connecting to the head unit, the system kills the process, but the retained task restores
+ * the ActivityRecord with the **old configuration** (`displayChangedWithoutRestart=true`), so `overrideOrientation`
+ * stays PORTRAIT, `isLetterboxRunning=true`, `letterboxReason=FIXED_ORIENTATION`.
+ * Only force-stop followed by a fresh launch rebuilds it with the new orientation override.
  *
- * 探测只在事件点触发（连接建立、应用启动、地图全屏、重启之后），不做轮询；
- * 判定与几何计算都是纯函数（见 LetterboxHint.kt），可单测。
+ * Probing is triggered only at event points (connection established, app launched, map fullscreen, after restart), never polled;
+ * the decision and geometry are pure functions (see LetterboxHint.kt) and unit-testable.
  */
 object LetterboxHintController {
     private const val TAG = "LetterboxHint"
 
-    /** 用户点过「关闭」/确认修不好：本次会话不再提示。 */
+    /** The user tapped "close" / confirmed it cannot be fixed: no more hints this session. */
     private val dismissed = HashSet<String>()
 
     private enum class State { NORMAL, BUSY, FAILED }
@@ -29,7 +29,7 @@ object LetterboxHintController {
     @Volatile
     private var state = State.NORMAL
 
-    /** 当前提示对应的目标（null = 未显示）。 */
+    /** Target of the current hint (null = not shown). */
     private data class Target(
         val packageName: String,
         val component: String,
@@ -39,7 +39,7 @@ object LetterboxHintController {
     @Volatile
     private var target: Target? = null
 
-    /** 卡片矩形（输出画面坐标，顶部原点）；触摸命中直接用它。 */
+    /** Card rectangle (output-picture coordinates, origin at top); touch hit-testing uses it directly. */
     @Volatile
     private var cardLeft = 0f
 
@@ -57,13 +57,13 @@ object LetterboxHintController {
 
     fun isVisible(): Boolean = target != null
 
-    /** 卡片是否命中（输出画面坐标；由 TouchRouter 在注入前调用）。 */
+    /** Whether the card is hit (output-picture coordinates; called by TouchRouter before injection). */
     fun contains(
         x: Float,
         y: Float,
     ): Boolean = target != null && x >= cardLeft && x < cardRight && y >= cardTop && y < cardBottom
 
-    /** 卡片被点按：NORMAL=重启应用；BUSY=忽略；FAILED=关闭。 */
+    /** Card tapped: NORMAL = restart the app; BUSY = ignore; FAILED = close. */
     fun onTap() {
         when (state) {
             State.NORMAL -> {
@@ -82,7 +82,7 @@ object LetterboxHintController {
         clear()
     }
 
-    /** 回桌面 / 会话结束：清掉提示并恢复状态。 */
+    /** Back to desktop / session end: clear the hint and restore state. */
     fun clear() {
         target = null
         state = State.NORMAL
@@ -93,19 +93,22 @@ object LetterboxHintController {
         VirtualLauncher.setOverlayCard(null)
     }
 
-    /** 新会话：清空「本次会话不再提示」记录。 */
+    /** New session: clear the "no more hints this session" record. */
     fun resetSession() {
         synchronized(dismissed) { dismissed.clear() }
         clear()
     }
 
     /**
-     * 事件点探测（连接建立 / 应用启动 / 地图全屏后调用）。放后台执行：
-     * 一次 `dumpsys activity activities` 约 20ms，但仍不应占用 UI 线程。
+     * Probe at event points (called after connection established / app launched / map fullscreen). Runs in the background:
+     * one `dumpsys activity activities` takes about 20ms, but still must not occupy the UI thread.
      *
-     * [displayIdHint]：调用方**确知**的目标屏（launchApp/地图启动传入）。不传时按
-     * 合成器当前活动屏推断——但切屏要等目标屏出首帧（最长 2s），探测早于切换完成
-     * 会看错屏、读出空结果（头条这类首帧慢的应用曾因此漏提示，2026-10-18）。
+     * [displayIdHint]: the target display the caller **knows for sure** (passed by launchApp / map launch). When omitted it is inferred
+     * from the
+     * compositor's current active display - but switching displays waits for the target display's first frame (up to 2s), and a probe that
+     * runs before the switch completes
+     * looks at the wrong display and reads an empty result (apps with a slow first frame such as Toutiao missed the hint this way,
+     * 2026-10-18).
      */
     fun scheduleProbe(
         context: Context,
@@ -141,7 +144,8 @@ object LetterboxHintController {
                     if (isVisible()) clear()
                     return
                 }
-            // 方向覆盖是异步串行写入的：探测前等队列排空，否则可能读到写入前的状态
+            // Orientation overrides are written asynchronously and serially: wait for the queue to drain before probing, otherwise the
+            // pre-write state may be read
             AppOrientationCompat.awaitPending()
             val enabled = AppOrientationCompat.enabledPackages(context)
             if (enabled.isEmpty()) {
@@ -159,18 +163,19 @@ object LetterboxHintController {
             if (!should) {
                 if (isVisible()) {
                     VirtualLauncher.logSink?.invoke(
-                        "HINT: 清除提示（$reason）——" +
+                        "HINT: hint cleared ($reason) - " +
                             "letterbox=${activity.letterboxed} reason=${activity.letterboxReason}",
                     )
                     clear()
                 }
                 return
             }
-            // 系统侧覆盖必须真的生效，否则「强制重启」注定无效（误导性提示）。
-            // 偏好开着而系统侧缺失是**可自愈**的（会话写入失败/被外部清掉）：
-            // 按用户意愿补写覆盖。`am compat` 会当场杀掉目标进程，所以补写后必须
-            // 主动把它拉回原屏——否则用户看到的是「点开应用又被打回桌面、毫无提示」
-            // （2026-10-18 实测头条：只剩这条路径会静默失败）。
+            // The system-side override must really be in effect, otherwise "force restart" is doomed to fail (misleading hint).
+            // A preference that is on while the system side is missing is **self-healable** (session write failed / cleared externally):
+            // write the override per the user's intent. `am compat` kills the target process on the spot, so after the write we must
+            // actively pull it back to its original display - otherwise the user sees "tap the app and get thrown back to the desktop with
+            // no hint"
+            // (measured on Toutiao 2026-10-18: only this path remained that failed silently).
             val changeIds = AppOrientationCompat.changeIdsRegistered()
             var systemOn =
                 changeIds && AppOrientationCompat.isSystemEnabledFor(activity.packageName)
@@ -182,11 +187,12 @@ object LetterboxHintController {
                         AppOrientationCompat.WriteResult.OK
                 systemOn = healed || AppOrientationCompat.isSystemEnabledFor(activity.packageName)
                 VirtualLauncher.logSink?.invoke(
-                    "HINT: 「${activity.packageName}」系统侧横屏覆盖缺失——补写" +
-                        "${if (healed) "成功" else "失败"}",
+                    "HINT: '${activity.packageName}' system-side landscape override missing - re-write" +
+                        "${if (healed) " succeeded" else " failed"}",
                 )
                 if (systemOn) {
-                    // 补写已杀掉进程：等它退出后在原屏重启（与按钮动作等价，但自动完成）
+                    // The write already killed the process: wait for it to exit, then restart on the original display (equivalent to the
+                    // button action, but automatic)
                     Thread.sleep(600)
                     val start =
                         Shell.exec(
@@ -194,7 +200,7 @@ object LetterboxHintController {
                             timeoutMs = 8_000,
                         )
                     VirtualLauncher.logSink?.invoke(
-                        "HINT: 补写后重启 「${activity.packageName}」ok=" +
+                        "HINT: restart after re-write '${activity.packageName}' ok=" +
                             (start.ok && start.output.contains("Starting:", ignoreCase = true)),
                     )
                     healedAndRelaunched = true
@@ -213,7 +219,7 @@ object LetterboxHintController {
                     ) {
                         if (isVisible()) clear()
                         VirtualLauncher.logSink?.invoke(
-                            "HINT: 补写覆盖并重启后「${activity.packageName}」已横屏",
+                            "HINT: after re-write and restart '${activity.packageName}' is landscape",
                         )
                         return
                     }
@@ -221,18 +227,20 @@ object LetterboxHintController {
             }
             if (!systemOn) {
                 VirtualLauncher.logSink?.invoke(
-                    "HINT: 「${activity.packageName}」letterbox，但本机不支持横屏覆盖——" +
-                        "不提示重启（changeIds=$changeIds）",
+                    "HINT: '${activity.packageName}' is letterboxed, but this device does not support the landscape override - " +
+                        "not prompting a restart (changeIds=$changeIds)",
                 )
                 if (isVisible()) clear()
                 return
             }
-            // 黑边太窄（放不下卡片）时 showCard 返回 false 且不挂卡片；日志只记真实展示
+            // When the black bars are too narrow (the card does not fit) showCard returns false and attaches no card; the log records only
+            // real displays
             val wasVisible = isVisible()
-            // 补写并重启后仍竖屏 → 说明这个应用压根不吃方向覆盖，直接给「仍然竖屏」
-            // 终态卡（不再诱导用户再点一次必然失败的重启）
+            // Still portrait after re-write and restart -> this app simply ignores the orientation override, so go straight to the "still
+            // portrait"
+            // final-state card (do not lure the user into tapping a restart that is bound to fail again)
             state = if (healedAndRelaunched) State.FAILED else State.NORMAL
-            // 自愈后复探过的话以最新读数为准（组件可能已换成重建后的实例）
+            // If re-probed after self-heal, trust the latest reading (the component may have become the rebuilt instance)
             target = Target(current.packageName, current.component, displayId)
             val shown = showCard(current, state)
             if (!shown) {
@@ -241,11 +249,11 @@ object LetterboxHintController {
             }
             if (!wasVisible) {
                 VirtualLauncher.logSink?.invoke(
-                    "HINT: 「${current.packageName}」横屏未生效（$reason）" +
-                        " 内窗=${current.inner.width}x${current.inner.height}" +
-                        " 外框=${current.full.width}x${current.full.height}" +
-                        " 黑边 左=${current.inner.left - current.full.left}" +
-                        "/右=${current.full.right - current.inner.right}",
+                    "HINT: '${current.packageName}' landscape not in effect ($reason)" +
+                        " inner=${current.inner.width}x${current.inner.height}" +
+                        " outer=${current.full.width}x${current.full.height}" +
+                        " bars left=${current.inner.left - current.full.left}" +
+                        "/right=${current.full.right - current.inner.right}",
                 )
             }
         } finally {
@@ -254,8 +262,8 @@ object LetterboxHintController {
     }
 
     /**
-     * 当前应用区实际显示的屏：地图全屏时是地图屏，否则是活动应用屏。
-     * 桌面（GridActivity）不在「应用横屏」名单里，探测会自然跳过。
+     * The display the app area actually shows: the map display when the map is fullscreen, otherwise the active app display.
+     * The desktop (GridActivity) is not on the "app landscape" list, so the probe skips it naturally.
      */
     private fun visibleDisplayId(): Int? {
         if (VirtualLauncher.mapFullscreen && VirtualLauncher.mapDisplayId >= 0) {
@@ -266,11 +274,12 @@ object LetterboxHintController {
     }
 
     /**
-     * 依据 letterbox 矩形生成并挂上卡片。
+     * Builds and attaches the card from the letterbox rectangle.
      *
-     * 坐标系：dumpsys 的 bounds 是**应用屏自身像素**；合成器把整块屏拉伸/缩放到
-     * 应用区，故按 应用区宽 / 屏宽 换算成输出画面坐标（两轴比例相等，取横向）。
-     * 卡片只在黑边够宽时显示——宽度由文字实测决定，没有硬编码阈值。
+     * Coordinate system: the dumpsys bounds are in **the app display's own pixels**; the compositor stretches/scales the whole display into
+     * the app area, so they are converted to output-picture coordinates by app-area width / display width (the two axes have equal ratios,
+     * use the horizontal one).
+     * The card shows only when the black bars are wide enough - the width is measured from the text, with no hard-coded threshold.
      */
     private fun showCard(
         activity: LetterboxActivity,
@@ -286,7 +295,7 @@ object LetterboxHintController {
         val density = VirtualLauncher.uiDensity()
         val margin = LetterboxCardPainter.marginPx(density)
         val needed = LetterboxCardPainter.minWidthPx(density) + 2f * margin
-        // 黑边太窄（与全屏横屏已无区别）→ 不显示
+        // Black bars too narrow (no different from full-screen landscape) -> do not show
         val side = chooseLetterboxSide(leftBar, rightBar, needed) ?: return false
         val barWidth = if (side == LetterboxSide.LEFT) leftBar else rightBar
         val width = minOf(LetterboxCardPainter.maxWidthPx(density), barWidth - 2f * margin).toInt()
@@ -306,7 +315,7 @@ object LetterboxHintController {
         cardRight = left + bitmap.width
         cardBottom = top + bitmap.height
         VirtualLauncher.logSink?.invoke(
-            "HINT: 卡片 bitmap=${bitmap.width}x${bitmap.height} rect=" +
+            "HINT: card bitmap=${bitmap.width}x${bitmap.height} rect=" +
                 "(${cardLeft.toInt()},${cardTop.toInt()}-${cardRight.toInt()},${cardBottom.toInt()})" +
                 " bar=$barWidth density=$density widthPx=$width",
         )
@@ -324,19 +333,20 @@ object LetterboxHintController {
         }
 
     /**
-     * 强制重启目标应用：force-stop → 在**原屏**重新启动 → 复探。
-     * 后台线程执行；动作前先等方向覆盖队列排空（否则重启后仍读到旧覆盖）。
+     * Force-restarts the target app: force-stop -> relaunch on the **original display** -> re-probe.
+     * Runs on a background thread; before acting it waits for the orientation-override queue to drain (otherwise the restart still reads
+     * the old override).
      */
     private fun restart(t: Target) {
         state = State.BUSY
         reRenderBusy()
-        VirtualLauncher.logSink?.invoke("HINT: 强制重启 ${t.packageName}（display=${t.displayId}）")
+        VirtualLauncher.logSink?.invoke("HINT: force restart ${t.packageName} (display=${t.displayId})")
         Bg.run("letterbox-restart") {
             runCatching {
                 AppOrientationCompat.awaitPending()
-                // am compat 的写入确实会杀进程，但任务按旧配置恢复；这里显式 stop 让
-                // 下次启动走全新路径（实测：重启后 overrideOrientation=NOSENSOR、
-                // areBoundsLetterboxed=false）。
+                // The am compat write does kill the process, but the task restores with the old configuration; an explicit stop here makes
+                // the next launch take a fresh path (measured: after restart overrideOrientation=NOSENSOR,
+                // areBoundsLetterboxed=false).
                 Shell.exec("am force-stop ${t.packageName}", timeoutMs = 8_000)
                 Thread.sleep(400)
                 val start =
@@ -346,10 +356,10 @@ object LetterboxHintController {
                     )
                 if (!start.ok) {
                     VirtualLauncher.logSink?.invoke(
-                        "HINT: 重启 ${t.packageName} 失败 exit=${start.exitCode} out=${start.output.take(120)}",
+                        "HINT: restart ${t.packageName} failed exit=${start.exitCode} out=${start.output.take(120)}",
                     )
                 }
-                // 等应用重建窗口后再复探
+                // Wait for the app to rebuild its window, then re-probe
                 Thread.sleep(2_000)
                 val (w, h) = VirtualLauncher.hintDisplaySize(t.displayId) ?: return@runCatching
                 val ctx = VirtualLauncher.appContext() ?: return@runCatching
@@ -366,30 +376,31 @@ object LetterboxHintController {
                 if (still) {
                     state = State.FAILED
                     if (!showCard(activity!!, State.FAILED)) {
-                        // 黑边放不下卡片（或屏已释放）：直接收掉，避免重启无反馈
+                        // The black bars cannot fit the card (or the display is released): dismiss directly so a restart does not go
+                        // without feedback
                         clear()
                     }
                     VirtualLauncher.logSink?.invoke(
-                        "HINT: 重启后「${t.packageName}」仍然 letterbox（reason=${activity.letterboxReason}）",
+                        "HINT: after restart '${t.packageName}' is still letterboxed (reason=${activity.letterboxReason})",
                     )
                 } else {
                     clear()
-                    VirtualLauncher.logSink?.invoke("HINT: 重启后「${t.packageName}」已横屏")
+                    VirtualLauncher.logSink?.invoke("HINT: after restart '${t.packageName}' is landscape")
                 }
             }.onFailure {
                 state = State.NORMAL
-                VirtualLauncher.logSink?.invoke("HINT: 重启异常 ${it.message}")
+                VirtualLauncher.logSink?.invoke("HINT: restart error ${it.message}")
             }
         }
     }
 
-    /** BUSY 态重画：沿用当前卡片的宽度/位置，避免重新解析。 */
+    /** Redraw in BUSY state: reuse the current card's width/position to avoid re-parsing. */
     private fun reRenderBusy() {
         val density = VirtualLauncher.uiDensity()
         val width = (cardRight - cardLeft).toInt()
         val maxHeight = (VirtualLauncher.appAreaRect()?.height() ?: 0f).toInt()
         val bitmap = LetterboxCardPainter.render(density, width, maxHeight, LetterboxCardState.BUSY) ?: return
-        // 上下以原矩形中心对齐（高度可能变化）
+        // Align vertically on the center of the original rectangle (the height may change)
         val centerY = (cardTop + cardBottom) / 2f
         cardTop = centerY - bitmap.height / 2f
         cardBottom = cardTop + bitmap.height
@@ -397,12 +408,12 @@ object LetterboxHintController {
         VirtualLauncher.setOverlayCard(OverlayCard(bitmap, cardLeft, cardTop, cardRight, cardBottom))
     }
 
-    /** 诊断用：当前提示的包名（未显示时 null）。 */
+    /** For diagnostics: package name of the current hint (null when not shown). */
     fun currentPackage(): String? = target?.packageName
 
-    /** 是否有探测在跑（测试/诊断）。 */
+    /** Whether a probe is running (tests / diagnostics). */
     fun isProbing(): Boolean = probeInFlight
 
-    /** 上次卡片的屏幕坐标快照（诊断/测试用）。 */
+    /** Snapshot of the card's last screen coordinates (diagnostics / tests). */
     fun cardRect(): FloatArray = floatArrayOf(cardLeft, cardTop, cardRight, cardBottom)
 }

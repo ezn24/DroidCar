@@ -8,14 +8,14 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * 车机 Consumer Control HID 媒体键解析（奥迪 eso_playback 实测）。
+ * Head-unit Consumer Control HID media key parsing (Audi eso_playback measured).
  *
- * 关键语义（2026-10-17 实测定谳）：Array 报告里**字节值是 Usage 数组下标**——
- * 奥迪按下「下一首」收到 0x05，对应 usages[5]=0xB5；「上一首」0x06→usages[6]=0xB6。
- * 早期把字节直接当 Usage ID，得到 0x05/0x06 → 无对应键（用户反馈「收到消息但不切歌」）。
+ * Key semantics (concluded by measurement 2026-10-17): in an Array report the **byte value is the Usage array index** --
+ * when Audi presses "next track" it receives 0x05, corresponding to usages[5]=0xB5; "previous track" 0x06 -> usages[6]=0xB6.
+ * Early on the byte was taken directly as the Usage ID, giving 0x05/0x06 -> no matching key (user feedback: "message received but track does not change").
  */
 class ConsumerKeysTest {
-    /** 描述符/报文原文按字节直书，便于与日志十六进制逐字节比对。 */
+    /** Descriptor/report originals written byte by byte, for byte-by-byte comparison with the hex in logs. */
     private fun hex(text: String): ByteArray =
         text
             .split(" ")
@@ -23,7 +23,7 @@ class ConsumerKeysTest {
             .map { it.toInt(16).toByte() }
             .toByteArray()
 
-    /** 奥迪 /info hidDevices[0].hidDescriptor 原文（46B）。 */
+    /** Audi /info hidDevices[0].hidDescriptor original (46B). */
     private val audiDescriptor =
         hex(
             "05 0c 09 01 a1 01 15 00 25 08 05 0c 0a 00 00 00 0a b0 00 0a b1 00 0a b3 00 0a b4 00 0a b5 00 0a b6 " +
@@ -33,10 +33,10 @@ class ConsumerKeysTest {
     @Test
     fun descriptorParsedAsArrayWithNineUsages() {
         val map = ConsumerKeys.parseDescriptor(audiDescriptor)
-        assertNotNull("应能解析出 Consumer 映射", map)
+        assertNotNull("Should be able to parse a Consumer mapping", map)
         assertEquals(true, map!!.isArray)
         assertEquals(9, map.usages.size)
-        // 顺序必须与描述符声明一致（下标语义依赖它）
+        // Order must match the descriptor declaration (index semantics depend on it)
         assertEquals(
             listOf(0x0000, 0xB0, 0xB1, 0xB3, 0xB4, 0xB5, 0xB6, 0xB9, 0xBC),
             map.usages,
@@ -46,25 +46,25 @@ class ConsumerKeysTest {
     @Test
     fun reportValueIsArrayIndexNotUsageId() {
         val map = ConsumerKeys.parseDescriptor(audiDescriptor)!!
-        // 实测：下一首按字节 0x05、上一首 0x06
+        // Measured: next track is byte 0x05, previous track 0x06
         assertEquals(0xB5, map.usageFor(0x05))
         assertEquals(0xB6, map.usageFor(0x06))
-        // 教训：若把 0x05 直接当 Usage ID 会得到「未知」——这两个断言锁定正确语义
+        // Lesson: taking 0x05 directly as the Usage ID would give "unknown" -- these two assertions lock in the correct semantics
         assertEquals(0, ConsumerKeys.keyCodeFor(0x05))
         assertEquals(KeyEvent.KEYCODE_MEDIA_NEXT, ConsumerKeys.keyCodeFor(0xB5))
-        // 播放/暂停 = 下标 1/2
+        // Play/pause = index 1/2
         assertEquals(0xB0, map.usageFor(1))
         assertEquals(0xB1, map.usageFor(2))
-        // 0 与越界 = 无按键
+        // 0 and out-of-range = no key
         assertNull(map.usageFor(0))
         assertNull(map.usageFor(20))
     }
 
     @Test
     fun nonConsumerDevicesAreNotMediaKeys() {
-        // 判定以描述符为准，不靠报文长度（DiPlay 的 knob=4B、telephony=1B 会与媒体键重叠）：
-        // telephony 描述符（Telephony 页 0x0B）不能被当成媒体键——其 usage 0xB3 若误判
-        // 会发出「快进」。
+        // Determination follows the descriptor, not the report length (DiPlay's knob=4B and telephony=1B would overlap with media keys):
+        // the telephony descriptor (Telephony page 0x0B) must not be treated as media keys -- if its usage 0xB3 were misjudged
+        // it would emit "fast forward".
         val telephonyDescriptor =
             hex(
                 "05 0b 09 07 a1 01 15 00 25 11 05 0b 09 00 09 20 09 21 09 26 09 2f 09 b0 09 b1 09 b2 09 b3 75 08 95 " +
@@ -75,7 +75,7 @@ class ConsumerKeysTest {
 
     @Test
     fun diplayMediaDescriptorUsesIndexSemantics() {
-        // DiPlay（测试台）media 描述符：Usage 数组 6 项，报告值同为下标
+        // DiPlay (test bench) media descriptor: Usage array of 6 entries, report values are likewise indices
         val diplayMedia =
             hex(
                 "05 0c 09 01 a1 01 15 00 25 06 05 0c 0a 00 00 00 0a b0 00 0a b1 00 0a cd 00 0a b5 00 0a b6 00 0a 9e " +
@@ -97,13 +97,13 @@ class ConsumerKeysTest {
         assertEquals(KeyEvent.KEYCODE_MEDIA_NEXT, ConsumerKeys.keyCodeFor(0xB5))
         assertEquals(KeyEvent.KEYCODE_MEDIA_PREVIOUS, ConsumerKeys.keyCodeFor(0xB6))
         assertEquals(KeyEvent.KEYCODE_MEDIA_STOP, ConsumerKeys.keyCodeFor(0xB9))
-        // Repeat 无对应 Android 键 → 0（调用方忽略）
+        // Repeat has no matching Android key -> 0 (caller ignores)
         assertEquals(0, ConsumerKeys.keyCodeFor(0xBC))
     }
 
     @Test
     fun descriptorWithoutConsumerPageReturnsNull() {
-        // 奥迪触摸屏（uuid=1）描述符：Generic Desktop / Digitizer，无 Consumer 页
+        // Audi touchscreen (uuid=1) descriptor: Generic Desktop / Digitizer, no Consumer page
         val touchDescriptor =
             hex(
                 "05 0d 09 04 a1 01 05 0d 09 22 a1 02 05 0d 09 33 15 00 25 01 75 01 95 01 81 02 c0 c0",
@@ -115,17 +115,17 @@ class ConsumerKeysTest {
     fun allDescriptorUsagesNamed() {
         listOf(0xB0, 0xB1, 0xB3, 0xB4, 0xB5, 0xB6, 0xB9, 0xBC).forEach { usage ->
             assertFalse(
-                "usage=0x%02x 应可读".format(usage),
+                "usage=0x%02x should be readable".format(usage),
                 ConsumerKeys.nameOf(usage).startsWith("未知"),
             )
         }
     }
 
-    // ---- 本田 HFT（Alpine 8A250-30A）：位图（Variable）报告 ----
+    // ---- Honda HFT (Alpine 8A250-30A): bitmap (Variable) reports ----
 
     /**
-     * 车机 0x6800 StartHID 里带的描述符（33B），`81 02` = Data/Variable/Absolute：
-     * 5 个 usage 各占 1 bit，末尾 `75 03 95 01 81 03` 是 3 bit 补齐。
+     * Descriptor carried in the head unit's 0x6800 StartHID (33B), `81 02` = Data/Variable/Absolute:
+     * 5 usages occupy 1 bit each, the trailing `75 03 95 01 81 03` is 3-bit padding.
      */
     private val hondaDescriptor =
         hex(
@@ -135,21 +135,21 @@ class ConsumerKeysTest {
     @Test
     fun hondaDescriptorIsBitmapWithFiveUsages() {
         val map = ConsumerKeys.parseDescriptor(hondaDescriptor)!!
-        assertFalse("`81 02` 是位图报告，不是 Array", map.isArray)
+        assertFalse("`81 02` is a bitmap report, not an Array", map.isArray)
         assertEquals(listOf(0xB0, 0xB1, 0xB5, 0xB6, 0xB9), map.usages)
     }
 
     @Test
     fun hondaBitmapReportsDecodeToMediaKeys() {
         val map = ConsumerKeys.parseDescriptor(hondaDescriptor)!!
-        // 实测报文：按住「下一首」连推 0x04，松开推 0x00
+        // Measured report: holding "next track" repeatedly pushes 0x04, releasing pushes 0x00
         assertEquals(listOf(0xB5), map.usagesFor(byteArrayOf(0x04)))
         assertEquals(listOf(0xB6), map.usagesFor(byteArrayOf(0x08)))
         assertEquals(listOf(0xB0), map.usagesFor(byteArrayOf(0x01)))
         assertEquals(listOf(0xB1), map.usagesFor(byteArrayOf(0x02)))
         assertEquals(listOf(0xB9), map.usagesFor(byteArrayOf(0x10)))
         assertEquals(emptyList<Int>(), map.usagesFor(byteArrayOf(0x00)))
-        // 旧实现把 0x04 直接当 Usage ID → 无对应键，这正是「按键到了但不切歌」的根因
+        // The old implementation took 0x04 directly as the Usage ID -> no matching key, which is the root cause of "key arrived but track did not change"
         assertEquals(0, ConsumerKeys.keyCodeFor(0x04))
         assertEquals(KeyEvent.KEYCODE_MEDIA_NEXT, ConsumerKeys.keyCodeFor(map.usagesFor(byteArrayOf(0x04))[0]))
     }

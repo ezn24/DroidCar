@@ -10,7 +10,7 @@ import io.github.ezn24.cardeck.neo.R
 import io.github.ezn24.cardeck.neo.launcher.DesktopApps
 import io.github.ezn24.cardeck.neo.launcher.VirtualLauncher
 
-/** 设置列表行：分组标题 / 拼音字母标题 / 应用（三个应用列表共用）。 */
+/** Settings list rows: group header / pinyin letter header / app (shared by the three app lists). */
 sealed class SettingsRow {
     abstract val id: Long
 
@@ -29,15 +29,16 @@ sealed class SettingsRow {
 }
 
 /**
- * 行构建与字母导航条（管理桌面 / 应用超采样 / 应用横屏共用）：
- * 两级分组——先按桌面勾选（「在桌面的应用」→「不在桌面的应用」）。
- * 仅「不在桌面」组内按拼音首字母分节（A/B/…/#，数字应用归 #），字母导航条
- * 也只对应后者——**在桌面组不分节**：其数量通常少，若分节，其字母会出现在
- * 导航条首位（排在 #/A 之前），而后面分节里不再出现该字母，导航条看起来
- * 「排序错误」（2026-10-16 用户反馈：高德在桌面 → G 排在导航条第一个）。
+ * Row building and letter index bar (shared by manage desktop / app supersampling / app landscape):
+ * two-level grouping - first by desktop selection ("apps on desktop" -> "apps not on desktop").
+ * Only the "not on desktop" group is sectioned by pinyin initial (A/B/.../#, digit apps go to #), and the letter index bar
+ * maps to that group alone - **the on-desktop group is not sectioned**: it is usually small, and if it were sectioned its letters would
+ * appear
+ * first in the index bar (before #/A) while not appearing again in the later sections, so the bar would look
+ * "mis-sorted" (user feedback 2026-10-16: Amap on desktop -> G listed first in the index bar).
  */
 object SettingsRows {
-    /** 面板主题色（车机主题 = 原深色值，手机主题 = MD3 令牌；属性定义见 attrs.xml）。 */
+    /** Panel theme colors (head-unit theme = original dark values, phone theme = MD3 tokens; attributes defined in attrs.xml). */
     fun color(
         context: Context,
         attr: Int,
@@ -57,7 +58,7 @@ object SettingsRows {
         val rows = ArrayList<SettingsRow>(apps.size * 2)
         if (onDesktop.isNotEmpty()) {
             rows += SettingsRow.Header("在桌面的应用（${onDesktop.size}）", "on")
-            // 扁平直出（清单本身按拼音有序，过滤后仍有序），不分字母节、不进导航条
+            // Flat output (the list is already in pinyin order and stays ordered after filtering): no letter sections, not in the index bar
             rows += onDesktop.map { SettingsRow.App(it) }
         }
         if (offDesktop.isNotEmpty()) {
@@ -82,7 +83,7 @@ object SettingsRows {
         return rows
     }
 
-    /** 右侧字母导航条：行集合变化时由 AdapterDataObserver 驱动重建。 */
+    /** Right-hand letter index bar: rebuilt by an AdapterDataObserver when the row set changes. */
     fun setupIndexBar(
         fragment: androidx.fragment.app.Fragment,
         bar: LinearLayout,
@@ -148,7 +149,7 @@ object SettingsRows {
         )
     }
 
-    /** 分组标题行复用 ViewHolder。 */
+    /** Reusable ViewHolder for group header rows. */
     class HeaderHolder(
         val title: TextView,
     ) : RecyclerView.ViewHolder(title) {
@@ -164,22 +165,23 @@ object SettingsRows {
 }
 
 /**
- * 应用清单列表的通用适配器骨架（桌面/超采样/横屏三面板共用）：两级分组头由骨架
- * 统一渲染，应用行的布局与绑定由子类提供——替代此前三份近乎复制的适配器样板。
+ * Skeleton adapter for app-list screens (shared by the desktop / supersample / landscape panels): the two-level group headers are
+ * rendered uniformly by the skeleton while the app-row layout and binding are supplied by subclasses - replaces three near-copied adapter
+ * boilerplates.
  */
 abstract class AppRowsAdapter(
     private val fragment: androidx.fragment.app.Fragment,
     private val rowLayout: Int,
     private val appsProvider: () -> List<VirtualLauncher.AppEntry>,
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-    /** 应用行 Holder（分组头之外的内容行）。 */
+    /** App-row holder (content rows other than group headers). */
     abstract class AppHolder(
         row: android.view.View,
     ) : RecyclerView.ViewHolder(row) {
         abstract fun bind(entry: VirtualLauncher.AppEntry)
     }
 
-    /** 创建应用行 Holder（[rowLayout] 已 inflate 好，无需再关心 viewType）。 */
+    /** Creates the app-row holder ([rowLayout] is already inflated; no need to care about viewType). */
     protected abstract fun onCreateAppHolder(row: android.view.View): AppHolder
 
     val rows: List<SettingsRow>

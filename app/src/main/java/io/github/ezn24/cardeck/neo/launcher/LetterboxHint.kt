@@ -11,22 +11,24 @@ import android.text.StaticLayout
 import android.text.TextPaint
 
 /**
- * 「强制横屏未生效」提示：探测 + 几何计算 + 提示卡绘制。
+ * "Forced landscape not in effect" hint: probing + geometry computation + hint card drawing.
  *
- * 场景（2026-10-18 真机复现）：应用先运行，连接车机后 am compat 写入强制横屏。
- * `am compat` 确实杀了进程，但系统恢复任务时 ActivityRecord 仍按旧的竖屏配置
- * 重建（`displayChangedWithoutRestart=true`），于是应用继续以 letterbox 竖窗运行。
- * 此时唯一的修复手段是 force-stop 后重新启动——提示卡让用户一键完成。
+ * Scenario (reproduced on a real device 2026-10-18): the app is already running, and after connecting to the head unit am compat writes
+ * forced landscape.
+ * `am compat` does kill the process, but when the system restores the task the ActivityRecord is still
+ * rebuilt with the old portrait configuration (`displayChangedWithoutRestart=true`), so the app keeps running as a letterboxed portrait
+ * window.
+ * The only fix is force-stop then relaunch - the hint card lets the user do it in one tap.
  *
- * 探测数据全部来自 `dumpsys activity activities`（无默认值、无估算）：
- *   `bounds=Rect(...)`        letterbox 内窗（应用实际窗口）四边
- *   `mMaxBounds=Rect(...)`    letterbox 外框（虚拟屏可用区域）
- * 两者之差就是左右（竖屏车机为上下）黑边。系统同时给出 `isLetterboxRunning`
- * 与 `letterboxReason`，据此只对「方向锁导致的 letterbox」提示，
- * 不打扰用户本来就想竖窗显示的应用、也不误报宽高比类 letterbox。
+ * All probe data comes from `dumpsys activity activities` (no defaults, no estimates):
+ *   `bounds=Rect(...)`        the four edges of the letterbox inner window (the app's actual window)
+ *   `mMaxBounds=Rect(...)`    the letterbox outer frame (usable area of the virtual display)
+ * Their difference is the left/right (top/bottom on a portrait head unit) black bars. The system also gives `isLetterboxRunning`
+ * and `letterboxReason`, so we hint only for "letterbox caused by an orientation lock",
+ * without bothering apps the user wants in a portrait window, or misreporting aspect-ratio-type letterboxes.
  */
 
-/** 简单整数矩形（避免 android.graphics.Rect 在 JVM 单测里是空实现）。 */
+/** Simple integer rectangle (android.graphics.Rect is a stub in JVM unit tests, so it is avoided). */
 internal data class PixelBounds(
     val left: Int,
     val top: Int,
@@ -37,17 +39,17 @@ internal data class PixelBounds(
     val height: Int get() = bottom - top
 }
 
-/** `dumpsys activity activities` 里某块屏顶层 Activity 的相关事实。 */
+/** Relevant facts about the top Activity of one display in `dumpsys activity activities`. */
 internal data class LetterboxActivity(
     val packageName: String,
-    /** `包/类` 形式，可直接 `am start -n`。 */
+    /** In `package/class` form, usable directly in `am start -n`. */
     val component: String,
     val displayId: Int,
     val letterboxed: Boolean,
     val letterboxReason: String?,
-    /** 应用窗口矩形（`bounds=`）。 */
+    /** App window rectangle (`bounds=`). */
     val inner: PixelBounds,
-    /** 该屏可用区域矩形（`mMaxBounds=`；缺失时用调用方给的屏尺寸）。 */
+    /** Usable-area rectangle of that display (`mMaxBounds=`; when missing, the display size given by the caller is used). */
     val full: PixelBounds,
 )
 
@@ -60,12 +62,12 @@ private val boundsRegex = Regex("""^\s+bounds=Rect\((-?\d+), (-?\d+) - (-?\d+), 
 private val maxBoundsRegex = Regex("""mMaxBounds=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)""")
 
 /**
- * 解析指定虚拟屏顶层 Activity 的 letterbox 事实。
+ * Parses the letterbox facts of the top Activity of the given virtual display.
  *
- * @param displayId 目标屏
- * @param dump `dumpsys activity activities` 原始输出
- * @param fallbackW/[fallbackH] `mMaxBounds` 缺失时的屏尺寸兜底（调用方持有的事实，
- *        不是常量默认值——仍能算出左右黑边）
+ * @param displayId target display
+ * @param dump raw output of `dumpsys activity activities`
+ * @param fallbackW/[fallbackH] display-size fallback when `mMaxBounds` is missing (facts held by the caller,
+ *        not constant defaults - the left/right black bars can still be computed)
  */
 internal fun parseTopLetterboxActivity(
     displayId: Int,
@@ -87,9 +89,9 @@ internal fun parseTopLetterboxActivity(
         }
     }
     if (sectionStart < 0) return null
-    // 只取目标 display 段，避免把别的屏的 Hist 块带进来
+    // Take only the target display's section, so Hist blocks of other displays are not pulled in
     val section = lines.subList(sectionStart + 1, sectionEnd)
-    // 顶层任务：段内第一个 topResumedActivity（任务按从顶到底输出）
+    // Top task: the first topResumedActivity in the section (tasks are printed from top to bottom)
     var topHash: String? = null
     var topPkg: String? = null
     var topCls: String? = null
@@ -100,8 +102,8 @@ internal fun parseTopLetterboxActivity(
         topCls = match.groupValues[3]
         break
     }
-    // 定位顶层 ActivityRecord 的 Hist 块：优先 hash 完全匹配，
-    // 兼容 ROM 省略 topResumedActivity 时取第一块 Hist
+    // Locate the Hist block of the top ActivityRecord: prefer an exact hash match,
+    // and when the ROM omits topResumedActivity take the first Hist block
     var block = -1
     var header: MatchResult? = null
     for (index in section.indices) {
@@ -174,10 +176,10 @@ internal fun parseTopLetterboxActivity(
 }
 
 /**
- * 是否值得弹「强制横屏未生效」提示。
+ * Whether the "forced landscape not in effect" hint is worth showing.
  *
- * 四条同时成立：顶层应用在「应用横屏」名单里、确实处于 letterbox、
- * 原因是 FIXED_ORIENTATION（方向锁）、且用户本次会话没关掉过该提示。
+ * Four conditions must hold together: the top app is on the "app landscape" list, is really letterboxed,
+ * the reason is FIXED_ORIENTATION (orientation lock), and the user has not dismissed the hint this session.
  */
 internal fun shouldShowLetterboxHint(
     activity: LetterboxActivity,
@@ -192,9 +194,11 @@ internal fun shouldShowLetterboxHint(
 internal enum class LetterboxSide { LEFT, RIGHT }
 
 /**
- * 选提示卡放哪一侧：优先左侧（靠近驾驶位），左侧放不下且右侧更宽时退到右侧。
- * [neededPx] = 卡片最小宽度 + 两侧外边距（由文字实测得出，非固定阈值）。
- * 两侧都不够 → null（黑边太窄，与全屏横屏已无区别，提示只会挤成一团）。
+ * Chooses which side to place the hint card: prefer the left (near the driver); if the left cannot fit and the right is wider, use the
+ * right.
+ * [neededPx] = minimum card width + outer margins on both sides (measured from the text, not a fixed threshold).
+ * If neither side is enough -> null (the bars are too narrow, no different from full-screen landscape, and the hint would only cram
+ * together).
  */
 internal fun chooseLetterboxSide(
     leftPx: Float,
@@ -211,12 +215,12 @@ internal fun chooseLetterboxSide(
 internal enum class LetterboxCardState { NORMAL, BUSY, FAILED }
 
 /**
- * 提示卡的手势裁决（纯函数，TouchRouter 的唯一决策点）。
+ * Gesture arbitration for the hint card (pure function, the single decision point of TouchRouter).
  *
- * 卡片画在黑边上，绝不注入给应用；按下命中后整段手势由卡片独占：
- *  - 抬起点仍在卡片内 → 算一次点按；
- *  - 移出卡片再抬起 → 取消（避免误触）；
- *  - 按住期间不把 move 漏给应用（否则会拖动下面的列表）。
+ * The card is drawn on the black bar and never injected into the app; once a press hits it, the whole gesture belongs to the card:
+ *  - lift point still inside the card -> counts as a tap;
+ *  - move out of the card then lift -> cancel (avoids accidental taps);
+ *  - while held, move events are not leaked to the app (otherwise the list underneath would be dragged).
  */
 internal enum class CardGesture { NOT_HANDLED, CONSUME, TAP }
 
@@ -228,22 +232,22 @@ internal fun resolveCardGesture(
     appGestureActive: Boolean = false,
 ): CardGesture =
     when {
-        // 卡片已收起：无论之前是否按住，都交回普通路由
+        // Card already collapsed: hand back to normal routing regardless of whether it was held before
         !cardVisible -> if (holding) CardGesture.CONSUME else CardGesture.NOT_HANDLED
-        // 按住中：按下期间的 move 一律吞掉；抬起时按是否仍在卡片内决定点按
+        // While held: swallow every move during the press; on lift decide the tap by whether it is still inside the card
         holding && down -> CardGesture.CONSUME
         holding -> if (hit) CardGesture.TAP else CardGesture.CONSUME
-        // 未按住：只有「按下瞬间就在卡片上」才接管。应用手势进行中拖进卡片区域
-        // 不接管——否则应用收不到抬起，会停在按下态（卡死）。
+        // Not held: take over only if "already on the card at press time". If an app gesture in progress is dragged into the card area,
+        // do not take over - otherwise the app never receives the lift and stays in the pressed state (stuck).
         down && hit && !appGestureActive -> CardGesture.CONSUME
         else -> CardGesture.NOT_HANDLED
     }
 
 /**
- * 提示卡绘制（离屏 Bitmap → 合成器当纹理贴到黑边上）。
+ * Hint card drawing (offscreen Bitmap -> the compositor pastes it as a texture onto the black bar).
  *
- * 尺寸全部按画布密度换算；**最小宽度由文字实测**（按钮文字 + 内边距），
- * 没有「黑边小于 N px 不显示」这类硬编码阈值——窄到放不下文案自然就不显示。
+ * All sizes are scaled by canvas density; **the minimum width is measured from the text** (button text + padding),
+ * with no hard-coded threshold like "do not show if the bar is under N px" - when too narrow to fit the copy it simply is not shown.
  */
 internal object LetterboxCardPainter {
     private const val MAX_WIDTH_DP = 200f
@@ -252,34 +256,36 @@ internal object LetterboxCardPainter {
     private const val PAD_V_DP = 10f
     private const val GAP_DP = 7f
 
-    /** 按钮高度随字号同步收敛（32dp + 9.5sp 会显得按钮里空荡）。 */
+    /** Button height converges with the font size (32dp + 9.5sp would look hollow inside the button). */
     private const val BUTTON_H_DP = 28f
     private const val RADIUS_DP = 10f
     private const val TITLE_SP = 11.5f
     private const val BODY_SP = 9.5f
 
-    /** 按钮字号与正文同档：11.5sp 在真机上比标题还抢眼（用户实测反馈，2026-10-18）。 */
+    /**
+     * Button font size matches the body text: 11.5sp looked more eye-catching than the title on a real device (user feedback, 2026-10-18).
+     */
     private const val BUTTON_SP = 9.5f
     private const val BUTTON_PAD_H_DP = 8f
 
     fun marginPx(density: Float): Float = MARGIN_DP * density
 
-    /** 卡片允许的最大宽度（黑边再宽也不铺满，避免在大黑边里变成一块巨幅广告牌）。 */
+    /** Maximum card width (even with wide bars it does not fill them, so it does not become a giant billboard in a large bar). */
     fun maxWidthPx(density: Float): Float = MAX_WIDTH_DP * density
 
-    /** 卡片最小宽度：由按钮文案与标题实测宽度决定。 */
+    /** Minimum card width: determined by the measured widths of the button text and title. */
     fun minWidthPx(density: Float): Float {
         val button = textPaint(BUTTON_SP * density, Color.WHITE, bold = true)
         val buttonW = button.measureText("强制重启") + 2f * BUTTON_PAD_H_DP * density
         val title = textPaint(TITLE_SP * density, Color.WHITE, bold = true)
-        // 标题至少容纳 5 个汉字（再窄会碎成单字换行）
+        // Title must fit at least 5 CJK characters (any narrower and it breaks into single characters per line)
         val titleW = title.measureText("横屏未生效")
         return 2f * PAD_H_DP * density + maxOf(buttonW, titleW)
     }
 
     /**
-     * 生成提示卡位图；[widthPx] 由黑边宽度决定。
-     * 宽度放不下文案或高度放不下按钮时返回 null（调用方据此不显示）。
+     * Builds the hint card bitmap; [widthPx] is determined by the black bar width.
+     * Returns null when the width cannot fit the copy or the height cannot fit the button (the caller then does not show it).
      */
     fun render(
         density: Float,
@@ -342,8 +348,8 @@ internal object LetterboxCardPainter {
                 if (enabled) BUTTON_TEXT_COLOR else DISABLED_TEXT,
                 bold = true,
             ).apply {
-                // drawText 默认左对齐：不设 CENTER 时整串从 buttonRect.centerX() 起笔、
-                // 向右溢出按钮（真机截图暴露，2026-10-18）
+                // drawText is left-aligned by default: without CENTER the whole string starts at buttonRect.centerX()
+                // and overflows the button to the right (exposed by a real-device screenshot, 2026-10-18)
                 textAlign = Paint.Align.CENTER
             }
         val metrics = buttonPaint.fontMetrics
@@ -393,7 +399,7 @@ internal object LetterboxCardPainter {
             this.color = color
         }
 
-    // 深色卡 + 琥珀强调色，与 dock 的深色风格一致；黑边上对比足够
+    // Dark card + amber accent, matching the dock's dark style; contrast is sufficient on the black bar
     private const val BG_COLOR = 0xF0171C22.toInt()
     private const val BORDER_COLOR = 0x33FFFFFF
     private const val ACCENT_COLOR = 0xFFFFC24B.toInt()

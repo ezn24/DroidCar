@@ -3,7 +3,7 @@ package io.github.ezn24.cardeck.neo.render
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** 合成节奏：有新帧按目标帧率；刚静止 1 秒内 33ms；长时间静止每秒 1 帧。 */
+/** Compose cadence: with new frames follow the target frame rate; within 1 second of going still 33ms; when still for a long time 1 frame per second. */
 class ComposeIntervalTest {
     @Test
     fun newFramesFollowTargetFps() {

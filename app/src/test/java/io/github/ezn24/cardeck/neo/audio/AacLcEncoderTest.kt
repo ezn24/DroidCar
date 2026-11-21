@@ -5,20 +5,20 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADTS 头拼装与音频方案切换的单测。
+ * Unit tests for ADTS header assembly and audio scheme switching.
  *
- * 背景：车机（Honda HFT / Alpine 8A250-30A）走 type=102 + AAC-LC 时「能连、能消费、
- * 没声音」，剩下没法用日志区分的差异就是负载封装（裸帧 vs ADTS）。这里把 ADTS 头的
- * 每一位固定下来，避免真车试错时把「封装写错」误当成「车机不认」。
+ * Background: head units (Honda HFT / Alpine 8A250-30A) using type=102 + AAC-LC "connect, consume, but
+ * produce no sound"; the remaining difference that logs cannot tell apart is the payload encapsulation (raw frame vs ADTS). This pins every bit
+ * of the ADTS header, so that during real-car trial and error a "wrong encapsulation" is not mistaken for "the head unit does not accept it".
  */
 class AacLcEncoderTest {
-    /** 从帧头解析 13 位帧长。 */
+    /** Parses the 13-bit frame length from the frame header. */
     private fun frameLength(header: ByteArray): Int =
         ((header[3].toInt() and 0x03) shl 11) or
             ((header[4].toInt() and 0xFF) shl 3) or
             ((header[5].toInt() and 0xFF) shr 5)
 
-    /** 从帧头解析声道配置。 */
+    /** Parses the channel configuration from the frame header. */
     private fun channelConfig(header: ByteArray): Int = ((header[2].toInt() and 0x01) shl 2) or ((header[3].toInt() and 0xFF) shr 6)
 
     @Test
@@ -27,18 +27,18 @@ class AacLcEncoderTest {
         val header = AacLcEncoder.adtsHeader(payload, 44_100, 2)
 
         assertEquals(7, header.size)
-        // 同步字 FFF + MPEG-4 + layer 0 + protection_absent=1
+        // Sync word FFF + MPEG-4 + layer 0 + protection_absent=1
         assertEquals(0xFF, header[0].toInt() and 0xFF)
         assertEquals(0xF1, header[1].toInt() and 0xFF)
-        // profile = AAC-LC（存 AOT-1 = 1）
+        // profile = AAC-LC (stores AOT-1 = 1)
         assertEquals(1, (header[2].toInt() and 0xFF) shr 6)
-        // 采样率索引：44100 → 4
+        // Sample rate index: 44100 -> 4
         assertEquals(4, ((header[2].toInt() and 0xFF) shr 2) and 0x0F)
-        // 声道配置：立体声 → 2
+        // Channel configuration: stereo -> 2
         assertEquals(2, channelConfig(header))
-        // 帧长（含 7 字节头）
+        // Frame length (including the 7-byte header)
         assertEquals(payload + 7, frameLength(header))
-        // buffer_fullness = 0x7FF（11 位：h5 低 5 位 + h6 高 6 位），num_raw_data_blocks = 0
+        // buffer_fullness = 0x7FF (11 bits: low 5 bits of h5 + high 6 bits of h6), num_raw_data_blocks = 0
         assertEquals(
             0x7FF,
             ((header[5].toInt() and 0x1F) shl 6) or ((header[6].toInt() and 0xFC) shr 2),
@@ -48,7 +48,7 @@ class AacLcEncoderTest {
 
     @Test
     fun adtsHeaderTracksSampleRateAndChannels() {
-        // 48k → 索引 3；单声道 → 1
+        // 48k -> index 3; mono -> 1
         val header = AacLcEncoder.adtsHeader(100, 48_000, 1)
         assertEquals(3, ((header[2].toInt() and 0xFF) shr 2) and 0x0F)
         assertEquals(1, channelConfig(header))
@@ -60,13 +60,13 @@ class AacLcEncoderTest {
         assertEquals(4, AacLcEncoder.frequencyIndex(44_100))
         assertEquals(3, AacLcEncoder.frequencyIndex(48_000))
         assertEquals(8, AacLcEncoder.frequencyIndex(16_000))
-        // 未收录的采样率退回 44100，避免写出非法索引
+        // Unlisted sample rates fall back to 44100, avoiding writing an illegal index
         assertEquals(4, AacLcEncoder.frequencyIndex(37_000))
     }
 
     @Test
     fun tuningIsFixedToRawFrames() {
-        // 定案：裸 AAC 帧 + spf=1024 + 到达时间戳，只有这一组，不再提供切换
+        // Final decision: raw AAC frame + spf=1024 + arrival timestamp, only this one set, no further switching
         assertEquals(1, AudioTuning.entries.size)
         assertTrue(!AudioTuning.RAW_SPF.adts)
         assertEquals(1024, AudioTuning.RAW_SPF.spf)

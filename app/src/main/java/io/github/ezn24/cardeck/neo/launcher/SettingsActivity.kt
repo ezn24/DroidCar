@@ -17,8 +17,8 @@ import io.github.ezn24.cardeck.neo.launcher.settings.SettingsToastHost
 import io.github.ezn24.cardeck.neo.launcher.settings.SupersamplePanelFragment
 
 /**
- * 车机设置（双栏宿主：左菜单 / 右内容 Fragment 容器）。
- * 内容页以 Fragment 实现（settings 包），车机双栏与手机侧二级菜单共用同一套面板。
+ * Head-unit settings (two-pane host: left menu / right content Fragment container).
+ * Content pages are Fragments (settings package); the head-unit two-pane and the phone-side secondary menu share the same panels.
  */
 class SettingsActivity :
     AppCompatActivity(),
@@ -28,10 +28,10 @@ class SettingsActivity :
     private var currentMenu = -1
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // 深浅色跟随手机（与车机壁纸深/浅槽位同一判据），主色跟随系统 Material You
+        // Light/dark follows the phone (same criterion as the head-unit wallpaper dark/light slots), accent follows system Material You
         super.onCreate(savedInstanceState)
         if (VirtualLauncher.isPortraitCanvas()) {
-            // 竖屏窄屏：双栏挤压——转发手机侧二级菜单（列表 → 内容页）
+            // Narrow portrait: two panes get cramped - forward to the phone-side secondary menu (list -> content page)
             startActivity(
                 android.content.Intent(
                     this,
@@ -49,7 +49,7 @@ class SettingsActivity :
         if (savedInstanceState == null) showMenu(0) else restoreCurrentMenu()
     }
 
-    /** 从 XML 菜单条目收集（按 id 顺序即菜单顺序）。 */
+    /** Collected from the XML menu entries (id order is menu order). */
     private fun collectMenus() {
         val ids =
             intArrayOf(
@@ -66,7 +66,7 @@ class SettingsActivity :
         }
     }
 
-    /** 菜单切换：选中态样式 + 替换右栏 Fragment。 */
+    /** Menu switch: selected-state styling + replaces the right-pane Fragment. */
     private fun showMenu(index: Int) {
         if (index == currentMenu) {
             applyMenuStyle(index)
@@ -124,7 +124,7 @@ class SettingsActivity :
 
     override fun onBackPressed() = close()
 
-    /** 页内轻提示（不用系统 Toast：虚拟屏上显示位置不可控）。 */
+    /** In-page light hint (no system Toast: its position on a virtual display is uncontrollable). */
     override fun showToast(text: String) {
         val view = toastView ?: return
         view.text = text

@@ -15,6 +15,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import io.github.ezn24.cardeck.neo.R
+import io.github.ezn24.cardeck.neo.call.CallAvatar
+import io.github.ezn24.cardeck.neo.call.CallControl
+import io.github.ezn24.cardeck.neo.call.CallState
 import io.github.ezn24.cardeck.neo.media.MediaSessionsState
 import io.github.ezn24.cardeck.neo.render.CARD_MARGIN_PX
 import io.github.ezn24.cardeck.neo.render.DASH_HANDLE_TOUCH_PX
@@ -23,22 +26,22 @@ import io.github.ezn24.cardeck.neo.ui.WallpaperStore
 import io.github.ezn24.cardeck.neo.util.Bg
 
 /**
- * CarPlay 主区桌面：纯黑背景 + 图标分页网格（横屏 4×3 CarPlay 规格；竖屏按格子
- * 高宽比自适应、最多 6 行，见 computeCellMetrics）+ 底部页点。
- * 布局声明在 res/layout（activity_grid / item_grid_page / item_app_cell），
- * 代码只做动态格子尺寸计算与数据绑定。无字母导航（对照 CarPlay 主屏）。
+ * CarPlay main-area desktop: pure black background + paged icon grid (landscape 4x3 CarPlay spec; portrait adapts by cell
+ * aspect ratio, up to 6 rows, see computeCellMetrics) + page dots at the bottom.
+ * The layout is declared in res/layout (activity_grid / item_grid_page / item_app_cell);
+ * code only does the dynamic cell-size computation and data binding. No letter index (matching the CarPlay home screen).
  *
- * 默认只显示地图类应用（DesktopApps 默认选择），第一格固定「车机设置」入口；
- * 用户可在设置页勾选要显示的应用，返回桌面（onResume）即时刷新。
+ * By default only map apps are shown (DesktopApps default selection), and the first cell is the fixed "head-unit settings" entry;
+ * the user can tick the apps to show in settings, and returning to the desktop (onResume) refreshes immediately.
  */
 class GridActivity : AppCompatActivity() {
-    /** 桌面格子：仪表盘页（第 0 页）/ 固定设置入口 / 普通应用。 */
+    /** Desktop cells: dashboard page (page 0) / fixed settings entry / ordinary app. */
     private sealed interface Cell {
         object Dashboard : Cell
 
         object Pinned : Cell
 
-        /** 背景应用入口（2026-11-17 从 dock 移到桌面，dock 腾给运行中的应用）。 */
+        /** Background-apps entry (moved from the dock to the desktop 2026-11-17, freeing the dock for running apps). */
         object Recents : Cell
 
         data class App(
@@ -53,25 +56,25 @@ class GridActivity : AppCompatActivity() {
     private var cellHeightPx = 0
     private var iconSizePx = 0
 
-    /** 当前行数（横屏 3；竖屏按格子高宽比自适应，分页容量 = COLUMNS × rows）。 */
+    /** Current row count (landscape 3; portrait adapts by cell aspect ratio, page capacity = COLUMNS x rows). */
     private var rows = ROWS_MIN
     private var reloadAfterPageSwitch = false
     private var appScanInFlight = false
 
-    /** 应用清单缓存（每次 resume 重扫 packageManager 会拖慢回桌面——仅在首次载入时扫描）。 */
+    /** App list cache (rescanning packageManager on every resume would slow returning to the desktop - scan only on first load). */
     private var appsCache: List<VirtualLauncher.AppEntry>? = null
 
-    /** 壁纸背景层（对齐全流画布的切片；版本变化时后台换图）。 */
+    /** Wallpaper background layer (slice aligned to the full-stream canvas; swapped in the background when the version changes). */
     private var wallpaperView: ImageView? = null
     private var wallpaperShownVersion = -1L
 
-    /** 壁纸变更监听（WallpaperStore 主线程回调；解码在本类自行切后台线程）。 */
+    /** Wallpaper change listener (WallpaperStore main-thread callback; decoding is moved to a background thread by this class). */
     private val wallpaperListener = { _: Long -> refreshWallpaperIfChanged() }
 
-    /** 仪表盘模式面板（分屏时显示在应用区右半；左半由地图 tile 覆盖）。 */
+    /** Dashboard-mode panel (in split mode shown in the right half of the app area; the left half is covered by the map tile). */
     private var dashboardView: android.view.View? = null
 
-    /** 仪表盘模式变化（VirtualLauncher 通知）。 */
+    /** Dashboard mode change (notified by VirtualLauncher). */
     private val dashboardListener = { dashboard: Boolean ->
         runOnUiThread {
             applyDashboardMode(dashboard)
@@ -79,15 +82,42 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
-    /** 媒体状态监听（MediaSessionsState 主线程回调）。 */
+    /** Media state listener (MediaSessionsState main-thread callback). */
     private val mediaStateListener = {
         runOnUiThread { renderMediaCard() }
     }
 
-    /** 全画布位图就绪（WallpaperStore 首次构建/重建后回调）。 */
+    private var shownCallKey: String? = null
+    private val callAppLabels = HashMap<String, String?>()
+
+    /** Caller photo per call notification key (decoded once in the background; the icon may come from another app). */
+    private var callAvatarKey: String? = null
+    private var callAvatar: Bitmap? = null
+    private var callViewName: String? = null
+    private var callAvatarIcon: android.graphics.drawable.Icon? = null
+    private var callAvatarViews: android.widget.RemoteViews? = null
+    private var shownCallPhase: CallState.Phase? = null
+
+    /** Call state (notification listener thread): a new ringing call brings the card side of the dashboard forward. */
+    private val callStateListener = {
+        runOnUiThread {
+            val call = CallState.current
+            if (call == null) {
+                CallControl.onCallsGone(this)
+                Bg.run("call-pane") { VirtualLauncher.closeCallAppInMediaPane() }
+            } else if (call.phase == CallState.Phase.RINGING && (call.key != shownCallKey || shownCallPhase != CallState.Phase.RINGING)) {
+                Bg.run("call-card") { VirtualLauncher.showDashboardForCall() }
+            }
+            shownCallKey = call?.key
+            shownCallPhase = call?.phase
+            renderMediaCard()
+        }
+    }
+
+    /** Full-canvas bitmap ready (called back after WallpaperStore's first build / rebuild). */
     private val canvasReadyListener = { _: Long -> runOnUiThread { refreshDashWallpaper() } }
 
-    /** 卡片视觉（暗幕透明度/模糊）——与 dock 一致（DockPrefs）。 */
+    /** Card visuals (scrim alpha / blur) - consistent with the dock (DockPrefs). */
     private val dockPrefsListener = {
         runOnUiThread {
             applyDashCardChrome()
@@ -95,8 +125,9 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
-    /** 地图布局变化（全屏/分屏切换改变音乐卡壁纸切片区域）。
-     *  具名字段（勿内联匿名 lambda）：onDestroy 才能对称移除，否则桌面重建累积泄漏。 */
+    /** Map layout change (fullscreen / split switching changes the music card's wallpaper slice region).
+     * Named field (do not inline an anonymous lambda): only then can onDestroy remove it symmetrically, otherwise desktop rebuilds leak
+     * cumulatively. */
     private val mapLayoutListener: (Boolean) -> Unit =
         { _ ->
             runOnUiThread {
@@ -107,8 +138,8 @@ class GridActivity : AppCompatActivity() {
         }
 
     /**
-     * 应用卡片视觉：暗幕 alpha 与壁纸模糊半径（RenderEffect，半径随网格屏
-     * 密度放大 1.5 倍以与 dock 视觉一致）。
+     * Applies card visuals: scrim alpha and wallpaper blur radius (RenderEffect; the radius is scaled 1.5x with the grid display
+     * density to match the dock visuals).
      */
     private fun applyDashCardChrome() {
         val panel = dashboardView ?: return
@@ -135,8 +166,8 @@ class GridActivity : AppCompatActivity() {
     }
 
     /**
-     * 音乐卡壁纸：全画布切片中「音乐卡区域」的裁剪（与全屏壁纸同映射，
-     * 区域 = 地图卡右侧至卡片右边距）。
+     * Music card wallpaper: the crop of the "music card region" in the full-canvas slice (same mapping as the fullscreen wallpaper,
+     * region = right of the map card to the card's right margin).
      */
     private fun refreshDashWallpaper() {
         val panel = dashboardView ?: return
@@ -165,13 +196,13 @@ class GridActivity : AppCompatActivity() {
                 wallpaper.setImageBitmap(
                     Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH),
                 )
-                // 位图就绪后重申 RenderEffect（视图特效在位图更新后仍需生效）
+                // Re-apply RenderEffect once the bitmap is ready (view effects must still take effect after the bitmap updates)
                 applyDashCardChrome()
             }
         }
     }
 
-    /** 音乐卡进度自刷新（1s；渲染尾部续调度，位置由锚点+速度推算）。 */
+    /** Music card progress self-refresh (1s; re-scheduled at the end of rendering, position extrapolated from anchor + speed). */
     private val mediaTick =
         object : Runnable {
             override fun run() {
@@ -181,7 +212,7 @@ class GridActivity : AppCompatActivity() {
 
     private val tickHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
-    /** mm:ss（超 1 小时 h:mm:ss）。 */
+    /** mm:ss (h:mm:ss beyond 1 hour). */
     private fun formatTime(ms: Long): String {
         val totalSec = ms / 1_000
         val h = totalSec / 3_600
@@ -195,24 +226,32 @@ class GridActivity : AppCompatActivity() {
     }
 
     /**
-     * 音乐卡渲染：封面/标题/歌手/进度/播放暂停按钮（播放中=暂停图标，暂停=播放图标）。
+     * Music card rendering: cover / title / artist / progress / play-pause button (playing = pause icon, paused = play icon).
      *
-     * 文案要区分三种「没有歌名」的成因，否则会误导：
-     *  1. 有会话在播、但**没拿到通知使用权** → metadata 恒为 null（会话与播放状态
-     *     仍然可见）。此时显示「无法读取播放信息」并提示去哪里开；
-     *  2. 有会话但暂停/无元数据 → 「未在播放」；
-     *  3. 完全没有会话 → 同样「未在播放」。
+     * The copy must distinguish three causes of "no song title", otherwise it misleads:
+     *  1. A session is playing but **notification access was not granted** -> metadata is always null (the session and playback state
+     *     are still visible). Show "cannot read playback info" and where to enable it;
+     *  2. A session exists but is paused / has no metadata -> "not playing";
+     *  3. No session at all -> also "not playing".
      *
-     * 标题与副标题必须成对决定：曾出现标题「正在播放」（布局静态文案）配副标题
-     * 「未在播放」的自相矛盾显示（截图实测），静态文案已改为「媒体」，这里再按
-     * 状态统一写死两行，避免二者来自不同来源。
+     * Title and subtitle must be decided as a pair: there was a self-contradictory display of the title "now playing" (static layout text)
+     * with the subtitle
+     * "not playing" (seen in a real screenshot); the static text was changed to "media", and here both lines are
+     * written together by state, so the two never come from different sources.
      */
     private fun renderMediaCard() {
         val panel = dashboardView ?: return
+        val call = CallState.current
+        panel.findViewById<View>(R.id.dashMediaContent)?.visibility = if (call == null) View.VISIBLE else View.GONE
+        panel.findViewById<View>(R.id.dashCallContent)?.visibility = if (call == null) View.GONE else View.VISIBLE
+        if (call != null) {
+            renderCallCard(panel, call)
+            return
+        }
         val now = MediaSessionsState.nowPlaying
         val title = now?.title?.takeIf { it.isNotBlank() }
         val artist = now?.artist?.takeIf { it.isNotBlank() }
-        // 有会话但读不到任何元数据 + 未授权 → 权限问题，不是「没在播放」
+        // A session exists but no metadata is readable + not authorized -> a permission problem, not "not playing"
         val missingDueToPermission =
             now != null && title == null && !MediaSessionsState.accessGranted
         panel.findViewById<TextView>(R.id.dashMediaTitle).text =
@@ -265,7 +304,7 @@ class GridActivity : AppCompatActivity() {
             if (art != null) {
                 cover.setImageBitmap(art)
                 cover.visibility = View.VISIBLE
-                // 封面圆角裁剪（outline 一次性设置）
+                // Cover corner clipping (outline set once)
                 if (cover.clipToOutline != true) {
                     cover.clipToOutline = true
                     val dp = resources.displayMetrics.density
@@ -287,17 +326,181 @@ class GridActivity : AppCompatActivity() {
                 }
                 cover.setOnClickListener { openMediaApp() }
             } else {
-                // 占位不消失（INVISIBLE）：封面异步加载/切歌间隙内容不上下跳动
+                // The placeholder does not disappear (INVISIBLE): content does not jump up and down while the cover loads asynchronously /
+                // between tracks
                 cover.visibility = View.INVISIBLE
                 cover.setOnClickListener { openMediaApp() }
             }
         }
-        // 进度显示需要持续走秒：渲染尾部续调度（防重：先移除）
+        // The progress display needs to tick every second: re-schedule at the end of rendering (de-dup: remove first)
         tickHandler.removeCallbacks(mediaTick)
         tickHandler.postDelayed(mediaTick, 1_000)
     }
 
-    /** 仪表盘模式 → pager 位置同步（0=仪表盘，1+=桌面；已在目标位则不动）。 */
+    /**
+     * Call card: caller, state and duration, with decline / answer while ringing and mute / hang up once connected.
+     * The buttons act through the call notification's own actions (CallControl).
+     */
+    private fun renderCallCard(
+        panel: View,
+        call: CallState.Call,
+    ) {
+        val ringing = call.phase == CallState.Phase.RINGING
+        // App label from another APK's resources: loaded once in the background (no label loading on the main thread)
+        val appLabel = callAppLabels[call.pkg]
+        if (!callAppLabels.containsKey(call.pkg)) {
+            callAppLabels[call.pkg] = null
+            Bg.run("call-label") {
+                val label =
+                    runCatching {
+                        packageManager.getApplicationLabel(packageManager.getApplicationInfo(call.pkg, 0)).toString()
+                    }.getOrNull()
+                runOnUiThread {
+                    callAppLabels[call.pkg] = label
+                    renderMediaCard()
+                }
+            }
+        }
+        val status = UiStrings.text(if (ringing) R.string.call_incoming else R.string.call_active)
+        panel.findViewById<TextView>(R.id.dashCallStatus).text = listOfNotNull(status, appLabel).joinToString(" · ")
+        // WeChat's title is empty or the app name; its custom view carries the caller (read with the photo)
+        val caller = call.caller?.takeIf { it.isNotBlank() && it != appLabel }
+        panel.findViewById<TextView>(R.id.dashCallName).text =
+            caller ?: callViewName.takeIf { callAvatarKey == call.key } ?: UiStrings.text(R.string.call_unknown)
+        panel.findViewById<TextView>(R.id.dashCallTime).apply {
+            if (!ringing && call.startedAtWallMs > 0) {
+                visibility = View.VISIBLE
+                text = formatTime((System.currentTimeMillis() - call.startedAtWallMs).coerceAtLeast(0))
+            } else {
+                visibility = View.GONE
+            }
+        }
+        renderCallAvatar(panel.findViewById(R.id.dashCallAvatar), call)
+        val left = panel.findViewById<ImageView>(R.id.dashCallLeft)
+        val right = panel.findViewById<ImageView>(R.id.dashCallRight)
+        if (ringing) {
+            left.setImageResource(R.drawable.ic_call_end)
+            left.setBackgroundResource(R.drawable.bg_call_end)
+            left.imageTintList = null
+            left.contentDescription = UiStrings.text(R.string.call_decline)
+            left.setOnClickListener { CallControl.decline(this) }
+            right.setImageResource(R.drawable.ic_call_answer)
+            right.setBackgroundResource(R.drawable.bg_call_answer)
+            right.contentDescription = UiStrings.text(R.string.call_answer)
+            right.setOnClickListener { CallControl.answer(this) }
+        } else {
+            val muted = CallControl.isMuted(this)
+            left.setImageResource(if (muted) R.drawable.ic_call_mic_off else R.drawable.ic_call_mic)
+            left.setBackgroundResource(if (muted) R.drawable.bg_call_active else R.drawable.bg_call_neutral)
+            // Active (muted) = light disc with a dark icon, like a pressed toggle
+            left.imageTintList =
+                if (muted) {
+                    android.content.res.ColorStateList
+                        .valueOf(0xFF1C1C1E.toInt())
+                } else {
+                    null
+                }
+            left.contentDescription = UiStrings.text(if (muted) R.string.call_unmute else R.string.call_mute)
+            left.setOnClickListener {
+                CallControl.toggleMute(this)
+                renderMediaCard()
+            }
+            right.setImageResource(R.drawable.ic_call_end)
+            right.setBackgroundResource(R.drawable.bg_call_end)
+            right.contentDescription = UiStrings.text(R.string.call_hang_up)
+            right.setOnClickListener { CallControl.hangUp(this) }
+        }
+        tickHandler.removeCallbacks(mediaTick)
+        tickHandler.postDelayed(mediaTick, 1_000)
+    }
+
+    private fun renderCallAvatar(
+        view: ImageView,
+        call: CallState.Call,
+    ) {
+        // WeChat re-posts the same ringing notification once its avatar is loaded: reload on new content, not only a new call
+        val newCall = callAvatarKey != call.key
+        if (newCall || callAvatarIcon !== call.avatar || callAvatarViews !== call.views) {
+            callAvatarKey = call.key
+            callAvatarIcon = call.avatar
+            callAvatarViews = call.views
+            if (newCall) {
+                callAvatar = null
+                callViewName = null
+            }
+            val icon = call.avatar
+            val views = call.views
+            val appLabel = callAppLabels[call.pkg]
+            if (icon != null || views != null) {
+                Bg.run("call-avatar") {
+                    var viewName: String? = null
+                    val bitmap =
+                        runCatching {
+                            val extracted =
+                                views?.let {
+                                    runCatching { CallAvatar.fromViews(this@GridActivity, it, appLabel) }
+                                        .onFailure {
+                                            VirtualLauncher.logSink?.invoke(
+                                                "CALL: call view could not be read (${it.javaClass.simpleName}: ${it.message})",
+                                            )
+                                        }.getOrNull()
+                                }
+                            viewName = extracted?.name
+                            extracted?.candidates?.takeIf { it.isNotEmpty() }?.let {
+                                VirtualLauncher.logSink?.invoke("CALL: call view images: ${it.joinToString(" | ")}")
+                            }
+                            val drawable =
+                                icon?.loadDrawable(this@GridActivity)
+                                    ?: extracted?.photo?.let { android.graphics.drawable.BitmapDrawable(resources, it) }
+                            drawable?.let { drawable ->
+                                val size = 192
+                                Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).also { out ->
+                                    drawable.setBounds(0, 0, size, size)
+                                    drawable.draw(android.graphics.Canvas(out))
+                                }
+                            }
+                        }.onFailure {
+                            VirtualLauncher.logSink?.invoke(
+                                "CALL: caller photo could not be loaded (${it.javaClass.simpleName}: ${it.message})",
+                            )
+                        }.getOrNull()
+                    // Presence only: the name itself is personal data and stays out of the log
+                    VirtualLauncher.logSink?.invoke(
+                        "CALL: caller photo=${bitmap != null} name from view=${viewName != null}",
+                    )
+                    runOnUiThread {
+                        if (callAvatarKey == call.key && (bitmap != null || viewName != null)) {
+                            // A later re-post without a picture keeps the one already shown
+                            if (bitmap != null) callAvatar = bitmap
+                            if (viewName != null) callViewName = viewName
+                            renderMediaCard()
+                        }
+                    }
+                }
+            }
+        }
+        val bitmap = callAvatar
+        if (bitmap == null) {
+            view.visibility = View.GONE
+            return
+        }
+        view.setImageBitmap(bitmap)
+        view.visibility = View.VISIBLE
+        if (!view.clipToOutline) {
+            view.clipToOutline = true
+            view.outlineProvider =
+                object : android.view.ViewOutlineProvider() {
+                    override fun getOutline(
+                        v: View,
+                        outline: android.graphics.Outline,
+                    ) {
+                        outline.setOval(0, 0, v.width, v.height)
+                    }
+                }
+        }
+    }
+
+    /** Dashboard mode -> pager position sync (0 = dashboard, 1+ = desktop; do nothing if already at the target). */
     private fun applyDashboardMode(dashboard: Boolean) {
         val pager =
             this.pager ?: run {
@@ -310,7 +513,7 @@ class GridActivity : AppCompatActivity() {
         }
         val target = if (dashboard) 0 else 1
         if (!VirtualLauncher.dashboardPageAnimating) {
-            // 应用启动只同步隐藏的桌面位置，不启动 Home 动画或改写 GL 显示层。
+            // App launch only syncs the hidden desktop position; it does not start the Home animation or rewrite the GL display layer.
             pager.setCurrentItem(target, false)
             pager.isUserInputEnabled = !dashboard
             return
@@ -321,7 +524,7 @@ class GridActivity : AppCompatActivity() {
             pager.isUserInputEnabled = !dashboard
             return
         }
-        // 只有 Dock 发起模式切换；原生 ViewPager2 驱动整页横移与 GL 同步进度。
+        // Only the Dock initiates mode switches; the native ViewPager2 drives the whole-page slide and the GL sync progress.
         pager.setCurrentItem(target, true)
     }
 
@@ -342,7 +545,14 @@ class GridActivity : AppCompatActivity() {
     }
 
     private fun openMediaApp() {
-        // 正在播放的不是音乐 App（Telegram 语音、录音机回放）就不开它，退到用户的默认音乐 App
+        // During a call the card belongs to the call: a tap outside its buttons opens the call app's call screen
+        CallState.current?.let { call ->
+            val app = applicationContext
+            Bg.run("open-call-app") { VirtualLauncher.openCallAppInMediaPane(app, call.pkg, call.open) }
+            return
+        }
+        // If what is playing is not a music app (Telegram voice, recorder playback), do not open it; fall back to the user's default music
+        // app
         val active =
             MediaSessionsState.nowPlaying?.pkg?.takeIf { VirtualLauncher.isMusicApp(this, it) }
         val preferred =
@@ -383,7 +593,7 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
-    /** 音乐控制：系统媒体键（AudioManager 全局路由给活跃媒体会话，无需权限）。 */
+    /** Music control: system media keys (AudioManager routes globally to the active media session, no permission needed). */
     private fun dispatchMediaKey(keyCode: Int) {
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
         audioManager.dispatchMediaKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, keyCode))
@@ -394,10 +604,11 @@ class GridActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_grid)
 
-        // 格子尺寸/行数按屏幕动态计算（布局关系在 XML，尺寸测量在代码）
+        // Cell size / row count computed dynamically from the screen (layout relations in XML, size measurement in code)
         computeCellMetrics()
-        // 虚拟屏重建竞态：dm 短暂为 0 时 cell/icon 尺寸会算出 0，首帧绑定即崩
-        // （Bitmap.createBitmap 0 宽高）。夹最小值保底，并在 pager 首帧布局后重算+重绑。
+        // Virtual-display rebuild race: when dm is briefly 0 the cell/icon sizes compute to 0 and the first-frame bind crashes
+        // (Bitmap.createBitmap with 0 width/height). Clamp to a minimum as a safeguard, and recompute + rebind after the pager's
+        // first-frame layout.
         if (iconSizePx <= 0) {
             iconSizePx = 48
             findViewById<ViewPager2>(R.id.gridPager).post {
@@ -407,10 +618,10 @@ class GridActivity : AppCompatActivity() {
             }
         }
 
-        // 壁纸背景（index 0 = 最底）：窗口必须不透明——透明窗口压在应用窗口前面时
-        // 会把应用内容透出来（点 home 后桌面图标叠在头条上的根因）。
-        // 切片映射：把「整个视频流画布」的 aspectFill 壁纸按 dock 位置偏移，
-        // 本窗口正好露出应用区的切片，与 dock 处的切片逐像素连续（同一渲染路径）。
+        // Wallpaper background (index 0 = bottom): the window must be opaque - a transparent window in front of the app window
+        // lets the app content show through (root cause of desktop icons overlapping Toutiao after tapping home).
+        // Slice mapping: the aspectFill wallpaper of the "whole video-stream canvas" is offset by the dock position,
+        // so this window exposes exactly the app-area slice, pixel-continuous with the slice at the dock (same rendering path).
         val scale = VirtualLauncher.gridScale()
         val canvasWidth = (VirtualLauncher.streamWidthPx * scale).toInt()
         val canvasHeight = (VirtualLauncher.streamHeightPx * scale).toInt()
@@ -426,27 +637,28 @@ class GridActivity : AppCompatActivity() {
                                 canvasHeight,
                             ).apply {
                                 if (VirtualLauncher.dockAtBottom) {
-                                    // 竖屏车机：dock 在底部，桌面切片 = 画布顶部
+                                    // Portrait head unit: dock at the bottom, desktop slice = top of the canvas
                                     leftMargin = 0
                                     topMargin = 0
                                 } else {
-                                    // 横屏车机：dock 在左侧，桌面切片 = 画布右部
+                                    // Landscape head unit: dock on the left, desktop slice = right part of the canvas
                                     leftMargin = -(VirtualLauncher.dockWidthPx * scale).toInt()
                                     topMargin = 0
                                 }
                             }
                 }
             root.addView(wallpaperView, 0)
-            // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
+            // Register change notification + reconcile once immediately (covers changes before registration - events are not replayed)
             WallpaperStore
                 .addListener(wallpaperListener)
             refreshWallpaperIfChanged()
 
-            // 仪表盘面板已改为 ViewPager2 首页（PageAdapter 绑定时创建），
-            // 此处仅注册全局监听：卡片视觉/媒体状态/壁纸切片/仪表盘模式。
+            // The dashboard panel is now the ViewPager2 home page (created when PageAdapter binds);
+            // here only the global listeners are registered: card visuals / media state / wallpaper slice / dashboard mode.
             DockPrefs.addListener(dockPrefsListener)
             MediaSessionsState
                 .addListener(mediaStateListener)
+            CallState.addListener(callStateListener)
             WallpaperStore
                 .addCanvasReadyListener(canvasReadyListener)
             VirtualLauncher.addDashboardListener(dashboardListener)
@@ -462,7 +674,7 @@ class GridActivity : AppCompatActivity() {
             }
         VirtualLauncher.dashboardDragSink = dashboardDragSink
         dotsRow = findViewById(R.id.dotsRow)
-        dotsRow?.alpha = 0f // 页点平时隐藏，翻页时才淡入
+        dotsRow?.alpha = 0f // Page dots hidden normally, faded in only while paging
         pager?.registerOnPageChangeCallback(
             object : ViewPager2.OnPageChangeCallback() {
                 override fun onPageSelected(position: Int) {
@@ -482,7 +694,8 @@ class GridActivity : AppCompatActivity() {
                 }
 
                 override fun onPageScrollStateChanged(state: Int) {
-                    // 页点只在翻页时出现（CarPlay 同款）：拖动/惯性滑动中显示，停下后稍等再淡出
+                    // Page dots appear only while paging (same as CarPlay): shown during drag / fling, fade out after a short wait once
+                    // stopped
                     setDotsShowing(state != androidx.viewpager2.widget.ViewPager2.SCROLL_STATE_IDLE)
                     if (state == androidx.viewpager2.widget.ViewPager2.SCROLL_STATE_DRAGGING &&
                         pager?.currentItem == 1 &&
@@ -506,7 +719,10 @@ class GridActivity : AppCompatActivity() {
         )
     }
 
-    /** 壁纸版本变化时后台重解码并换图（手机侧换壁纸后 ≤2s 桌面更新）。 */
+    /**
+     * Re-decodes and swaps the image in the background when the wallpaper version changes (the desktop updates within 2s after the phone
+     * changes wallpaper).
+     */
     private fun refreshWallpaperIfChanged() {
         val view = wallpaperView ?: return
         val current = WallpaperStore.version
@@ -523,8 +739,9 @@ class GridActivity : AppCompatActivity() {
                     )
                 }.getOrNull()
             if (bitmap != null) {
-                // 诊断：bitmap 三点采样（中线上 25%/50%/75% 宽）——区分「bitmap 内容缺失」
-                // 与「视图/合成问题」（本机 logcat 受抑制，走 logSink 落文件日志）
+                // Diagnostics: sample the bitmap at three points (25%/50%/75% of the width on the midline) - distinguishes "bitmap content
+                // missing"
+                // from "view / compositing problem" (logcat is suppressed on this device, so go through logSink to the file log)
                 val samples =
                     listOf(0.25f, 0.5f, 0.75f).joinToString(",") {
                         "%06x".format(bitmap.getPixel((bitmap.width * it).toInt(), bitmap.height / 2))
@@ -536,31 +753,31 @@ class GridActivity : AppCompatActivity() {
                 )
                 runOnUiThread { view.setImageBitmap(bitmap) }
             } else {
-                VirtualLauncher.logSink?.invoke("WALLPAPER-GRID: 解码失败")
+                VirtualLauncher.logSink?.invoke("WALLPAPER-GRID: decode failed")
             }
         }
     }
 
     override fun onResume() {
         super.onResume()
-        // 也覆盖从设置页返回：勾选变化即时反映
+        // Also covers returning from the settings page: checkbox changes are reflected immediately
         reload()
         refreshWallpaperIfChanged()
     }
 
     /**
-     * 计算格子尺寸与行数：
-     * 横屏（CarPlay 规格）：固定 4 列 × 3 行，行为与此前一致。
-     * 竖屏：固定 3 行会把格子拉成 ~1:2.5 的瘦高条（图标只占三成、满屏空框，
-     * 2026-10-17 用户开「显示布局边界」截图暴露）；按「格子高 ≈ 宽 × 1.25」
-     * 自适应加行（上限 6，对齐 iPhone 竖屏主屏 4×6 的观感），图标尺寸同步
-     * 跟随格子宽，避免格子过大/图标过小的比例失衡。
+     * Computes cell size and row count:
+     * Landscape (CarPlay spec): fixed 4 columns x 3 rows, same behavior as before.
+     * Portrait: a fixed 3 rows would stretch cells into ~1:2.5 tall strips (icons take only 30%, the screen full of empty boxes,
+     * exposed by the user's "show layout bounds" screenshot 2026-10-17); rows are added to
+     * adapt to "cell height ~ width x 1.25" (cap 6, matching the iPhone portrait home screen 4x6 look), and the icon size
+     * follows the cell width, avoiding oversized cells / undersized icons.
      */
     private fun computeCellMetrics() {
         val dm = resources.displayMetrics
         val density = dm.density
-        val chromeHorizontalPx = (2 * 10 * density).toInt() // item_grid_page 左右 padding
-        val chromeVerticalPx = ((8 + 26 + 16) * density).toInt() // 上/下 padding + 页点区
+        val chromeHorizontalPx = (2 * 10 * density).toInt() // item_grid_page left/right padding
+        val chromeVerticalPx = ((8 + 26 + 16) * density).toInt() // top/bottom padding + page-dot area
         val usableW = dm.widthPixels - chromeHorizontalPx
         val usableH = dm.heightPixels - chromeVerticalPx
         if (usableW <= 0 || usableH <= 0) {
@@ -570,7 +787,7 @@ class GridActivity : AppCompatActivity() {
             return
         }
         cellWidthPx = usableW / COLUMNS
-        // 横竖屏统一：先按 3 行试算，格子过高（竖屏）时加行收敛到目标比例
+        // Same for landscape and portrait: first try 3 rows; when cells are too tall (portrait) add rows to converge on the target ratio
         var rowCount = ROWS_MIN
         if (cellWidthPx > 0) {
             rowCount = (usableH / (cellWidthPx * CELL_HEIGHT_RATIO)).toInt().coerceIn(ROWS_MIN, ROWS_MAX)
@@ -583,7 +800,7 @@ class GridActivity : AppCompatActivity() {
                 .coerceAtMost((cellWidthPx * 0.72f).toInt())
     }
 
-    /** 重新读取应用清单与桌面选择（首帧与每次回到桌面时调用）。 */
+    /** Re-reads the app list and the desktop selection (called on first frame and every time we return to the desktop). */
     private fun reload() {
         if (VirtualLauncher.dashboardPageAnimating) {
             reloadAfterPageSwitch = true
@@ -614,18 +831,18 @@ class GridActivity : AppCompatActivity() {
         val selected = DesktopApps.selected(this, apps)
         val cells =
             buildList {
-                add(Cell.Pinned) // 桌面第一格：车机设置（固定，不可取消）
-                add(Cell.Recents) // 第二格：背景应用（固定）
+                add(Cell.Pinned) // First desktop cell: head-unit settings (fixed, cannot be removed)
+                add(Cell.Recents) // Second cell: background apps (fixed)
                 apps.filter { it.component.flattenToString() in selected }.forEach { add(Cell.App(it)) }
             }
-        // 第 0 页 = 仪表盘，其后为桌面网格页：左右滑动即互相切换
+        // Page 0 = dashboard, then the desktop grid pages: swiping left/right switches between them
         pages = listOf(listOf<Cell>(Cell.Dashboard)) + cells.chunked(COLUMNS * rows)
 
         val current = pager?.currentItem ?: 0
         pager?.adapter?.notifyDataSetChanged()
         rebuildDots()
-        // 位置与仪表盘模式对账（home 键循环/应用启动会改 dashboardMode）：
-        // 仅纠偏方向，不把停在桌面第 N 页的用户拽回第 1 页
+        // Reconcile the position with the dashboard mode (the home-key cycle / app launch changes dashboardMode):
+        // only corrects the direction, and does not drag a user resting on desktop page N back to page 1
         if (VirtualLauncher.dashboardMode && current != 0) pager?.setCurrentItem(0, false)
         if (!VirtualLauncher.dashboardMode && current == 0) pager?.setCurrentItem(1, false)
         if ((pager?.currentItem ?: 0) >= pages.size) pager?.setCurrentItem(pages.size - 1, false)
@@ -642,8 +859,8 @@ class GridActivity : AppCompatActivity() {
             viewType: Int,
         ): RecyclerView.ViewHolder =
             if (viewType == 0) {
-                // 仪表盘页 = 无边距容器：音乐卡面板 + 分屏拖拽把手（把手落在加宽的
-                // 中缝内、不被合成器叠画的地图 tile 遮挡，触摸走应用屏正常派发）
+                // Dashboard page = margin-less container: music card panel + split-drag handle (the handle sits inside the widened
+                // gap, not covered by the compositor-overlaid map tile, and touches are dispatched normally through the app display)
                 val container = android.widget.FrameLayout(parent.context)
                 container.layoutParams =
                     ViewGroup.LayoutParams(
@@ -657,7 +874,7 @@ class GridActivity : AppCompatActivity() {
             } else {
                 val grid = layoutInflater.inflate(R.layout.item_grid_page, parent, false) as GridLayout
                 grid.columnCount = COLUMNS
-                // 行数由 computeCellMetrics 按横竖屏决定（横屏 3、竖屏最多 6）
+                // Row count is decided by computeCellMetrics per orientation (landscape 3, portrait up to 6)
                 grid.rowCount = rows
                 PageHolder(grid)
             }
@@ -673,7 +890,7 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
-    /** 仪表盘页 Holder：无边距容器（音乐卡面板 + 分屏把手）随页面创建。 */
+    /** Dashboard page holder: a margin-less container (music card panel + split handle) created with the page. */
     private inner class DashboardHolder(
         container: View,
         val panel: View,
@@ -718,8 +935,8 @@ class GridActivity : AppCompatActivity() {
                 dispatchMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_NEXT)
             }
             panel.findViewById<ImageView>(R.id.dashPlayPause).setOnClickListener {
-                // 按当前状态显式发播放/暂停；乐观翻转图标（状态回调可能滞后），
-                // 400ms 后请求监听服务重新同步真实状态
+                // Explicitly send play/pause by the current state; optimistically flip the icon (the state callback may lag),
+                // and after 400ms ask the listener service to re-sync the real state
                 val state = MediaSessionsState.nowPlaying
                 val playing = state?.playing == true
                 dispatchMediaKey(
@@ -729,7 +946,7 @@ class GridActivity : AppCompatActivity() {
                         android.view.KeyEvent.KEYCODE_MEDIA_PLAY
                     },
                 )
-                // 乐观更新保留封面等其它字段（copy）；400ms 后重同步真实状态
+                // Optimistic update keeps the cover and other fields (copy); re-sync the real state after 400ms
                 MediaSessionsState.publish(
                     state
                         ?.copy(playing = !playing)
@@ -747,8 +964,8 @@ class GridActivity : AppCompatActivity() {
                     400,
                 )
             }
-            // 全屏地图的退出走 dock 的 home 按钮（showDashboard 路由闸门会自动
-            // setMapFullscreen(false)），仪表盘卡上不再放「全屏地图」按钮
+            // Leaving the fullscreen map goes through the dock's home button (the showDashboard routing gate automatically calls
+            // setMapFullscreen(false)), so the dashboard card no longer carries a "fullscreen map" button
             bindSplitHandle(scale)
             panel.isFocusable = true
             panel.contentDescription = getString(R.string.open_media_app)
@@ -758,13 +975,13 @@ class GridActivity : AppCompatActivity() {
             refreshDashWallpaper()
         }
 
-        /** 配置分屏把手（方向/尺寸/拖拽回调）并按当前分屏摆放面板与把手。 */
+        /** Configures the split handle (orientation / size / drag callback) and lays out the panel and handle by the current split. */
         private fun bindSplitHandle(scale: Float) {
             val child = (itemView as? android.widget.FrameLayout)?.getChildAt(1) as? DashSplitHandle
             handle = child ?: return
             val portrait = VirtualLauncher.splitVertical
-            // 触达条比视觉中缝宽（DASH_HANDLE_TOUCH_PX > DASH_GAP_PX）：两侧各溢出
-            // 一段压在卡片上扩大触控目标——地图侧溢出段被 tile 盖住不可见但可触摸
+            // The touch strip is wider than the visual gap (DASH_HANDLE_TOUCH_PX > DASH_GAP_PX): it overflows on both sides
+            // onto the cards to enlarge the touch target - the map-side overflow is covered by the tile, invisible but touchable
             val thickness = (DASH_HANDLE_TOUCH_PX * scale).toInt()
             child.layoutParams =
                 android.widget.FrameLayout
@@ -777,7 +994,7 @@ class GridActivity : AppCompatActivity() {
             layoutSplit(VirtualLauncher.dashHandleCenterScreen(), scale)
         }
 
-        /** 把手中心（应用屏像素）→ 音乐卡与把手的 margin。未 attach（<0）时兜底中线。 */
+        /** Handle center (app-display pixels) -> margins of the music card and handle. When not attached (<0), fall back to the midline. */
         private fun layoutSplit(
             centerScreen: Float,
             scale: Float,
@@ -800,7 +1017,7 @@ class GridActivity : AppCompatActivity() {
                     }
                 val label = view.findViewById<TextView>(R.id.cellLabel)
                 when (cell) {
-                    is Cell.Dashboard -> Unit // 仪表盘独立成页，不进网格
+                    is Cell.Dashboard -> Unit // The dashboard is its own page, not in the grid
                     is Cell.Pinned -> {
                         icon.setImageResource(R.drawable.ic_app_settings)
                         label.text = getString(R.string.car_settings)
@@ -817,14 +1034,14 @@ class GridActivity : AppCompatActivity() {
                         icon.setImageBitmap(AppIcons.rounded(cell.entry.icon, iconSizePx))
                         label.text = cell.entry.label
                         view.setOnClickListener {
-                            // 不用系统 Toast：虚拟屏上显示位置不可控（SettingsToastHost 的由来）；
-                            // 应用拉起本身就是反馈
+                            // No system Toast: its position on a virtual display is uncontrollable (the origin of SettingsToastHost);
+                            // the app launching is itself the feedback
                             Bg.run("launch-app") { VirtualLauncher.launchApp(cell.entry.component) }
                         }
                     }
                 }
-                // 焦点：iDrive 旋钮/方向盘方向键注入的 DPAD 事件靠焦点系统落地，
-                // 网格单元必须可聚焦 + 有可见高亮框（按键会自动退出 touch mode）。
+                // Focus: DPAD events injected by the iDrive knob / steering-wheel direction keys land through the focus system,
+                // so grid cells must be focusable + have a visible highlight frame (key presses automatically leave touch mode).
                 view.isFocusable = true
                 view.isFocusableInTouchMode = false
                 view.foreground =
@@ -842,19 +1059,20 @@ class GridActivity : AppCompatActivity() {
     }
 
     private fun openSettings() {
-        // 滑动转场由 SettingsActivity 主题的 windowAnimationStyle 提供
+        // The slide transition is provided by the SettingsActivity theme's windowAnimationStyle
         startActivity(Intent(this, SettingsActivity::class.java))
     }
 
     private fun rebuildDots() {
         val row = dotsRow ?: return
         row.removeAllViews()
-        // 单页不显示页点（对照原型）；胶囊底也一起藏，否则会剩一块空胶囊
+        // A single page shows no page dots (matching the prototype); the capsule background is hidden too, otherwise an empty capsule
+        // remains
         row.visibility = if (pages.size < 2) View.GONE else View.VISIBLE
         if (pages.size < 2) return
         val density = resources.displayMetrics.density
-        // CarPlay 样式：页点压在半透明深色胶囊上，叠在地图等亮背景上也看得清。
-        // 背景属于这一行 View，快照（publishDots 的 row.draw）会一并画进合成器层。
+        // CarPlay style: the dots sit on a translucent dark capsule, readable even over bright backgrounds such as a map.
+        // The background belongs to this row View, so the snapshot (row.draw in publishDots) paints it into the compositor layer too.
         row.background =
             android.graphics.drawable.GradientDrawable().apply {
                 cornerRadius = 100 * density
@@ -885,13 +1103,15 @@ class GridActivity : AppCompatActivity() {
             (row.getChildAt(i).background as? android.graphics.drawable.GradientDrawable)
                 ?.setColor(if (i == selected) 0xFFFFFFFF.toInt() else 0x66FFFFFF.toInt())
         }
-        // 等本轮布局完成再快照（rebuildDots 刚加的子 View 尚未测量）
+        // Wait for this round of layout to finish before snapshotting (the children just added by rebuildDots are not measured yet)
         row.post { publishDots() }
     }
 
     /**
-     * 仪表盘的地图/媒体卡由合成器画在本应用屏之上，会盖住页点：把页点快照交给合成器
-     * 补画到卡片上层，同时隐藏本地这份，避免两份重叠。判据见 [VirtualLauncher.pageDotsOnTop]。
+     * The dashboard's map / media cards are drawn by the compositor above this app display and would cover the page dots: the page-dot
+     * snapshot is handed to the compositor
+     * to be drawn on top of the cards, and the local copy is hidden to avoid two overlapping copies. See [VirtualLauncher.pageDotsOnTop]
+     * for the criterion.
      */
     private fun publishDots() {
         val row = dotsRow ?: return
@@ -900,7 +1120,7 @@ class GridActivity : AppCompatActivity() {
             VirtualLauncher.setPageDots(null, 0f, 0f)
             return
         }
-        // View.draw 不施加 View 自身的 alpha，隐藏本地页点不影响快照
+        // View.draw does not apply the View's own alpha, so hiding the local page dots does not affect the snapshot
         val bitmap = android.graphics.Bitmap.createBitmap(row.width, row.height, android.graphics.Bitmap.Config.ARGB_8888)
         row.draw(android.graphics.Canvas(bitmap))
         val loc = IntArray(2)
@@ -908,12 +1128,13 @@ class GridActivity : AppCompatActivity() {
         VirtualLauncher.setPageDots(bitmap, loc[0].toFloat(), loc[1].toFloat())
     }
 
-    /** 页点归属切换（本地 ↔ 合成器上层）：仪表盘模式/滑动/地图全屏变化时调用。 */
+    /** Page-dot ownership switch (local <-> compositor top layer): called when dashboard mode / swiping / map fullscreen changes. */
     private fun syncDotsLayer() {
         val row = dotsRow ?: return
-        // 合成器上层接管时本地这份始终隐藏；否则跟随「翻页中」淡入淡出
+        // When the compositor top layer takes over, the local copy stays hidden; otherwise it follows "while paging" fade in/out
         val target = if (VirtualLauncher.pageDotsOnTop() || !dotsShowing) 0f else 1f
-        // 只在目标变化时起动画：onPageScrolled 每帧都会调到这里，逐帧重启会让淡入淡出拖慢
+        // Start an animation only when the target changes: onPageScrolled calls here every frame, and restarting per frame would slow the
+        // fade
         if (target == dotsTargetAlpha) return
         dotsTargetAlpha = target
         row.animate().cancel()
@@ -926,7 +1147,7 @@ class GridActivity : AppCompatActivity() {
 
     private var dotsTargetAlpha = 0f
 
-    /** 页点当前是否应可见（翻页中 + 停下后的短暂停留）。 */
+    /** Whether the page dots should currently be visible (while paging + a short dwell after stopping). */
     private var dotsShowing = false
 
     private val hideDots = Runnable { applyDotsShowing(false) }
@@ -944,7 +1165,10 @@ class GridActivity : AppCompatActivity() {
         syncDotsLayer()
     }
 
-    /** 仪表盘跟手左拖：TouchRouter 的位移经主线程转成 pager fakeDrag（事件按投递顺序执行）。 */
+    /**
+     * Dashboard follow-finger left drag: TouchRouter displacement is turned into a pager fakeDrag on the main thread (events execute in
+     * delivery order).
+     */
     private val dashboardDragSink =
         object : VirtualLauncher.DashboardDragSink {
             override fun begin(): Boolean {
@@ -952,7 +1176,8 @@ class GridActivity : AppCompatActivity() {
                 tickHandler.post {
                     val p = pager
                     if (p == null || !p.beginFakeDrag()) {
-                        // pager 正在动画等原因拒绝：复位过渡状态，避免卡在「拖动中」吞触摸
+                        // The pager refused (e.g. it is animating): reset the transition state so it does not get stuck in "dragging" and
+                        // swallow touches
                         VirtualLauncher.finishDashboardPageSwitch(VirtualLauncher.dashboardMode)
                     }
                 }
@@ -978,27 +1203,28 @@ class GridActivity : AppCompatActivity() {
         VirtualLauncher.setPageDots(null, 0f, 0f)
         MediaSessionsState
             .removeListener(mediaStateListener)
+        CallState.removeListener(callStateListener)
         DockPrefs.removeListener(dockPrefsListener)
         WallpaperStore
             .removeCanvasReadyListener(canvasReadyListener)
         super.onDestroy()
     }
 
-    override fun onBackPressed() = Unit // 桌面不退出
+    override fun onBackPressed() = Unit // The desktop does not exit
 
     private companion object {
-        const val COLUMNS = 4 // CarPlay 规格：强制 4 列
+        const val COLUMNS = 4 // CarPlay spec: forced 4 columns
 
-        /** 翻页停下后页点再停留多久才淡出。 */
+        /** How long the page dots linger after paging stops before fading out. */
         const val DOTS_LINGER_MS = 700L
 
-        /** 横屏 CarPlay 规格行数（竖屏自适应时用作下限）。 */
+        /** Row count of the landscape CarPlay spec (used as the lower bound when portrait adapts). */
         const val ROWS_MIN = 3
 
-        /** 竖屏自适应行数上限（对齐 iPhone 竖屏主屏 4×6 的观感）。 */
+        /** Upper bound of portrait adaptive rows (matching the iPhone portrait home screen 4x6 look). */
         const val ROWS_MAX = 6
 
-        /** 格子目标高宽比（高/宽）：竖屏加行的收敛目标。 */
+        /** Target cell aspect ratio (height / width): the convergence target when portrait adds rows. */
         const val CELL_HEIGHT_RATIO = 1.25f
     }
 }

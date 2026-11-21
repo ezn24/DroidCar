@@ -7,7 +7,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/** 车机麦克风上行：格式协商与封包解密（协议事实见 docs/MIC-RESEARCH.md）。 */
+/** Head-unit microphone uplink: format negotiation and packet decryption (protocol facts in docs/MIC-RESEARCH.md). */
 class CarMicTest {
     private fun info(
         input: Long,
@@ -30,7 +30,7 @@ class CarMicTest {
         )
 
     @Test fun prefers24kMonoWhenBothDirectionsSupportIt() {
-        // catplay issue #15 车机：输入 PCM 8/16/24k 单声道
+        // catplay issue #15 head unit: input PCM 8/16/24k mono
         val format = CarMic.pickFormat(info(input = 0x54, output = 0x54))
         assertNotNull(format)
         assertEquals(1L shl 6, format!!.bit)
@@ -39,7 +39,7 @@ class CarMicTest {
     }
 
     @Test fun usesIntersectionOfInputAndOutput() {
-        // 上下行共用一个格式：输入有 24k、输出只有 16k → 选 16k
+        // Uplink and downlink share one format: input has 24k, output only 16k -> pick 16k
         val format = CarMic.pickFormat(info(input = 0x54, output = 0x10))
         assertEquals(16_000, format!!.sampleRate)
     }
@@ -52,7 +52,7 @@ class CarMicTest {
     @Test fun noSpeechChannelOrNoPcmMonoMeansNoCarMic() {
         assertNull(CarMic.pickFormat(info(input = 0x54, output = 0x54, audioType = "telephony")))
         assertNull(CarMic.pickFormat(info(input = 0, output = 0x54)))
-        // 只有 Opus（0x40000000）：暂不支持
+        // Opus only (0x40000000): not supported yet
         assertNull(CarMic.pickFormat(info(input = 0x40000000, output = 0x40000000)))
         assertNull(CarMic.pickFormat(null))
     }
@@ -61,7 +61,7 @@ class CarMicTest {
         assertEquals(50, CarMic.pickFormat(info(input = 0x10, output = 0x10, latencyMicros = null))!!.latencyMs)
     }
 
-    /** 按车机端（DiPlay MicrophonePacketizer）的线格式封一个包。 */
+    /** Packs one packet in the wire format of the head-unit side (DiPlay MicrophonePacketizer). */
     private fun carPacket(
         key: ByteArray,
         bigEndianPcm: ByteArray,
@@ -86,13 +86,13 @@ class CarMicTest {
         val packet = carPacket(key, pcmBe, counter = 42)
         val opened = CarMic.openPacket(key, packet)
         assertArrayEquals(byteArrayOf(0x34, 0x12, 0x00, 0x7F, 0x01, 0x80.toByte()), opened)
-        // 接收缓冲比包长：按实际长度解
+        // Receive buffer is larger than the packet: parse by actual length
         val padded = packet + ByteArray(100)
         assertArrayEquals(opened, CarMic.openPacket(key, padded, packet.size))
     }
 
     @Test fun acceptsWinPlayPacketsWhoseSequenceOverwroteTheVersionByte() {
-        // WinPlay 把序号写在字节 0..1（覆盖 0x80/PT）；加密与 AAD 不受影响，必须照样解开
+        // WinPlay writes the sequence number in bytes 0..1 (overwriting 0x80/PT); encryption and AAD are unaffected, must still decrypt
         val key = CarMic.inputKey(ByteArray(32) { 1 }, 3575643869624359L)
         val packet = carPacket(key, byteArrayOf(0x00, 0x10), counter = 0)
         packet[0] = 0
@@ -103,14 +103,14 @@ class CarMicTest {
     @Test fun rejectsTamperedShortOrWrongKeyPackets() {
         val key = CarMic.inputKey(ByteArray(32), 1L)
         val packet = carPacket(key, ByteArray(48) { 3 }, counter = 1)
-        val tampered = packet.copyOf().also { it[6] = (it[6] + 1).toByte() } // AAD（时间戳）被改
+        val tampered = packet.copyOf().also { it[6] = (it[6] + 1).toByte() } // AAD (timestamp) altered
         assertNull(CarMic.openPacket(key, tampered))
         assertNull(CarMic.openPacket(key, packet.copyOf(20)))
         assertNull(CarMic.openPacket(CarMic.inputKey(ByteArray(32), 2L), packet))
     }
 
     @Test fun downlinkPacketUsesSameLayoutAsCarMicPackets() {
-        // 下行与上行同构（只是密钥标签不同）：用同一个解包函数能解开即证明布局一致
+        // Downlink is isomorphic to uplink (only the key label differs): decrypting with the same unpack function proves the layout matches
         val key = CarMic.outputKey(ByteArray(32) { 5 }, 99L)
         val silence = ByteArray(960)
         val wire = CarMic.sealDownlink(key, sequence = 3, timestamp = 1440, nonceCounter = 3, bigEndianPcm = silence)

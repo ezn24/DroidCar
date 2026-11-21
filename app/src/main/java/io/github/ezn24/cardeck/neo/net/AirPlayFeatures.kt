@@ -1,23 +1,23 @@
 package io.github.ezn24.cardeck.neo.net
 
 /**
- * `_airplay._tcp` TXT `features` 位图解析（形如 `0x44540380,0x61`）。
+ * Parse of the `_airplay._tcp` TXT `features` bitmap (shaped like `0x44540380,0x61`).
  *
- * 低位在前：`低32位,高32位`，合并成 64 位。AirPlay 接收端用 bit38
- * `HK_PAIRING_AND_ENCRYPT` 表示「支持 HomeKit 配对/加密」——老车机
- * （CarPlay 210.81 时代）不声明该位，只接受 `et=NONE` 明文会话。
+ * Low word first: `low 32 bits,high 32 bits`, merged into 64 bits. AirPlay receivers use bit38
+ * `HK_PAIRING_AND_ENCRYPT` to mean "supports HomeKit pairing/encryption"; old head units
+ * (CarPlay 210.81 era) do not declare it and only accept plaintext `et=NONE` sessions.
  *
- * 解析失败一律返回 null（未知），调用方按「保持旧行为」处理，
- * 绝不能把解析失败当成「不支持配对」——那会让正常车机也被降级成明文。
+ * Any parse failure returns null (unknown) and callers keep the old behavior;
+ * a parse failure must never be treated as "pairing unsupported", which would downgrade healthy head units to plaintext.
  */
 object AirPlayFeatures {
-    /** 支持 /pair-setup + /pair-verify（AirPlayFeature::HK_PAIRING_AND_ENCRYPT）。 */
+    /** Supports /pair-setup + /pair-verify (AirPlayFeature::HK_PAIRING_AND_ENCRYPT). */
     const val HK_PAIRING_AND_ENCRYPT: Long = 1L shl 38
 
-    /** 支持屏幕镜像。 */
+    /** Supports screen mirroring. */
     const val SCREEN: Long = 1L shl 7
 
-    /** 车机控制（CarPlay）。 */
+    /** Car control (CarPlay). */
     const val CARPLAY_CONTROL: Long = 1L shl 37
 
     fun parse(txt: String?): Long? {
@@ -31,7 +31,7 @@ object AirPlayFeatures {
         return (high shl 32) or low
     }
 
-    /** 接收端是否声明支持 HomeKit 配对/加密；null = TXT 缺失或不可解析。 */
+    /** Whether the receiver declares HomeKit pairing/encryption support; null = TXT missing or unparsable. */
     fun supportsPairing(features: Long?): Boolean? = features?.let { (it and HK_PAIRING_AND_ENCRYPT) != 0L }
 
     private fun parseHex(value: String): Long? {

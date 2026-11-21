@@ -26,20 +26,24 @@ import io.github.ezn24.cardeck.neo.ui.ScreenDimmer
 import io.github.ezn24.cardeck.neo.util.Bg
 
 /**
- * 虚拟屏启动器（双屏 + GL 合成架构）：
+ * Virtual-display launcher (dual-display + GL compositing architecture):
  *
- *   dock 屏（窄条，DockActivity 常驻）──┐
- *                                      ├─ DualDisplayComposer ─→ 编码器 Surface
- *   应用屏（GridActivity / 第三方应用）──┘
+ *   dock display (narrow strip, DockActivity resident) --+
+ *                                                        +-- DualDisplayComposer --> encoder Surface
+ *   app display (GridActivity / third-party apps) -------+
  *
- * - 应用启动到应用屏（shell am start --display 应用屏）；同一组件再次启动带回既有任务（续运行）。
- * - 回桌面 = 把 GridActivity 带回前台，后台应用任务不杀。
- * - 触摸由 TouchRouter 按主画面 x 坐标分流：x < dockWidth → dock 屏，否则 → 应用屏（平移）。
+ * - Apps launch onto the app display (shell am start --display <app display>); launching the same component again brings back the existing
+ * task (resume).
+ * - Back to desktop = bring GridActivity to the foreground; background app tasks are not killed.
+ * - TouchRouter splits touches by the x coordinate of the main picture: x < dockWidth -> dock display, otherwise -> app display
+ * (translated).
  */
 object VirtualLauncher {
     private const val TAG = "VirtualLauncher"
 
-    /** 会登记媒体会话、但不是音乐播放器的常见 App（聊天/录音），不进仪表盘媒体区。 */
+    /**
+     * Common apps that register a media session but are not music players (chat / recorders); they do not enter the dashboard media area.
+     */
     private val NON_MUSIC_PACKAGES =
         setOf(
             "org.telegram.messenger",
@@ -52,63 +56,67 @@ object VirtualLauncher {
             "com.google.android.apps.recorder",
         )
 
-    /** 关闭背景应用：最多几轮「移除 → 复查」、每轮最多等多久、复查间隔。 */
+    /** Closing background apps: at most how many rounds of "remove -> re-check", how long to wait per round, and the re-check interval. */
     private const val CLOSE_ROUNDS = 3
     private const val CLOSE_VERIFY_MS = 1_500L
     private const val CLOSE_POLL_MS = 250L
 
     /**
-     * dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。CarPlay 化后含时钟/电量。
-     * 密度基准 420dpi（↔ 奥迪设计画布 1160×540），由 SessionController 按画布短边
-     * 等比下发——高分辨率车机下 dock 条与文字/图标同步放大，占画布短边恒定 23.3%
-     * （= 设计 126/540；2026-10-17 修复「高分辨率下 dock 显小」）。
+     * Dock width (dp; usable app-display width = total width - the pixels converted from this value). Includes clock / battery since the
+     * CarPlay-style redesign.
+     * Density baseline 420dpi (<-> Audi design canvas 1160x540), sent by SessionController proportionally to the canvas short side
+     * - on high-resolution head units the dock strip and its text/icons scale up together, taking a constant 23.3% of the canvas short side
+     * (= design 126/540; 2026-10-17 fix for "dock looks small at high resolution").
      */
     const val DOCK_WIDTH_DP = 48
 
     /**
-     * 竖屏锁定应用的 letterbox 宽高比（宽/高，会话建立时经 Shizuku 写入系统）。
-     * 默认（约 1.78）下窗口只有 ~303px≈188dp@240dpi；1.05 放宽到约 514px。
+     * Letterbox aspect ratio for portrait-locked apps (width/height, written to the system via Shizuku at session setup).
+     * With the default (about 1.78) the window is only ~303px = 188dp@240dpi; 1.05 widens it to about 514px.
      */
     private const val LETTERBOX_ASPECT_RATIO = 1.05f
 
-    /** letterbox 窗口的目标逻辑宽度（dp）：≈ 手机屏宽，触发电商类应用的紧凑手机布局。 */
+    /** Target logical width (dp) of the letterbox window: ~ phone screen width, triggering the compact phone layout of e-commerce apps. */
     private const val LETTERBOX_TARGET_DP = 410f
 
     /**
-     * 横屏应用屏超采样倍率（固定像素占位缩小的唯一杠杆，见 attach 注释）。
-     * 2.0 时像素开销 4x（用户实测明显变卡）；1.5 时 2.25x，顶部固定区占比
-     * 12%（原始 18%）——画质/流畅的折中点（2026-10-11 用户反馈调参）。
+     * Supersampling ratio of the landscape app display (the only lever to shrink the fixed-pixel footprint, see the attach comment).
+     * At 2.0 the pixel cost is 4x (visibly laggy per user testing); at 1.5 it is 2.25x and the fixed top area is
+     * 12% (originally 18%) - a quality/smoothness compromise (tuned on user feedback 2026-10-11).
      */
     private const val APP_SUPERSAMPLE = 1.5f
 
-    /** 超采样后的应用屏高度上限（px；控制 GPU/内存开销）。 */
+    /** Upper bound of the supersampled app-display height (px; limits GPU/memory cost). */
     private const val SUPERSAMPLE_MAX_HEIGHT = 1620
 
-    // ---- 仪表盘固定分屏（保留旧几何辅助接口以兼容坐标调用）----
-    // 比例 = tile 主轴长占「可用长度」（应用区主轴 − 两端边距 − 把手宽）的比例。
+    // ---- Fixed dashboard split (old geometry helper interface kept for compatible coordinate calls) ----
+    // Ratio = tile main-axis length over the "usable length" (app-area main axis - end margins - handle width).
 
-    /** 1920×720 基准下的地图/媒体比例（3:1）；其它分辨率按 [dashSplitFractionFor] 自适应。 */
+    /** Map/media ratio at the 1920x720 baseline (3:1); other resolutions adapt via [dashSplitFractionFor]. */
     const val DASH_SPLIT_DEFAULT_FRACTION = 3f / 4f
 
     /**
-     * 媒体卡「宽高比」目标（横屏 = 媒体卡宽 / 卡高）。取自 1920×720 下 3:1 的实际形状
-     * （424/688 ≈ 0.62）——媒体卡保持这个形状，地图吃掉其余宽度。竖屏车机媒体卡在下方，
-     * 目标为「卡高 / 卡宽」。
+     * Target media-card "aspect ratio" (landscape = media card width / card height). Taken from the actual shape of 3:1 at 1920x720
+     * (424/688 ~ 0.62) - the media card keeps this shape and the map takes the remaining width. On a portrait head unit the media card is
+     * below,
+     * and the target is "card height / card width".
      */
     private const val MEDIA_CARD_ASPECT_LANDSCAPE = 0.62f
     private const val MEDIA_CARD_ASPECT_PORTRAIT = 0.45f
 
-    /** 自适应比例的钳制：地图至少过半、至多 80%（超宽屏不让媒体卡缩成细条）。 */
+    /**
+     * Clamp of the adaptive ratio: map at least half, at most 80% (an ultra-wide screen must not shrink the media card into a thin strip).
+     */
     private const val ADAPTIVE_SPLIT_MIN = 0.55f
     private const val ADAPTIVE_SPLIT_MAX = 0.8f
 
     /**
-     * 按应用区尺寸算地图/媒体分屏比例（纯函数，单测钉死）：媒体卡保持固定形状，
-     * 地图占其余。1920×720 → ≈0.75（与旧 3:1 一致）；16:9（如 1280×720）→ ≈0.61；
-     * 超宽屏封顶 0.8；窄屏不低于 0.55。
+     * Computes the map/media split ratio from the app-area size (pure function, pinned by unit tests): the media card keeps a fixed shape,
+     * the map takes the rest. 1920x720 -> ~0.75 (same as the old 3:1); 16:9 (e.g. 1280x720) -> ~0.61;
+     * ultra-wide capped at 0.8; narrow screens not below 0.55.
      *
-     * @param mainLen 分屏主轴长（横屏 = 应用区宽，竖屏 = 应用区高）
-     * @param crossLen 另一轴长（横屏 = 应用区高，竖屏 = 应用区宽）
+     * @param mainLen split main-axis length (landscape = app-area width, portrait = app-area height)
+     * @param crossLen the other axis length (landscape = app-area height, portrait = app-area width)
      */
     fun dashSplitFractionFor(
         mainLen: Int,
@@ -121,13 +129,16 @@ object VirtualLauncher {
         return (1f - mediaLen / usable).coerceIn(ADAPTIVE_SPLIT_MIN, ADAPTIVE_SPLIT_MAX)
     }
 
-    /** 横屏底部 dock 相对侧栏的厚度系数（侧栏宽 ≈ 画布短边 23%，底部条取其 72% ≈ 17%）。 */
+    /**
+     * Thickness factor of the landscape bottom dock relative to the side bar (side bar width ~ 23% of canvas short side, bottom bar takes
+     * 72% of it ~ 17%).
+     */
     private const val BOTTOM_DOCK_FACTOR = 0.72f
 
-    /** 本会话生效的分屏比例（合成器默认中线公式用）。 */
+    /** Split ratio in effect this session (used by the compositor's default midline formula). */
     fun currentDashSplitFraction(): Float = dashSplitFraction
 
-    /** 比例钳制域：任一卡最小占 20%，防拖成一条线（按钮/圆角全挤没）。 */
+    /** Ratio clamp domain: each card keeps at least 20%, so it cannot be dragged into a line (buttons / corners all squeezed out). */
     const val DASH_SPLIT_MIN_FRACTION = 0.2f
 
     const val DASH_SPLIT_MAX_FRACTION = 0.8f
@@ -136,23 +147,23 @@ object VirtualLauncher {
 
     fun clampDashSplitFraction(fraction: Float): Float = fraction.coerceIn(DASH_SPLIT_MIN_FRACTION, DASH_SPLIT_MAX_FRACTION)
 
-    /** 分屏几何（应用区坐标系：横屏原点=dock 右缘，竖屏原点=流顶缘）。 */
+    /** Split geometry (app-area coordinates: landscape origin = dock right edge, portrait origin = stream top edge). */
     data class DashSplitGeom(
         val fraction: Float,
-        /** tile 主轴长（横=mapTileWidth、竖=mapTileHeight）。 */
+        /** Tile main-axis length (landscape = mapTileWidth, portrait = mapTileHeight). */
         val tileLen: Int,
-        /** tile 把手侧边缘（composer override 同语义）。 */
+        /** Handle-side edge of the tile (same semantics as the composer override). */
         val tileEdge: Float,
-        /** 把手中心。 */
+        /** Handle center. */
         val splitCenter: Float,
-        /** 对侧卡（音乐卡）内容侧起始。 */
+        /** Start of the content side of the opposite card (music card). */
         val otherStart: Float,
     )
 
     /**
-     * 分屏几何纯函数（单测钉死）：可用长度 = 主轴 − 边距×2 − 把手宽；
-     * tileLen = 比例×可用；把手中心 = 边距 + tileLen + 半把手（0.5 时恰在
-     * 应用区正中，与旧行为的中线分屏视觉一致）；音乐卡起始 = 边距 + tileLen + 把手宽。
+     * Split geometry pure function (pinned by unit tests): usable length = main axis - margin x2 - handle width;
+     * tileLen = ratio x usable; handle center = margin + tileLen + half handle (at 0.5 it sits exactly in the middle of
+     * the app area, visually consistent with the old midline split); music card start = margin + tileLen + handle width.
      */
     fun dashSplitGeom(
         appMainLen: Int,
@@ -171,7 +182,7 @@ object VirtualLauncher {
         )
     }
 
-    /** 分屏主轴长度（应用区坐标系）：横=appAreaWidth、竖=appAreaHeight。 */
+    /** Split main-axis length (app-area coordinates): landscape = appAreaWidth, portrait = appAreaHeight. */
     private fun splitMainLen(): Int = if (splitVertical) appAreaHeight else appAreaWidth
 
     val runningApps = LinkedHashSet<ComponentName>()
@@ -192,7 +203,10 @@ object VirtualLauncher {
 
     private val runningAppsListeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
 
-    /** dock 注册回调：运行列表变化时刷新（dock 独占一屏，永远 resumed，onResume 不再触发）。 */
+    /**
+     * Dock registration callback: refresh when the running list changes (the dock owns a display, is always resumed, and onResume no
+     * longer fires).
+     */
     fun addRunningAppsListener(listener: () -> Unit) {
         runningAppsListeners.add(listener)
     }
@@ -206,9 +220,11 @@ object VirtualLauncher {
     }
 
     /**
-     * 桌面图标缓存（DockActivity 显示运行中图标用）。桌面扫描线程整表换新、dock 的
-     * 主线程并发读——volatile 引用替换，读方拿到的旧表也完整自洽（此前 clear+逐条
-     * 写入同一个 HashMap，跨屏读写无同步，并发下可能损坏）。
+     * Desktop icon cache (used by DockActivity to show running-app icons). The desktop scan thread replaces the whole table while the
+     * dock's
+     * main thread reads concurrently - a volatile reference swap, so the old table a reader gets is still complete and self-consistent
+     * (before, clear + per-entry
+     * writes on one HashMap with no cross-display synchronization could corrupt it under concurrency).
      */
     @Volatile
     private var iconCacheRef: Map<ComponentName, Drawable> = emptyMap()
@@ -216,10 +232,11 @@ object VirtualLauncher {
     val iconCache: Map<ComponentName, Drawable>
         get() = iconCacheRef
 
-    /** 桌面扫描完成后整表替换图标缓存。 */
+    /** Replaces the whole icon cache when the desktop scan completes. */
     fun replaceIconCache(fresh: Map<ComponentName, Drawable>) {
         iconCacheRef = fresh
-        // dock 可能早于桌面扫描完成首绘（那时只能画默认图标）：换表后通知它重绘
+        // The dock may finish its first draw before the desktop scan (only default icons could be drawn then): notify it to redraw after
+        // the swap
         notifyRunningAppsChanged()
     }
 
@@ -231,58 +248,64 @@ object VirtualLauncher {
     var appDisplayId: Int = -1
         private set
 
-    /** dock 在主合成画面中占据的像素宽度（TouchRouter 分流阈值；横屏=左侧竖条宽）。 */
+    /** Pixel width the dock occupies in the main composited picture (TouchRouter split threshold; landscape = width of the left strip). */
     @Volatile
     var dockWidthPx: Int = 0
         private set
 
-    /** dock 在底部横条（竖屏车机，或横屏选了「Dock 在底部」版面）；只表达 dock 位置，分屏方向见 [splitVertical]。 */
+    /**
+     * The dock is a bottom bar (portrait head unit, or landscape with the "Dock at bottom" layout); expresses dock position only, see
+     * [splitVertical] for split direction.
+     */
     @Volatile
     var dockAtBottom: Boolean = false
         private set
 
-    /** 地图在上、媒体在下（竖屏车机 / 音乐条版面）；false = 左右分屏。 */
+    /** Map on top, media below (portrait head unit / music-bar layout); false = side-by-side split. */
     @Volatile
     var splitVertical: Boolean = false
         private set
 
-    /** 本会话版面（attach 时按偏好与画布解析，见 [DashLayout.resolve]）。 */
+    /** Layout of this session (resolved at attach from preference and canvas, see [DashLayout.resolve]). */
     @Volatile
     var dashLayout: DashLayout = DashLayout.SIDE_BY_SIDE
         private set
 
-    /** 车机画布是竖屏（设置页等按「窄屏」处理的依据，与 dock 位置无关）。 */
+    /** The head-unit canvas is portrait (basis for settings pages etc. to treat as "narrow screen", independent of dock position). */
     fun isPortraitCanvas(): Boolean = streamHeightPx > streamWidthPx
 
-    /** dock 横条高度（竖屏；TouchRouter 按 y 分流）。 */
+    /** Dock bar height (portrait; TouchRouter splits by y). */
     @Volatile
     var dockHeightPx: Int = 0
         private set
 
-    /** 应用区高度（竖屏；y < appHeightPx 属于应用屏）。 */
+    /** App-area height (portrait; y < appHeightPx belongs to the app display). */
     @Volatile
     var appHeightPx: Int = 0
         private set
 
     /**
-     * 应用屏超采样倍率（超采样应用屏的渲染倍率；1=未创建超采样屏）。
-     * 触摸坐标按当前**活动应用屏**的倍率换算（见 [activeAppScale]）。
+     * Supersampling ratio of the app display (render ratio of the supersampled app display; 1 = no supersampled display created).
+     * Touch coordinates are converted by the ratio of the current **active app display** (see [activeAppScale]).
      */
     @Volatile
     var hiScale: Float = 1f
         private set
 
-    /** 超采样应用屏（横屏车机时存在；竖屏车机为 -1，全部走原生）。 */
+    /** Supersampled app display (exists on landscape head units; -1 on portrait head units, where everything uses the native display). */
     @Volatile
     var appHiDisplayId: Int = -1
         private set
 
-    /** 主区桌面（GridActivity）所在屏：横屏=超采样屏（保持既有观感），竖屏=原生屏。 */
+    /**
+     * Display hosting the main-area desktop (GridActivity): landscape = supersampled display (keeps the existing look), portrait = native
+     * display.
+     */
     @Volatile
     var gridDisplayId: Int = -1
         private set
 
-    /** 视频流画布尺寸（桌面壁纸切片的 aspectFill 映射基准）。 */
+    /** Video-stream canvas size (baseline of the aspectFill mapping of desktop wallpaper slices). */
     @Volatile
     var streamWidthPx: Int = 0
         private set
@@ -291,9 +314,9 @@ object VirtualLauncher {
     var streamHeightPx: Int = 0
         private set
 
-    // ---- 地图屏（仪表盘分屏）：地图应用专属屏，分屏=tile 尺寸，全屏=应用区尺寸 ----
+    // ---- Map display (dashboard split): a display dedicated to the map app; split = tile size, fullscreen = app-area size ----
 
-    /** 地图屏 displayId（横屏车机且受信屏模式创建；-1 = 无）。 */
+    /** Map display displayId (created on landscape head units in trusted-display mode; -1 = none). */
     @Volatile
     var mapDisplayId: Int = -1
         private set
@@ -302,7 +325,7 @@ object VirtualLauncher {
     var mediaDisplayId: Int = -1
         private set
 
-    /** 最近一次按下注入的屏（小白点在仪表盘里「返回」发给最后操作的地图 / 音乐 App）。 */
+    /** Display of the last press injection (the assistive dot's "Back" in the dashboard goes to the last-operated map / music app). */
     @Volatile
     var lastTouchedDisplay: Int = -1
 
@@ -319,13 +342,15 @@ object VirtualLauncher {
     @Volatile
     private var activeMapComponent: ComponentName? = null
 
-    /** 当前在媒体区（CarPlayMedia 屏）的应用；dock 不重复显示它与当前地图。 */
+    val activeMapPackage: String? get() = activeMapComponent?.packageName
+
+    /** App currently in the media area (CarPlayMedia display); the dock does not duplicate it or the current map. */
     @Volatile
     private var activeMediaComponent: ComponentName? = null
 
     /**
-     * dock 显示的运行中应用：会话内开过的应用，**去掉当前地图与媒体区应用**——
-     * 它们在仪表盘上已有固定位置，dock 留给额外打开的应用（2026-11-17 用户要求）。
+     * Running apps shown by the dock: apps opened during the session, **minus the current map and the media-area app** -
+     * they already have fixed places on the dashboard, and the dock is left for additionally opened apps (user request 2026-11-17).
      */
     fun dockApps(): List<ComponentName> {
         val hidden = setOfNotNull(activeMapComponent?.packageName, activeMediaComponent?.packageName)
@@ -355,22 +380,21 @@ object VirtualLauncher {
             dashboardPanesSwapped,
         )
 
-    /** 在同一地图屏切换前台任务，保持本次选择；不改持久化默认地图。 */
+    /** Switches the foreground task on the same map display, keeping this selection; does not change the persisted default map. */
     @Synchronized
     fun switchMap(component: ComponentName): Boolean {
         val target = mapDisplayId
         if (target < 0) return false
-        val onTarget = reuseVehicleTask(component.packageName, target)
-        val result = startMapApp(component, target, forceNewTask = !onTarget, extraArgs = "--windowingMode 1")
-        val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
+        val ok = openMapTask(component, target)
+        if (target != mapDisplayId) return false
         if (ok) {
             activeMapComponent = component
             recordSessionApp(component, target)
-            // 默认地图 = 最后使用的地图（2026-11-15 用户要求）：在桌面开了别的地图，
-            // 下次连接分屏就用它，不必去设置里改
+            // Default map = last used map (user request 2026-11-15): if another map was opened on the desktop,
+            // the split uses it on the next connection, with no need to change it in settings
             appContextRef?.let { DefaultMapPrefs.set(it, component.packageName) }
         }
-        logSink?.invoke("MAP: ${component.packageName} → 地图区域 display=$target ok=$ok")
+        logSink?.invoke("MAP: ${component.packageName} -> map area display=$target ok=$ok")
         return ok
     }
 
@@ -394,7 +418,7 @@ object VirtualLauncher {
     var dashboardUserDragging = false
         private set
 
-    /** 应用第一页右滑时让地图跟随 pager；逻辑模式等落定再提交。 */
+    /** On swiping right from the first app page, the map follows the pager; the logical mode is committed once it settles. */
     fun beginDashboardPageDrag() {
         if (dashboardMode || mapFullscreen) return
         dashboardUserDragging = true
@@ -404,14 +428,14 @@ object VirtualLauncher {
         refreshOverlayCard()
     }
 
-    /** 截取合成后的车机画面（未连接返回 false）；回调在 GL 线程。 */
+    /** Captures the composited head-unit picture (returns false when not connected); the callback runs on the GL thread. */
     fun requestCarFrame(callback: (android.graphics.Bitmap?) -> Unit): Boolean {
         val c = composer ?: return false
         c.requestCapture(callback)
         return true
     }
 
-    /** 桌面 pager 的 fakeDrag 接口（GridActivity 注册；回调内自行切主线程）。 */
+    /** fakeDrag interface of the desktop pager (registered by GridActivity; the callback switches to the main thread itself). */
     interface DashboardDragSink {
         fun begin(): Boolean
 
@@ -424,8 +448,10 @@ object VirtualLauncher {
     var dashboardDragSink: DashboardDragSink? = null
 
     /**
-     * 仪表盘向左跟手拖（TouchRouter 认领手势后调用）：GL 地图层由 pager 的 onPageScrolled
-     * 驱动随手指滑出，松手后 pager 落定、IDLE 时按落点提交模式（与应用页右拖回仪表盘同一收尾）。
+     * Dashboard follow-finger left drag (called after TouchRouter claims the gesture): the GL map layer slides out with the finger driven
+     * by the pager's onPageScrolled;
+     * after release the pager settles and at IDLE the mode is committed by the landing point (same ending as dragging right from an app
+     * page back to the dashboard).
      */
     fun beginDashboardDragOut(): Boolean {
         if (!dashboardMode || mapFullscreen) return false
@@ -478,12 +504,12 @@ object VirtualLauncher {
         notifyMapLayout()
     }
 
-    /** 只在独立媒体屏启动，不切换全屏应用状态，不搬动地图或桌面任务。 */
+    /** Launch only on the separate media display; do not toggle the fullscreen-app state, do not move map or desktop tasks. */
     @Synchronized
     fun launchMediaApp(component: ComponentName): Boolean {
         val target = mediaDisplayId
         if (target < 0) {
-            logSink?.invoke("MEDIA: 媒体屏不可用，保留音乐卡")
+            logSink?.invoke("MEDIA: media display unavailable, keeping the music card")
             return false
         }
         AppOrientationCompat.awaitPending()
@@ -498,22 +524,25 @@ object VirtualLauncher {
             recordSessionApp(component, target)
             LetterboxHintController.clear()
         }
-        logSink?.invoke("MEDIA: ${component.packageName} → 媒体区域 display=$target ok=$ok")
+        logSink?.invoke("MEDIA: ${component.packageName} -> media area display=$target ok=$ok")
         return ok
     }
 
-    /** 仪表盘↔桌面滑动进度（0=tile 原位，1=完全滑出）：滑动期间抑制 tile 事件注入。 */
+    /** Dashboard <-> desktop swipe progress (0 = tile in place, 1 = fully slid out): tile event injection is suppressed while swiping. */
     @Volatile
     var tileSlideFraction: Float = 0f
         private set
 
-    /** 由 GridActivity 随 pager 滑动驱动 tile 视觉位移。 */
+    /** Driven by GridActivity with the pager swipe to move the tile visually. */
     fun setTileSlide(fraction: Float) {
         tileSlideFraction = fraction
         composer?.tileSlideFraction = fraction
     }
 
-    /** 「显示」设置实时切换目标帧率（合成器未创建时静默——attach 时会从偏好读取）。 */
+    /**
+     * The "Display" setting switches the target frame rate live (silent when the compositor is not created - attach reads it from
+     * preferences).
+     */
     fun isLayoutTransitioning(): Boolean =
         suppressTouchDuringLayout(dashboardPageAnimating, dashboardUserDragging, composer?.isLayoutTransitioning() == true)
 
@@ -521,7 +550,7 @@ object VirtualLauncher {
         composer?.targetFps = fps
     }
 
-    /** 地图屏 tile 尺寸（分屏形态的实际显示尺寸；与 DualDisplayComposer 的 SPLIT 绘制矩形一致）。 */
+    /** Map-display tile size (actual display size of the split form; consistent with the SPLIT draw rectangle of DualDisplayComposer). */
     @Volatile
     var mapTileWidth: Int = 0
         private set
@@ -531,19 +560,19 @@ object VirtualLauncher {
         private set
 
     /**
-     * 仪表盘分屏把手中心（流像素，顶部原点；横屏=x、竖屏=y）。<0 = 未 attach。
-     * 拖动中由 [previewDashSplit] 连续预览，松手 [commitDashSplit] 落定并派生
-     * [mapTileWidth]/[mapTileHeight]。几何推导全部经 [dashSplitGeom] 纯函数。
+     * Dashboard split handle center (stream pixels, origin at top; landscape = x, portrait = y). <0 = not attached.
+     * During a drag [previewDashSplit] previews continuously; on release [commitDashSplit] settles it and derives
+     * [mapTileWidth]/[mapTileHeight]. All geometry derivation goes through the [dashSplitGeom] pure function.
      */
     @Volatile
     var dashSplitPos: Float = -1f
         private set
 
-    /** 当前生效的分屏比例（attach 从偏好恢复，commit 写回）。 */
+    /** Split ratio in effect (restored from preferences at attach, written back on commit). */
     @Volatile
     private var dashSplitFraction = DASH_SPLIT_DEFAULT_FRACTION
 
-    /** 应用区尺寸（全屏形态的地图屏目标尺寸）。 */
+    /** App-area size (target size of the map display in fullscreen form). */
     @Volatile
     var appAreaWidth: Int = 0
         private set
@@ -556,21 +585,23 @@ object VirtualLauncher {
     var mapFullscreen: Boolean = false
         private set
 
-    /** 地图屏当前逻辑尺寸（resize 幂等基线；0 = 未创建/已释放）。 */
+    /** Current logical size of the map display (idempotent baseline for resize; 0 = not created / released). */
     @Volatile
     private var mapDisplayW = 0
 
     @Volatile
     private var mapDisplayH = 0
 
-    /** 原生应用屏逻辑尺寸（letterbox 黑边换算的屏尺寸事实源；创建后不变）。 */
+    /**
+     * Logical size of the native app display (source of truth for the display size in letterbox bar computation; constant after creation).
+     */
     @Volatile
     private var appDisplayW = 0
 
     @Volatile
     private var appDisplayH = 0
 
-    /** 超采样应用屏逻辑尺寸（同上）。 */
+    /** Logical size of the supersampled app display (same as above). */
     @Volatile
     private var appHiDisplayW = 0
 
@@ -578,19 +609,44 @@ object VirtualLauncher {
     private var appHiDisplayH = 0
 
     /**
-     * 地图屏 / 媒体屏密度：以 720 短边 = 200dpi 为基准随画布等比（2026-11-17）。
-     * 此前固定 200dpi——800×480 的地图屏只有 ~534×271dp，Google 地图的搜索栏与底部面板
-     * 占满高度、地图只剩一条缝；等比后 ~800×408dp，与 1920×720 的观感比例一致。
-     * resize 不变密度（逻辑尺寸随像素缩放）。下限 120 防 ROM 拒绝异常密度。
+     * Map display / media display density: based on 720 short side = 200dpi and scaled with the canvas (2026-11-17).
+     * Previously fixed at 200dpi - an 800x480 map display was only ~534x271dp, the Google Maps search bar and bottom panel
+     * filled the height and left only a sliver of map; after scaling it is ~800x408dp, the same proportions as 1920x720.
+     * resize does not change density (logical size scales with pixels). Lower bound 120 so the ROM does not reject an abnormal density.
      */
     private val MAP_DISPLAY_DPI: Int get() = (200f * DashMetrics.scale).toInt().coerceIn(120, 600)
 
-    /** 仪表盘（分屏）模式是否激活。 */
+    /**
+     * The media display renders at this multiple of its pane in pixels and density: normal apps keep their dp size (just
+     * sharper), while apps that lay out with the phone's density regardless of the display (WeChat's call screen,
+     * 2026-11-22: buttons blown up and cut off in a 427x688 pane; 2x on the 600 dpi S24 still gave it only ~228 dp, buttons
+     * overlapping) get room in pixels. Chosen at attach so the pane is at least [MEDIA_MIN_PHONE_DP] wide in the phone's own
+     * density (S24: 3x), 2..4. The compositor scales it back down.
+     */
+    @Volatile
+    var mediaSupersample = 2
+        private set
+
+    private const val MEDIA_MIN_PHONE_DP = 320
+
+    private fun mediaSupersampleFor(paneWidthPx: Int): Int {
+        val phoneDensity =
+            android.content.res.Resources
+                .getSystem()
+                .displayMetrics.density
+        if (paneWidthPx <= 0) return 2
+        return kotlin.math
+            .ceil(MEDIA_MIN_PHONE_DP * phoneDensity / paneWidthPx)
+            .toInt()
+            .coerceIn(2, 4)
+    }
+
+    /** Whether dashboard (split) mode is active. */
     @Volatile
     var dashboardMode: Boolean = false
         private set
 
-    /** 仪表盘模式变化监听（GridActivity 切换布局）。 */
+    /** Dashboard mode change listener (GridActivity switches layout). */
     private val dashboardListeners = java.util.concurrent.CopyOnWriteArrayList<(Boolean) -> Unit>()
 
     fun addDashboardListener(listener: (Boolean) -> Unit) {
@@ -606,7 +662,7 @@ object VirtualLauncher {
         dashboardListeners.forEach { runCatching { it(dashboardMode) } }
     }
 
-    /** 地图 tile 布局变化监听（隐藏/分屏/全屏）。 */
+    /** Map tile layout change listener (hidden / split / fullscreen). */
     private val mapLayoutListeners = java.util.concurrent.CopyOnWriteArrayList<(Boolean) -> Unit>()
 
     fun addMapLayoutListener(listener: (Boolean) -> Unit) {
@@ -622,7 +678,7 @@ object VirtualLauncher {
         mapLayoutListeners.forEach { runCatching { it(mapFullscreen) } }
     }
 
-    /** 内置地图优先序；手动指定的其他包也按地图屏路由。 */
+    /** Built-in map priority order; other manually specified packages are also routed to the map display. */
     val MAP_PACKAGES_PRIORITY =
         listOf(
             "com.autonavi.amapauto",
@@ -643,9 +699,11 @@ object VirtualLauncher {
         )
 
     /**
-     * 能进仪表盘媒体区的「音乐 App」：提供系统媒体浏览服务（MediaBrowserService，车用媒体 App 的标配），
-     * 且不是聊天类。Telegram 播语音、三星录音机录音/回放都会登记「正在播放」的媒体会话，
-     * 曾因此被音乐卡开进媒体屏，之后从桌面点也被带回媒体区（2026-11-17 用户反馈）。
+     * "Music apps" that may enter the dashboard media area: they provide a system media-browse service (MediaBrowserService, standard for
+     * car media apps)
+     * and are not chat apps. Telegram voice and Samsung recorder recording/playback both register a "now playing" media session,
+     * which once got them opened onto the media display by the music card, and then tapping them from the desktop also brought them back
+     * to the media area (user feedback 2026-11-17).
      */
     fun isMusicApp(
         context: Context,
@@ -670,19 +728,19 @@ object VirtualLauncher {
             appContextRef?.let { DefaultMapPrefs.manualPackage(it) == packageName } == true
 
     /**
-     * 已安装的默认地图（用户显式设置优先——DefaultMapPrefs；否则按优先序取
-     * 第一个已安装者；null = 无任何地图应用）。
+     * Installed default map (explicit user setting first - DefaultMapPrefs; otherwise the
+     * first installed one in priority order; null = no map app at all).
      *
-     * ⚠️ 本函数**只是**对 [DefaultMapPrefs.resolve] 的转调，而后者不得反过来调用
-     * 本函数（会无限递归 → StackOverflowError）。优先序扫描已在 resolve 内部就地
-     * 实现，正确性由它负责；此处保留仅为对外 API 语义（VirtualLauncher 是调用方
-     * 的主要入口）。2026-10-18 定谳。
+     * WARNING: this function is **only** a forward to [DefaultMapPrefs.resolve], and the latter must never call back
+     * this function (infinite recursion -> StackOverflowError). The priority scan is implemented in place inside resolve,
+     * which owns its correctness; this is kept only for the external API semantics (VirtualLauncher is the main
+     * entry for callers). Settled 2026-10-18.
      */
     fun defaultMapComponent(context: Context): ComponentName? = DefaultMapPrefs.resolve(context)
 
     /**
-     * 桌面所在屏相对视频流的渲染倍率（原生屏=1，超采样屏=hiScale）。
-     * 桌面内绘制「全流画布壁纸切片」时的尺寸/偏移换算用。
+     * Render ratio of the display hosting the desktop relative to the video stream (native display = 1, supersampled display = hiScale).
+     * Used for size/offset conversion when the desktop draws its "full-stream canvas wallpaper slice".
      */
     fun gridScale(): Float = if (gridDisplayId >= 0 && gridDisplayId == appHiDisplayId) hiScale else 1f
 
@@ -690,17 +748,17 @@ object VirtualLauncher {
     private var appDisplay: VirtualDisplay? = null
     private var appHiDisplay: VirtualDisplay? = null
 
-    /** 回退形态的地图屏句柄（受信形态经 shell 创建，无本进程句柄）。 */
+    /** Handle of the map display in fallback form (trusted form creates it via shell, so there is no handle in this process). */
     private var mapDisplay: VirtualDisplay? = null
     private var composer: DualDisplayComposer? = null
 
-    /** 当前活动应用屏 ID（TouchRouter 注入目标）。 */
+    /** ID of the current active app display (TouchRouter injection target). */
     fun activeAppDisplayId(): Int = if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) appHiDisplayId else appDisplayId
 
-    /** 当前活动应用屏的坐标倍率（超采样屏=hiScale，原生屏=1）。 */
+    /** Coordinate ratio of the current active app display (supersampled display = hiScale, native display = 1). */
     fun activeAppScale(): Float = if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) hiScale else ChatMode.scaleFor(appDisplayId)
 
-    /** 应用区在输出画面中的矩形（顶部原点）——叠加卡片定位用。 */
+    /** Rectangle of the app area in the output picture (origin at top) - used to position overlay cards. */
     fun appAreaRect(): RectF? {
         if (streamWidthPx <= 0 || streamHeightPx <= 0) return null
         return if (dockAtBottom) {
@@ -710,20 +768,37 @@ object VirtualLauncher {
         }
     }
 
-    /** 画布 UI 密度**缩放**（dpi/160；与 dock 屏同一基准：420dpi @ 540 短边）。 */
+    /** Canvas UI density **scale** (dpi/160; same baseline as the dock display: 420dpi @ 540 short side). */
     fun uiDensity(): Float = ((420f * minOf(streamWidthPx, streamHeightPx) / 540f).coerceIn(120f, 1680f)) / 160f
 
-    /** 指定虚拟屏的逻辑像素尺寸（letterbox 探测缺 mMaxBounds 时的兜底事实源）。 */
+    /**
+     * Reads [rect] (map display pixels) of the map display's current frame from the compositor, see
+     * [DualDisplayComposer.requestMapRegion]. False when there is no session / map display; the caller then falls
+     * back to a system screenshot.
+     */
+    fun requestMapRegion(
+        rect: android.graphics.Rect,
+        callback: (android.graphics.Rect, IntArray?) -> Unit,
+    ): Boolean {
+        val c = composer ?: return false
+        if (mapDisplayId < 0 || mapDisplayW <= 0 || mapDisplayH <= 0) return false
+        // Clamped to the display: the callback gets the rectangle actually read
+        val r = android.graphics.Rect(rect)
+        if (!r.intersect(0, 0, mapDisplayW, mapDisplayH)) return false
+        return c.requestMapRegion(r.left, r.top, r.width(), r.height(), mapDisplayW, mapDisplayH) { pixels -> callback(r, pixels) }
+    }
+
+    /** Logical pixel size of a given virtual display (fallback source of truth when letterbox probing lacks mMaxBounds). */
     fun hintDisplaySize(displayId: Int): Pair<Int, Int>? =
         when (displayId) {
             appDisplayId -> if (appDisplayW > 0) appDisplayW to appDisplayH else null
             appHiDisplayId -> if (appHiDisplayW > 0) appHiDisplayW to appHiDisplayH else null
             mapDisplayId -> if (mapDisplayW > 0) mapDisplayW to mapDisplayH else null
-            mediaDisplayId -> mediaAppBounds().let { it.width to it.height }
+            mediaDisplayId -> mediaAppBounds().let { it.width * mediaSupersample to it.height * mediaSupersample }
             else -> null
         }
 
-    /** 挂/摘合成器上的叠加卡片。 */
+    /** Attach / detach an overlay card on the compositor. */
     @Volatile
     private var hintOverlay: OverlayCard? = null
 
@@ -751,17 +826,18 @@ object VirtualLauncher {
         composer?.pageDots = pageDotsCard
     }
 
-    /** 桌面页点快照（输出画面坐标）；见 [DualDisplayComposer.pageDots]。 */
+    /** Desktop page-dot snapshot (output-picture coordinates); see [DualDisplayComposer.pageDots]. */
     @Volatile
     private var pageDotsCard: OverlayCard? = null
 
     /**
-     * 页点是否改由合成器画在地图/媒体卡之上：仪表盘分屏可见（含与应用页之间的滑动），
-     * 且地图不是全屏。GridActivity 以同一判据隐藏自身页点。
+     * Whether the page dots are instead drawn by the compositor above the map / media cards: when the dashboard split is visible
+     * (including swiping to and from the app page)
+     * and the map is not fullscreen. GridActivity hides its own page dots by the same criterion.
      */
     fun pageDotsOnTop(): Boolean = (dashboardMode || dashboardPageAnimating) && !mapFullscreen
 
-    /** 页点是否该显示（只在翻页中显示，由 GridActivity 按 pager 滑动状态驱动）。 */
+    /** Whether the page dots should show (only while paging; driven by GridActivity from the pager swipe state). */
     @Volatile
     var pageDotsShowing: Boolean = false
         private set
@@ -773,8 +849,9 @@ object VirtualLauncher {
     }
 
     /**
-     * GridActivity 上报页点位图。[left]/[top] 为页点在**桌面所在屏**内的像素坐标；
-     * 桌面屏可能是超采样屏（像素 = 输出 × [gridScale]），换算回输出画面再平移到 [appAreaRect]。
+     * GridActivity reports the page-dot bitmap. [left]/[top] are pixel coordinates of the dots inside the **display hosting the desktop**;
+     * that display may be the supersampled one (pixels = output x [gridScale]), so convert back to the output picture and then translate
+     * to [appAreaRect].
      */
     fun setPageDots(
         bitmap: android.graphics.Bitmap?,
@@ -795,16 +872,18 @@ object VirtualLauncher {
     }
 
     /**
-     * 语音助理浮层（Gemini）开在桌面所在的车机屏上时为 true：合成器暂停绘制地图/媒体卡，
-     * 触摸也不再分流给卡片，让原生浮层完整可见、可点。
+     * True when the voice-assistant overlay (Gemini) is open on the head-unit display hosting the desktop: the compositor pauses drawing
+     * map/media cards,
+     * and touches are no longer routed to the cards, so the native overlay is fully visible and tappable.
      */
     @Volatile
     var assistCoversDashboard = false
         private set
 
     /**
-     * 浮层所在屏（-1 = 已关闭）。只有落在桌面屏 / 当前活动应用屏时才需要让出卡片——
-     * 其它屏（地图/媒体屏）上的浮层本来就随卡片一起显示。返回是否让出了卡片。
+     * Display hosting the overlay (-1 = closed). Yielding the cards is needed only when it lands on the desktop display / the current
+     * active app display -
+     * overlays on other displays (map/media displays) are shown together with the cards anyway. Returns whether the cards were yielded.
      */
     fun setAssistOnCarDisplay(displayId: Int): Boolean {
         val cover = displayId >= 0 && (displayId == gridDisplayId || displayId == activeAppDisplayId())
@@ -823,7 +902,7 @@ object VirtualLauncher {
             !mapFullscreen &&
             !dashboardPageAnimating
 
-    /** 语音助理透明屏（-1 = 未建）；按需创建，见 [ensureAssistDisplay]。 */
+    /** Voice-assistant transparent display (-1 = not built); created on demand, see [ensureAssistDisplay]. */
     @Volatile
     var assistDisplayId: Int = -1
         private set
@@ -832,8 +911,9 @@ object VirtualLauncher {
     private var assistDensityDpi = 200
 
     /**
-     * 按需建语音助理透明屏（CarPlayAssist，应用区尺寸、与原生应用屏同密度、受信）。
-     * 只能在后台线程调用（binder + shell）。失败返回 -1，调用方退回旧做法。
+     * Builds the voice-assistant transparent display on demand (CarPlayAssist, app-area size, same density as the native app display,
+     * trusted).
+     * Background thread only (binder + shell). Returns -1 on failure and the caller falls back to the old approach.
      */
     @Synchronized
     fun ensureAssistDisplay(): Int {
@@ -849,22 +929,25 @@ object VirtualLauncher {
             assistDisplayId = id
             applyIgnoreOrientationRequest(id)
         }
-        logSink?.invoke("ASSIST: 助理透明屏 ${if (id >= 0) "已建 id=$id ${appAreaWidth}x$appAreaHeight@${assistDensityDpi}dpi" else "创建失败"}")
+        logSink?.invoke(
+            "ASSIST: transparent display " +
+                if (id >= 0) "built id=$id ${appAreaWidth}x$appAreaHeight@${assistDensityDpi}dpi" else "creation failed",
+        )
         return id
     }
 
-    /** 助理层显隐（浮层在 / 不在助理透明屏上）。 */
+    /** Assistant layer visibility (overlay on / not on the assistant transparent display). */
     fun setAssistLayerVisible(visible: Boolean) {
         composer?.assistLayerVisible = visible
         refreshOverlayCard()
     }
 
-    /** 会话上下文（letterbox 重启后复探要用；未 attach 时为 null）。 */
+    /** Session context (needed for re-probing after a letterbox restart; null when not attached). */
     fun appContext(): Context? = appContextRef
 
     /**
-     * 挂载：建 GL 合成器 → 就绪回调里建两块虚拟屏 → 拉起 Dock/Grid。
-     * [encoderSurface] 为编码器输入 Surface；返回是否全部成功。
+     * Attach: build the GL compositor -> in its ready callback build the two virtual displays -> launch Dock/Grid.
+     * [encoderSurface] is the encoder input Surface; returns whether everything succeeded.
      */
     @SuppressLint("WrongConstant")
     fun attach(
@@ -876,43 +959,53 @@ object VirtualLauncher {
         log: (String) -> Unit,
     ): Boolean {
         detach()
-        // 新会话：「本次会话不再提示」等用户级决定作废
+        // New session: user-level decisions such as "no more hints this session" are invalidated
         LetterboxHintController.resetSession()
-        // 「强制应用横屏」覆盖**必须先于任何应用启动**写入（2026-10-23 奥迪 3315 真机
-        // 定谳）：`am compat enable` 会立即杀掉目标应用（覆盖只能在新进程生效）——
-        // 若写在应用拉起之后，桌面上刚 spawn 的地图/桌面进程会被当场杀死，虚拟屏
-        // 只剩静态壁纸，车机收到的画面永远不变、不切换 CarPlay UI（表现为「推流中
-        // 但车机还在原界面」）。写入在配对起步（SessionController 端点处理）就入队，
-        // attach 这里只 drain——通常已完成（~0ms）。注意别在这里同步跑 applyAll：
-        // 屏幕口 keepAlive 帧只从 drainEncoder 循环发出，而 drain 线程在本方法返回
-        // 后才启动——这里每阻塞 1s 都直接吃掉「RECORD→首条 keepAlive」的 ~10s
-        // 拆链预算（奥迪实测阈值）。
+        // The "force app landscape" override **must be written before any app launch** (settled on a real Audi 3315
+        // 2026-10-23): `am compat enable` kills the target app immediately (overrides only take effect in a new process) -
+        // if written after the apps are launched, the map/desktop processes just spawned on the displays are killed on the spot and the
+        // virtual displays
+        // show only a static wallpaper, so the head unit receives a picture that never changes and never switches CarPlay UI (seen as
+        // "streaming
+        // but the head unit still shows its original UI"). The write is enqueued at pairing start (endpoint handling in SessionController),
+        // and attach only drains it - usually already done (~0ms). Do not run applyAll synchronously here:
+        // the screen-port keepAlive frames are sent only from the drainEncoder loop, and the drain thread starts only after this method
+        // returns -
+        // every 1s blocked here directly eats the ~10s tear-down budget of "RECORD -> first keepAlive"
+        // (threshold measured on Audi).
         if (!AppOrientationCompat.awaitPending()) {
-            log("ORIENTATION: ⚠ 覆盖写入未在 6s 内排空——应用可能带着旧方向配置启动（后台写完后首个启动的应用会被杀一次）")
+            log(
+                "ORIENTATION: WARNING override writes did not drain within 6s - apps may launch with the old orientation config " +
+                    "(first app launched after the write finishes gets killed once)",
+            )
         }
         dashboardPanesSwapped =
             context
                 .getSharedPreferences("settings", Context.MODE_PRIVATE)
                 .getBoolean("dashboardPanesSwapped", false)
         val density = densityDpi / 160f
-        // dock 栏宽度缩放（「显示」面板 50%–100%，下次连接起效）：厚度像素与 dock 屏
-        // 密度**同乘**比例——内容 dp 布局不变、渲染进更少像素，整条 dock（图标/时钟/
-        // 文字）等比变窄；只缩厚度不缩密度会让内容溢出或留白。下限 80px 同乘缩放防
-        // 极端画布下压没。密度下限 120 防 ROM 拒绝异常密度。
-        // 版面：dock 位置与分屏方向（窄横屏可选音乐条 / 底部 dock；竖屏车机固定）
+        // Dock bar width scale ("Display" panel 50%-100%, takes effect next connection): thickness pixels are multiplied by the ratio
+        // together with the dock display
+        // density - the dp layout of the content is unchanged but rendered into fewer pixels, so the whole dock (icons / clock /
+        // text) narrows proportionally; shrinking only thickness and not density would overflow or leave gaps. The 80px lower bound is
+        // multiplied by the scale to prevent
+        // it from being squeezed out on extreme canvases. Density lower bound 120 so the ROM does not reject an abnormal density.
+        // Layout: dock position and split direction (narrow landscape can choose the music-bar / bottom-dock layout; portrait head units
+        // are fixed)
         val layout = DashLayout.resolve(DisplayPrefs.dashboardLayout(context), totalWidth, totalHeight)
         dashLayout = layout
         splitVertical = layout.splitVertical
-        // 横屏底部 dock 比侧栏薄（Android Auto 式）：厚度与 dock 屏密度同乘，内容等比缩小不溢出
+        // The landscape bottom dock is thinner than the side bar (Android Auto style): thickness is multiplied with the dock display
+        // density, so content shrinks proportionally without overflow
         val dockScale = DockPrefs.widthPercent(context) / 100f * if (layout == DashLayout.DOCK_BOTTOM) BOTTOM_DOCK_FACTOR else 1f
         val thicknessPx =
             (DOCK_WIDTH_DP * density * dockScale)
                 .toInt()
                 .coerceAtLeast((80 * dockScale).toInt().coerceAtLeast(1))
         val dockDensityDpi = (densityDpi * dockScale).toInt().coerceAtLeast(120)
-        // 车机方向决定 dock 位置：横屏 → 左侧竖条；竖屏 → 底部横条（2026-10-11 用户要求）
+        // Head-unit orientation decides dock position: landscape -> left vertical strip; portrait -> bottom bar (user request 2026-10-11)
         dockAtBottom = layout.dockAtBottom
-        // 版式缩放要先于一切几何推导（边距/中缝/圆角都随它走）
+        // Layout scale must precede all geometry derivation (margins / gap / corner radius all follow it)
         DashMetrics.configure(totalWidth, totalHeight)
         streamWidthPx = totalWidth
         streamHeightPx = totalHeight
@@ -930,27 +1023,29 @@ object VirtualLauncher {
         }
         appAreaWidth = appWidth
         appAreaHeight = appHeightPx
-        // 竖屏应用屏密度：窗口逻辑宽度目标 ≈ 手机竖屏宽度（LETTERBOX_TARGET_DP）。
-        // 错用 dock 的 densityDpi（随画布分辨率等比、非手机密度）会把窗口压到 ~206dp——文字观感大一倍
-        // （2026-10-14 竖屏实测：应用与桌面字号明显偏大的根因）。
+        // Portrait app-display density: target logical window width ~ phone portrait width (LETTERBOX_TARGET_DP).
+        // Wrongly using the dock's densityDpi (scaled with canvas resolution, not the phone density) squeezes the window to ~206dp - text
+        // looks twice as large
+        // (2026-10-14 portrait test: root cause of visibly oversized fonts in apps and desktop).
         val appPortraitDensity =
             (appWidth / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(160, 640)
-        // 地图屏：按应用区全尺寸创建，分屏/全屏间动态 resize（见 resizeMapDisplay）。
-        // tile 尺寸 = SPLIT 绘制矩形，边距统一用契约值 CARD_MARGIN_PX（勿再裸写数字）。
-        // 比例按应用区形状自适应（[dashSplitFractionFor]，1920×720 下即 3:1）；忽略旧版
-        // 拖动比例。几何推导集中在 [dashSplitGeom] 纯函数（单测钉死四方一致性）。
-        // tile 主轴长（横=宽、竖=高）=比例×可用长度。
+        // Map display: created at the full app-area size, dynamically resized between split / fullscreen (see resizeMapDisplay).
+        // Tile size = SPLIT draw rectangle; the margin uniformly uses the contract value CARD_MARGIN_PX (do not hard-code numbers again).
+        // The ratio adapts to the app-area shape ([dashSplitFractionFor], 3:1 at 1920x720); the old
+        // drag ratio is ignored. Geometry derivation is centralized in the [dashSplitGeom] pure function (unit tests pin four-way
+        // consistency).
+        // Tile main-axis length (landscape = width, portrait = height) = ratio x usable length.
         dashSplitFraction =
             when {
                 splitVertical -> dashSplitFractionFor(appHeightPx, appWidth, portrait = true)
                 else -> dashSplitFractionFor(appWidth, appHeightPx, portrait = false)
             }
         log(
-            "LAUNCHER: 仪表盘版式 画布=${totalWidth}x$totalHeight 版面=$layout 缩放=${"%.2f".format(DashMetrics.scale)} " +
-                "地图比例=${"%.2f".format(dashSplitFraction)}",
+            "LAUNCHER: dashboard layout canvas=${totalWidth}x$totalHeight layout=$layout scale=${"%.2f".format(DashMetrics.scale)} " +
+                "map ratio=${"%.2f".format(dashSplitFraction)}",
         )
         if (splitVertical) {
-            // 上下分屏：主轴 = y，原点即流顶缘（dock 不在上方）
+            // Top/bottom split: main axis = y, origin is the stream top edge (the dock is not above)
             val geom = dashSplitGeom(appHeightPx, dashSplitFraction)
             mapTileWidth = appWidth - CARD_MARGIN_PX * 2
             mapTileHeight = geom.tileLen
@@ -959,19 +1054,21 @@ object VirtualLauncher {
             val geom = dashSplitGeom(appWidth, dashSplitFraction)
             mapTileWidth = geom.tileLen
             mapTileHeight = appHeightPx - CARD_MARGIN_PX * 2
-            // 左右分屏：应用区从 dock 右缘起；dock 在底部时 x 原点即流原点
+            // Side-by-side split: the app area starts at the dock's right edge; with the dock at the bottom the x origin is the stream
+            // origin
             dashSplitPos = geom.splitCenter + if (dockAtBottom) 0 else dockWidthPx
         }
-        // 横屏应用屏的密度选择（2026-10-11 实测标定）：
-        // 竖屏锁定应用（如头条）在横屏屏上被系统 letterbox 成窄条窗口，窗口逻辑宽度
-        // = 屏高px/letterbox宽高比，再由屏幕密度换算 dp。密度偏高 → 窗口只有 ~343dp，
-        // 应用呈现「大字大搜索框」的窄屏布局；密度 ~200 → 窗口 ~411dp ≈ 手机宽度，
-        // 应用呈现紧凑手机布局（截图验证）。目标：letterbox 窗口 ≈ LETTERBOX_TARGET_DP。
+        // Density choice for the landscape app display (calibrated by measurement 2026-10-11):
+        // portrait-locked apps (e.g. Toutiao) are letterboxed into a narrow window on a landscape display; the window's logical width
+        // = display height px / letterbox aspect ratio, then converted to dp by the display density. With high density the window is only
+        // ~343dp
+        // and the app shows the "big text, big search box" narrow-screen layout; at density ~200 the window is ~411dp ~ phone width,
+        // and the app shows the compact phone layout (verified by screenshots). Goal: letterbox window ~ LETTERBOX_TARGET_DP.
         val landscapeApp = appWidth > appHeightPx
-        // 超采样：部分应用（头条实测）按「手机状态栏物理像素」预留顶部区域
-        // （28dp@560dpi=98px 原始像素，与显示密度无关），在 540px 高的流里占 18%、
-        // 手机上仅 3.5%——无法去除（应用内部绘制），只能靠「渲染更多像素再缩回」
-        // 把固定像素的占比压小。×2：98px→49px（9%）；超采样高度上限 1620px。
+        // Supersampling: some apps (measured on Toutiao) reserve the top area by "phone status-bar physical pixels"
+        // (28dp@560dpi = 98px raw pixels, independent of display density), taking 18% in a 540px-high stream
+        // versus only 3.5% on the phone - it cannot be removed (drawn inside the app), only "render more pixels and scale back"
+        // shrinks the share of fixed pixels. x2: 98px -> 49px (9%); supersampled height cap 1620px.
         val appScaleFactor =
             if (landscapeApp) {
                 minOf(APP_SUPERSAMPLE, SUPERSAMPLE_MAX_HEIGHT.toFloat() / appHeightPx)
@@ -988,9 +1085,10 @@ object VirtualLauncher {
             } else {
                 appPortraitDensity
             }
-        // 原生应用屏密度：与超采样屏保持**相同逻辑尺寸**（应用布局不受所在屏影响，
-        // 超采样只是渲染分辨率差异）。横屏：原生 1034×540 @~200dpi = 827×432dp，
-        // 与超采样屏（1551×810 @301dpi）的 824×431dp 等值；竖屏车机：直接用流密度。
+        // Native app-display density: keep the **same logical size** as the supersampled display (app layout is unaffected by the display
+        // it is on,
+        // supersampling is only a render-resolution difference). Landscape: native 1034x540 @~200dpi = 827x432dp,
+        // equal to the supersampled display's (1551x810 @301dpi) 824x431dp; portrait head unit: use the stream density directly.
         val appNativeDensity =
             if (landscapeApp) {
                 val hiLogicalHeightDp = appHiHeight * 160f / appHiDensity
@@ -1000,7 +1098,7 @@ object VirtualLauncher {
             }
         assistDensityDpi = appNativeDensity
 
-        // 等待 Shizuku UserService 绑定（受信虚拟屏需要 shell 权限创建）
+        // Wait for the Shizuku UserService to bind (a trusted virtual display needs shell privilege to create)
         var svc = CarInputClient.service
         if (svc == null &&
             ShizukuGate
@@ -1016,7 +1114,7 @@ object VirtualLauncher {
             }
         }
         val useTrusted = svc != null
-        log("LAUNCHER: 虚拟屏模式=${if (useTrusted) "受信屏(shell)" else "应用屏(回退)"}")
+        log("LAUNCHER: virtual-display mode=${if (useTrusted) "trusted (shell)" else "app-side (fallback)"}")
 
         val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom, splitVertical)
         composer.targetFps =
@@ -1025,15 +1123,19 @@ object VirtualLauncher {
         this.composer = composer
         val displaysCreated = arrayOf(false)
         composer.onSurfacesReady = { dockSurface, appSurface, appHiSurface, mapSurface, mediaSurface ->
-            // 优先：Shizuku shell 创建受信虚拟屏（VIRTUAL_DISPLAY_FLAG_TRUSTED）——
-            // 允许第三方应用的新任务落在该屏；解决「应用内跳转的任务被重定向到手机主屏」。
+            // Preferred: create a trusted virtual display via Shizuku shell (VIRTUAL_DISPLAY_FLAG_TRUSTED) -
+            // lets new tasks of third-party apps land on that display; fixes "tasks from in-app jumps get redirected to the phone main
+            // screen".
             var viaService = false
             if (useTrusted) {
                 runCatching {
-                    // 残留清理：进程重启/上轮会话遗留的同名虚拟屏不释放会一直占位
-                    // （新宽度/新 surface 不生效——2026-10-11 dock 改宽后视觉无变化的根因）
+                    // Leftover cleanup: same-name virtual displays left by a process restart / the previous session keep occupying their
+                    // slots if not released
+                    // (new width / new surface does not take effect - root cause of "no visual change after widening the dock" 2026-10-11)
                     val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                    val preserved = preservedDisplayIds()
                     dm.displays
+                        .filter { it.displayId !in preserved }
                         .filter {
                             it.name == "CarPlayDock" ||
                                 it.name == "CarPlayApp" ||
@@ -1043,10 +1145,11 @@ object VirtualLauncher {
                                 it.name == "CarPlayAssist"
                         }.forEach { stale ->
                             runCatching { svc!!.releaseDisplay(stale.displayId) }
-                                .onSuccess { log("LAUNCHER: 已释放残留虚拟屏 ${stale.name}#${stale.displayId}") }
+                                .onSuccess { log("LAUNCHER: released leftover virtual display ${stale.name}#${stale.displayId}") }
                         }
-                    Thread.sleep(150) // 等系统完成注销
-                    // dock 屏不声明受信：只承载自有 DockActivity，杜绝第三方任务逃逸上来
+                    Thread.sleep(150) // Wait for the system to finish unregistering
+                    // The dock display is not declared trusted: it hosts only our own DockActivity, preventing third-party tasks from
+                    // escaping onto it
                     val dockId =
                         svc!!.createDisplay(
                             "CarPlayDock",
@@ -1065,7 +1168,7 @@ object VirtualLauncher {
                             appSurface,
                             true,
                         )
-                    // 超采样屏（竖屏车机无、应用侧回退时也无）
+                    // Supersampled display (absent on portrait head units, and also absent in app-side fallback)
                     val appHiId =
                         if (appHiSurface != null) {
                             svc!!.createDisplay(
@@ -1079,7 +1182,8 @@ object VirtualLauncher {
                         } else {
                             -1
                         }
-                    // 地图屏（横竖屏都创建；按应用区全尺寸创建，分屏/全屏间动态 resize）
+                    // Map display (created for both orientations; created at full app-area size, dynamically resized between split /
+                    // fullscreen)
                     val mapId =
                         if (mapSurface != null) {
                             svc!!.createDisplay(
@@ -1103,61 +1207,70 @@ object VirtualLauncher {
                             appHiDisplayW = appHiWidth
                             appHiDisplayH = appHiHeight
                         } else if (appHiSurface != null) {
-                            log("LAUNCHER: 超采样屏创建失败——本次会话全部走原生屏")
+                            log("LAUNCHER: supersampled display creation failed - this session uses native displays throughout")
                         }
                         if (mapId >= 0) {
                             mapDisplayId = mapId
-                            // 创建尺寸=应用区全尺寸（resizeMapDisplay 的幂等基线）
+                            // Creation size = full app-area size (idempotent baseline of resizeMapDisplay)
                             mapDisplayW = appWidth
                             mapDisplayH = appHeightPx
                         } else if (mapSurface != null) {
-                            log("LAUNCHER: 地图屏创建失败——仪表盘无地图 tile")
+                            log("LAUNCHER: map display creation failed - dashboard has no map tile")
                         }
                         viaService = true
                     } else {
-                        // 逐屏留痕：EMUI 等 ROM 对 shell 侧 createVirtualDisplay 是**静默
-                        // 返回 null**（不抛异常）——整体回退时不打这条，日志里只剩
-                        // 「回退」两个字，无法判断是哪块屏被拒（华为 Mate30Pro/EMUI12
-                        // 2026-10-20 实测定位）
+                        // Leave a trace per display: ROMs such as EMUI **silently return null**
+                        // (no exception) from shell-side createVirtualDisplay - without this line a whole-session fallback would log only
+                        // the word
+                        // "fallback", and there would be no way to tell which display was rejected (located on a Huawei Mate30Pro / EMUI12
+                        // 2026-10-20)
                         if (dockId < 0) {
-                            log("LAUNCHER: 受信屏 CarPlayDock 创建失败（createVirtualDisplay 返回 null——ROM 限制 shell 侧虚拟屏？）")
+                            log(
+                                "LAUNCHER: trusted display CarPlayDock creation failed " +
+                                    "(createVirtualDisplay returned null - ROM limits shell-side displays?)",
+                            )
                         }
                         if (appId < 0) {
-                            log("LAUNCHER: 受信屏 CarPlayApp 创建失败（同上）")
+                            log("LAUNCHER: trusted display CarPlayApp creation failed (same as above)")
                         }
-                        // 半成功：释放已建的
+                        // Partial success: release the ones already built
                         if (dockId >= 0) runCatching { svc!!.releaseDisplay(dockId) }
                         if (appId >= 0) runCatching { svc!!.releaseDisplay(appId) }
                         if (appHiId >= 0) runCatching { svc!!.releaseDisplay(appHiId) }
                         if (mapId >= 0) runCatching { svc!!.releaseDisplay(mapId) }
                     }
-                }.onFailure { log("LAUNCHER: 受信屏创建异常 ${it.message}") }
+                }.onFailure { log("LAUNCHER: trusted display creation error ${it.message}") }
             }
             if (viaService) {
                 displaysViaService = true
                 log(
-                    "LAUNCHER: 三屏创建(受信) dock=$dockDisplayId(${dockWidthPx}px) " +
+                    "LAUNCHER: three displays created (trusted) dock=$dockDisplayId(${dockWidthPx}px) " +
                         "app=$appDisplayId(${appWidth}x$appHeightPx @${appNativeDensity}dpi) " +
                         "appHi=$appHiDisplayId(${appHiWidth}x$appHiHeight @${appHiDensity}dpi scale=x$appScaleFactor)",
                 )
-                // 会话建立：为「强制应用横屏」名单写入兼容覆盖——**已提前到 attach 开头**
-                // （先写覆盖再拉应用，见 attach 开头注释；此处不再重复入队）。
-                // 音乐卡数据源前置：会话建立是「Shizuku 一定可用」的可靠时机，
-                // 补一次通知使用权（幂等；已授权直接返回）。
-                // 覆盖「App 启动时 Shizuku 未就绪、之后才就绪」的整条路径。
+                // Session established: write the compat override for the "force app landscape" list - **moved to the start of attach**
+                // (write the override first, then launch apps; see the comment at the start of attach; not enqueued again here).
+                // Music-card data source first: session setup is a reliable moment where "Shizuku is certainly available",
+                // so top up notification access once more (idempotent; returns directly if already granted).
+                // Covers the whole path "Shizuku was not ready at app start and became ready later".
                 Bg.run("notification-access-session") {
                     NotificationAccess.ensureGranted(context.applicationContext, log)
+                    // Cluster navigation info (only if the user opted in): a reinstall / force-stop drops the service
+                    io.github.ezn24.cardeck.neo.nav.NavAccessibilityAccess
+                        .ensureEnabled(context.applicationContext, log)
                 }
-                // 晚 8 秒再补删：会话起步正忙着建屏/拉地图/出首帧，dumpsys 与之争 CPU 和 binder
+                // Delete again 8 seconds later: session start is busy creating displays / launching the map / producing the first frame,
+                // and dumpsys competes with it for CPU and binder
                 Bg.run("stale-car-tasks") {
                     Thread.sleep(8_000)
                     if (appContextRef != null) purgeRememberedTasks(context.applicationContext)
                 }
-                // 覆盖写入是异步的（probe 内部会 awaitPending 等它排空）；
-                // 应用若已在运行且此前被当成竖窗恢复，这里就能发现并给出提示。
-                LetterboxHintController.scheduleProbe(context, "会话建立")
+                // The override write is asynchronous (probe internally does awaitPending to wait for it to drain);
+                // if the app is already running and was earlier restored as a portrait window, it can be detected here and the hint given.
+                LetterboxHintController.scheduleProbe(context, "session established")
             } else {
-                // 回退：应用侧 PUBLIC 屏（应用内跳转任务会逃逸到手机主屏，尽量可用的降级形态）
+                // Fallback: app-side PUBLIC displays (tasks from in-app jumps escape to the phone main screen; a degraded form that stays
+                // as usable as possible)
                 val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
                 dockDisplay =
                     dm.createVirtualDisplay(
@@ -1200,10 +1313,10 @@ object VirtualLauncher {
                     appHiDisplayW = appHiWidth
                     appHiDisplayH = appHiHeight
                 }
-                // 地图屏同样建（应用侧 PUBLIC）：地图启动走 shell `am start --display`，
-                // 不需要受信；resize 用应用侧公开 API（见 resizeMapDisplay）。
-                // 回退形态曾完全不建地图屏——受信创建在 EMUI12 上静默失败后，仪表盘
-                // 就永远没有地图 tile（2026-10-20 华为 Mate30Pro 实测）。
+                // The map display is built too (app-side PUBLIC): the map launches via shell `am start --display`,
+                // which needs no trust; resize uses the app-side public API (see resizeMapDisplay).
+                // The fallback form once never built a map display - after trusted creation failed silently on EMUI12,
+                // the dashboard never had a map tile (measured on a Huawei Mate30Pro 2026-10-20).
                 if (mapSurface != null) {
                     mapDisplay =
                         dm.createVirtualDisplay(
@@ -1223,7 +1336,7 @@ object VirtualLauncher {
                         mapDisplayW = appWidth
                         mapDisplayH = appHeightPx
                     } else {
-                        log("LAUNCHER: 地图屏（回退）创建失败——仪表盘无地图 tile")
+                        log("LAUNCHER: map display (fallback) creation failed - dashboard has no map tile")
                     }
                 }
                 dockDisplayId = dockDisplay?.display?.displayId ?: -1
@@ -1231,22 +1344,22 @@ object VirtualLauncher {
                 appDisplayW = appWidth
                 appDisplayH = appHeightPx
                 log(
-                    "LAUNCHER: 三屏创建(回退) dock=$dockDisplayId(${dockWidthPx}px) " +
+                    "LAUNCHER: three displays created (fallback) dock=$dockDisplayId(${dockWidthPx}px) " +
                         "app=$appDisplayId(${appWidth}x$appHeightPx @${appNativeDensity}dpi) " +
                         "appHi=$appHiDisplayId(${appHiWidth}x$appHiHeight @${appHiDensity}dpi scale=x$appScaleFactor) " +
-                        "map=$mapDisplayId(${mapDisplayW}x$mapDisplayH)——受信屏不可用，已回退应用侧 PUBLIC 屏",
+                        "map=$mapDisplayId(${mapDisplayW}x$mapDisplayH) - trusted displays unavailable, fell back to PUBLIC",
                 )
             }
-            // 媒体屏可选：失败时保留控制卡，不让主会话跟随失败。
+            // Media display is optional: on failure keep the control card, and do not let the main session fail along with it
             val mediaBounds = mediaAppBounds()
             runCatching {
                 if (viaService) {
                     mediaDisplayId =
                         svc!!.createDisplay(
                             "CarPlayMedia",
-                            mediaBounds.width,
-                            mediaBounds.height,
-                            MAP_DISPLAY_DPI,
+                            mediaBounds.width * mediaSupersample,
+                            mediaBounds.height * mediaSupersample,
+                            MAP_DISPLAY_DPI * mediaSupersample,
                             mediaSurface,
                             true,
                         )
@@ -1255,18 +1368,22 @@ object VirtualLauncher {
                     mediaDisplay =
                         manager.createVirtualDisplay(
                             "CarPlayMedia",
-                            mediaBounds.width,
-                            mediaBounds.height,
-                            MAP_DISPLAY_DPI,
+                            mediaBounds.width * mediaSupersample,
+                            mediaBounds.height * mediaSupersample,
+                            MAP_DISPLAY_DPI * mediaSupersample,
                             mediaSurface,
                             DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
                                 DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
                         )
                     mediaDisplayId = mediaDisplay?.display?.displayId ?: -1
                 }
-            }.onFailure { log("MEDIA: 创建媒体屏失败：${it.message}") }
+            }.onFailure { log("MEDIA: media display creation failed: ${it.message}") }
             displaysCreated[0] = dockDisplayId >= 0 && appDisplayId >= 0
         }
+        // Decided before composer.start: its media input buffer and the CarPlayMedia display (created in onSurfacesReady)
+        // must use the same factor, or the display draws into a smaller buffer and only its top-left part shows
+        mediaSupersample = mediaSupersampleFor(mediaAppBounds().width)
+        log("MEDIA: media display supersampled x$mediaSupersample (${mediaAppBounds().width}x${mediaAppBounds().height} pane)")
         return try {
             composer.start(
                 dockWidthPx,
@@ -1277,36 +1394,40 @@ object VirtualLauncher {
                 if (landscapeApp) appHiHeight else 0,
                 appWidth,
                 appHeightPx,
-                mediaAppBounds().width,
-                mediaAppBounds().height,
+                mediaAppBounds().width * mediaSupersample,
+                mediaAppBounds().height * mediaSupersample,
             )
-            // 分屏把手位置推给合成器（覆盖默认中线公式；拖动时 previewDashSplit 持续更新）
+            // Push the split-handle position to the compositor (overrides the default midline formula; previewDashSplit keeps updating it
+            // during a drag)
             composer.setTileEdgeOverride(dashSplitPos - DASH_GAP_PX / 2f)
             if (!displaysCreated[0]) {
-                log("LAUNCHER: 虚拟屏创建失败")
+                log("LAUNCHER: virtual display creation failed")
                 detach()
                 return false
             }
-            // 应用屏方向策略：**忽略应用请求的方向**，虚拟屏保持创建时的形态。
-            // 竖屏应用（头条等）在横屏车机上会请求 portrait，系统若照办会把整个
-            // 虚拟屏旋转（dumpsys 里 rotation 0→3、逻辑尺寸 2251×1152→1152×2251），
-            // 而合成器按整幅映射、触摸按未旋转坐标换算 —— 表现为「分辨率变了 +
-            // 点击漂移、点不到目标」，退回桌面也仍是旋转态（2026-10-18 实测）。
-            // 缩在 letterbox 里（见下方 aspectRatio）才是车机该有的形态。
+            // App-display orientation policy: **ignore the orientation requested by apps**, keeping the virtual display in the form it was
+            // created.
+            // Portrait apps (Toutiao etc.) on a landscape head unit request portrait; if the system complies it rotates the whole
+            // virtual display (rotation 0->3 in dumpsys, logical size 2251x1152->1152x2251),
+            // while the compositor maps the whole picture and touches are converted with unrotated coordinates - seen as "resolution
+            // changed +
+            // clicks drift and miss targets", and returning to the desktop is still in the rotated state (measured 2026-10-18).
+            // Staying shrunk inside the letterbox (see aspectRatio below) is the proper form for a head unit.
             applyIgnoreOrientationRequest(appDisplayId, appHiDisplayId, mapDisplayId, mediaDisplayId)
-            // 放宽竖屏应用的 letterbox 窗口（默认窄条 → 手机宽度）；断开时还原（detach）
+            // Widen the letterbox window of portrait apps (default narrow strip -> phone width); restored on disconnect (detach)
             Shell.exec("cmd window set-letterbox-style --aspectRatio $LETTERBOX_ASPECT_RATIO")
             log(
-                "LAUNCHER: letterbox 宽高比=$LETTERBOX_ASPECT_RATIO " +
+                "LAUNCHER: letterbox aspect ratio=$LETTERBOX_ASPECT_RATIO " +
                     "appDensity=${appNativeDensity}dpi appHiDensity=${appHiDensity}dpi",
             )
-            // 自启组件必须写成「applicationId/绝对类名」：`am -n` 只认带斜杠的规范，
-            // 且相对类名按 applicationId 展开——.rd 调试包（applicationId 后缀）下
-            // `pkg/.launcher.DockActivity` 会指向不存在的类、纯类名直接被拒
-            // （Bad component name），两种写法都让 dock/grid 启动失败、车机黑屏
-            // 0fps（2026-10-21 .rd 包实测）。绝对类名取自 Class 引用，随重构自动跟随。
+            // Self-launched components must be written as "applicationId/absolute class name": `am -n` only accepts the form with a slash,
+            // and a relative class name is expanded against applicationId - under the .rd debug package (applicationId suffix)
+            // `pkg/.launcher.DockActivity` points to a nonexistent class and a bare class name is rejected outright
+            // (Bad component name); both spellings make dock/grid launch fail and the head unit black
+            // at 0fps (measured with the .rd package 2026-10-21). The absolute class name comes from the Class reference and follows
+            // refactors automatically.
             val selfPkg = context.packageName
-            // 首次画面直接从分屏落定，不能依赖用户按 Home 才启动地图。
+            // The first picture settles directly into the split; it must not depend on the user pressing Home to launch the map.
             appContextRef = context.applicationContext
             dashboardMode = true
             setTileSlide(0f)
@@ -1316,10 +1437,11 @@ object VirtualLauncher {
             val gridOk = startOn(gridDisplayId, "$selfPkg/${GridActivity::class.java.name}")
             log("LAUNCHER: dock=$dockOk grid=$gridOk gridDisplay=$gridDisplayId")
             if (dockOk && gridOk) prepareDashboardMap()
-            // 桌面在超采样屏时默认活动屏 = 超采样屏（启动即显示桌面）
+            // When the desktop is on the supersampled display, the default active display = the supersampled display (the desktop shows at
+            // launch)
             if (appHiDisplayId >= 0) composer.requestActiveApp(true)
             startShizukuHealer()
-            // 暗幕组件就绪（常亮+暗幕功能；主界面开关控制启停）
+            // Dimming curtain component ready (keep-awake + curtain feature; the main screen switch controls start/stop)
             ScreenDimmer
                 .attach(context)
             io.github.ezn24.cardeck.neo.assist.AssistOverlayController
@@ -1327,15 +1449,33 @@ object VirtualLauncher {
             AssistiveDot.attach(context)
             dockOk && gridOk
         } catch (error: IllegalStateException) {
-            log("LAUNCHER: GL 合成器启动失败 - ${error.message}")
+            log("LAUNCHER: GL compositor failed to start - ${error.message}")
             detach()
             false
         }
     }
 
-    /** 受信屏标记：true 时虚拟屏由 shell UserService 持有，须经服务释放。 */
+    /** Trusted-display flag: when true the virtual displays are held by the shell UserService and must be released through the service. */
     @Volatile
     private var displaysViaService = false
+
+    @Volatile
+    private var pendingDisplayRelease: java.util.concurrent.Future<*>? = null
+    private val displayReleaseLock = Any()
+
+    private data class ParkedMap(
+        val displayId: Int,
+        val localDisplay: VirtualDisplay?,
+        val pkg: String,
+        val taskId: String,
+    )
+
+    @Volatile private var parkedMap: ParkedMap? = null
+
+    @Volatile private var detachingDisplays = emptySet<Int>()
+
+    /** These displays are handled by detach/reconnect and must be excluded from residual cleanup. */
+    fun preservedDisplayIds(): Set<Int> = detachingDisplays + listOfNotNull(parkedMap?.displayId)
 
     fun detach() {
         AssistiveDot.detach()
@@ -1350,76 +1490,111 @@ object VirtualLauncher {
         assistCoversDashboard = false
         ScreenDimmer
             .detach()
-        // 还原方向策略（false = 跟随应用请求，系统默认）。
+        // Restore the orientation policy (false = follow app requests, the system default).
         //
-        // **必须异步且不读回**：detach 由 disconnect() 在 UI 线程触发，而这里的每一次
-        // `Shell.exec` 都是 Shizuku newProcess + 进程等待（单条 100ms 量级、异常时可达
-        // 数秒超时）。三块屏 × (set+get) = 6 次往返足以触发 ANR（2026-10-18 实测：
-        // 手动断开后连续弹出「应用无响应」）。改为一次性投递到后台，不再读回——
-        // 这里是**清理**路径，失败也只是残留一个方向策略，不影响会话正确性；
-        // 建立路径（applyIgnoreOrientationRequest）才需要读回校验。
+        // **Must be asynchronous and without read-back**: detach is triggered by disconnect() on the UI thread, and every
+        // `Shell.exec` here is a Shizuku newProcess + process wait (~100ms each, up to several
+        // seconds of timeout on errors). Three displays x (set+get) = 6 round trips are enough to trigger an ANR (measured 2026-10-18:
+        // "app not responding" popped up repeatedly after a manual disconnect). It is now posted once to the background without read-back -
+        // this is the **cleanup** path: a failure only leaves a stray orientation policy and does not affect session correctness;
+        // only the setup path (applyIgnoreOrientationRequest) needs read-back verification.
         //
-        // 执行时机：投递后立即释放虚拟屏，但后台任务与释放是并发的——为保证命令
-        // 命中的是**尚存活的 displayId**，这里先同步取好 id 字符串并在投递时即排队；
-        // 若已被释放（id 失效）命令只会报错，不影响后续会话（下轮创建时会重新设置）。
+        // Timing: displays are released right after posting, but the background task runs concurrently with the release - to make sure the
+        // command
+        // hits a **still-alive displayId**, the id strings are taken synchronously here and the commands are queued at posting time;
+        // if a display was already released (id invalid) the command merely errors and does not affect later sessions (it is set again
+        // when the next round creates it).
         val orientationIds = intArrayOf(appDisplayId, appHiDisplayId, mapDisplayId, mediaDisplayId).filter { it >= 0 }
         if (orientationIds.isNotEmpty()) {
             Bg.run("orientation-cleanup") {
                 orientationIds.forEach { runCatching { setIgnoreOrientationRequest(it, false, verify = false) } }
             }
         }
-        // 先移除车机屏上的任务、再释放屏（2026-11-18 用户实测：每断开一次手机最近任务多一张
-        // 地图卡）。屏带 DESTROY_CONTENT_ON_REMOVAL 只会结束活动，任务仍以「最近使用」留在手机；
-        // removeTask 才会连最近使用记录一起删（`am stack remove` 也不删记录）。dumpsys/remove 是 shell 往返，detach 可能在
-        // 主线程（用户点断开），故与释放一起挪到后台、按顺序执行。
+        // Leave the map on its virtual display so Android never brings it to the phone's foreground.
         val svc = if (displaysViaService) CarInputClient.service else null
+        val vehicleDisplays = listOf(appDisplayId, appHiDisplayId, mapDisplayId).filter { it >= 0 }
+        val localDisplays =
+            listOfNotNull(dockDisplay, appDisplay, appHiDisplay, mapDisplay, mediaDisplay)
+                .associateBy { it.display.displayId }
         val releaseIds =
-            intArrayOf(dockDisplayId, appDisplayId, appHiDisplayId, mapDisplayId, mediaDisplayId)
-                .filter { svc != null && it >= 0 } + listOfNotNull(assistDisplayId.takeIf { it >= 0 })
-        val ownPkg = appContextRef?.packageName
+            buildSet {
+                if (displaysViaService) {
+                    listOf(dockDisplayId, appDisplayId, appHiDisplayId, mapDisplayId, mediaDisplayId).filterTo(this) { it >= 0 }
+                }
+                addAll(localDisplays.keys)
+                if (assistDisplayId >= 0) add(assistDisplayId)
+            }
+        val oldMapDisplay = mapDisplayId
+        val oldMapPackage = activeMapPackage
         val ownCtx = appContextRef
         displaysViaService = false
         assistDisplayId = -1
         if (releaseIds.isNotEmpty()) {
-            Bg.run("detach-release") {
-                val snapshot = taskIdsByDisplayPkg()
-                rememberCarTasks(snapshot, releaseIds)
-                var removed = 0
-                releaseIds.forEach { id ->
-                    snapshot[id].orEmpty().forEach { (pkg, tasks) ->
-                        if (pkg == ownPkg) return@forEach
-                        tasks.filter { it.all(Char::isDigit) }.forEach { task ->
-                            if (removeTask(task)) removed++
+            synchronized(displayReleaseLock) {
+                val previousRelease = pendingDisplayRelease
+                detachingDisplays = detachingDisplays + releaseIds
+                pendingDisplayRelease =
+                    Bg.pool.submit {
+                        runCatching { previousRelease?.get() }
+                        val service = svc ?: CarInputClient.service
+                        var retained: ParkedMap? = null
+                        try {
+                            val snapshot = readTaskSnapshot()
+                            retained = retainMapTask(ownCtx, oldMapPackage, oldMapDisplay, vehicleDisplays, snapshot, localDisplays)
+                            if (retained != null) {
+                                val previous = parkedMap
+                                parkedMap = retained
+                                scheduleParkedMapExpiry(retained)
+                                if (previous != null && previous.displayId != retained.displayId) releaseParkedMap(previous)
+                                val surfaceDetached =
+                                    runCatching {
+                                        retained.localDisplay?.let {
+                                            it.setSurface(null)
+                                            true
+                                        }
+                                            ?: (service?.detachDisplaySurface(retained.displayId) == true)
+                                    }.getOrDefault(false)
+                                logSink?.invoke(
+                                    "MAP: parked task #${retained.taskId} on virtual display ${retained.displayId}, surface detached=$surfaceDetached",
+                                )
+                            }
+                            rememberCarTasks(snapshot.orEmpty(), releaseIds, ownCtx)
+                            var removed = 0
+                            for (display in releaseIds) {
+                                for ((pkg, ids) in snapshot?.get(display).orEmpty()) {
+                                    if (pkg == ownCtx?.packageName) continue
+                                    for (id in ids) {
+                                        if (id != retained?.taskId && removeTask(id)) removed++
+                                    }
+                                }
+                            }
+                            logSink?.invoke("LAUNCHER: removed $removed non-retained head-unit tasks before disconnect")
+                        } finally {
+                            for (id in releaseIds) {
+                                if (id == retained?.displayId) continue
+                                runCatching { localDisplays[id]?.release() ?: service?.releaseDisplay(id) }
+                            }
+                            synchronized(displayReleaseLock) { detachingDisplays = detachingDisplays - releaseIds }
                         }
+                        ownCtx?.let { purgeRememberedTasks(it) }
                     }
-                }
-                logSink?.invoke("LAUNCHER: 断开前移除车机屏任务 $removed 个（removeTask，不留在手机最近任务）")
-                // 地图屏同样由 shell 持有：不释放会在断开后残留（重装后由启动检测兜底发现）
-                val service = svc ?: CarInputClient.service
-                releaseIds.forEach { id -> runCatching { service?.releaseDisplay(id) } }
-                ownCtx?.let { purgeRememberedTasks(it) }
             }
         }
         appContextRef = null
         watchdogActive = false
-        // 还原 letterbox 宽高比为系统默认（不把会话调参留在系统里）。
-        // **必须后台执行**：这是一条 shell 命令（超时上限 6s），而 detach 可能被主线程
-        // 或 Shizuku 回调线程触发；2026-10-22 K60E 日志里就有「SHELL: ⚠ 主线程调用
-        // shell（第 1 次）cmd=cmd window reset-letterbox-style aspectRatio」。
+        // Restore the letterbox aspect ratio to the system default (do not leave session tuning in the system).
+        // **Must run in the background**: it is a shell command (timeout cap 6s), and detach may be triggered by the main thread
+        // or the Shizuku callback thread; the 2026-10-22 K60E log shows "SHELL: WARNING main-thread call to
+        // shell (#1) cmd=cmd window reset-letterbox-style aspectRatio".
         Bg.run("letterbox-reset") {
             runCatching { Shell.exec("cmd window reset-letterbox-style aspectRatio") }
         }
         runCatching { composer?.stop() }
         composer = null
-        runCatching { dockDisplay?.release() }
         dockDisplay = null
-        runCatching { appDisplay?.release() }
         appDisplay = null
-        runCatching { appHiDisplay?.release() }
         appHiDisplay = null
-        runCatching { mapDisplay?.release() }
         mapDisplay = null
-        runCatching { mediaDisplay?.release() }
         mediaDisplay = null
         mediaDisplayId = -1
         mediaPaneOpen = false
@@ -1447,7 +1622,8 @@ object VirtualLauncher {
         appAreaWidth = 0
         appAreaHeight = 0
         mapFullscreen = false
-        // 提示卡片属于会话状态：拆屏时一并清掉（合成器已停，卡片纹理随 GL 上下文销毁）
+        // The hint card is session state: cleared together when the displays are torn down (the compositor has stopped, and the card
+        // texture dies with the GL context)
         LetterboxHintController.clear()
         if (dashboardMode) {
             dashboardMode = false
@@ -1464,6 +1640,73 @@ object VirtualLauncher {
         streamHeightPx = 0
     }
 
+    private fun retainMapTask(
+        context: Context?,
+        pkg: String?,
+        mapDisplay: Int,
+        vehicleDisplays: List<Int>,
+        snapshot: Map<Int, Map<String, List<String>>>?,
+        localDisplays: Map<Int, VirtualDisplay>,
+    ): ParkedMap? {
+        if (pkg == null || context == null) return null
+        val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val saved = prefs.getString(KEY_RETAINED_MAP, null)
+        val task =
+            if (snapshot == null) {
+                // A failed dumpsys is not proof that the active task is gone. Keep its known dedicated display.
+                val id = retainedMapId(saved?.takeIf { it.startsWith("$pkg:") })
+                if (id != null && mapDisplay > 0) id to mapDisplay else null
+            } else {
+                findMapTask(snapshot, pkg, mapDisplay, vehicleDisplays, saved)
+            }
+        val (id, display) = task ?: return null
+        if (display !in vehicleDisplays) return null
+        prefs.edit().putString(KEY_RETAINED_MAP, "$pkg:$id").apply()
+        return ParkedMap(display, localDisplays[display], pkg, id)
+    }
+
+    /**
+     * Releases the parked map (removing its task, so a navigation left running stops talking) once the disconnect
+     * work has finished. Called on a user disconnect and when a park expires.
+     */
+    fun releaseParkedMap(reason: String) {
+        val handoff = pendingDisplayRelease
+        Bg.run("release-parked-map") {
+            runCatching { handoff?.get(10, java.util.concurrent.TimeUnit.SECONDS) }
+            val parking = parkedMap ?: return@run
+            releaseParkedMap(parking)
+            logSink?.invoke("MAP: released parked task #${parking.taskId} on display ${parking.displayId} ($reason)")
+        }
+    }
+
+    /** A car-side end keeps the map for [PARKED_MAP_TTL_MS]; not reconnected by then = the trip is over. */
+    private fun scheduleParkedMapExpiry(parking: ParkedMap) {
+        Bg.run("parked-map-expiry") {
+            try {
+                Thread.sleep(PARKED_MAP_TTL_MS)
+            } catch (_: InterruptedException) {
+                return@run
+            }
+            if (parkedMap == parking) releaseParkedMap("not reconnected within ${PARKED_MAP_TTL_MS / 60_000} min")
+        }
+    }
+
+    private fun releaseParkedMap(parking: ParkedMap) {
+        // If the map was not moved (e.g. the default was changed), remove only this exact old car task.
+        // Public fallback displays can otherwise raise their old contents onto the phone when released.
+        val remaining = taskIdsOnDisplayPkg(parking.pkg, parking.displayId)
+        if (parking.taskId in remaining) removeTask(parking.taskId)
+        val released =
+            runCatching {
+                parking.localDisplay?.let {
+                    it.release()
+                    true
+                }
+                    ?: (CarInputClient.service?.releaseDisplay(parking.displayId) == true)
+            }.getOrDefault(false)
+        if (released && parkedMap == parking) parkedMap = null
+    }
+
     private fun startOn(
         displayId: Int,
         component: String,
@@ -1477,35 +1720,56 @@ object VirtualLauncher {
         return result.ok && result.output.contains("Starting:", ignoreCase = true)
     }
 
-    /** 回桌面：GridActivity 任务带回前台（后台应用保留）；合成器切回桌面所在屏。
+    /**
+     * Back to desktop: bring the GridActivity task to the foreground (background apps kept); the compositor switches back to the display
+     * hosting the desktop.
      *
-     *  shell 启动必须异步：调用方（dock 回桌面/桌面 pager 落定）都在主线程，
-     *  同步等 shell 最坏 8s 超时足以 ANR（2026-10-21 实测触发主线程调用告警）。 */
+     *  The shell launch must be asynchronous: callers (dock back-to-desktop / desktop pager settling) are all on the main thread,
+     * and waiting synchronously on the shell with a worst-case 8s timeout is enough for an ANR (main-thread call warning triggered
+     * 2026-10-21). */
     fun goGrid() {
         val grid = if (gridDisplayId >= 0) gridDisplayId else appDisplayId
         val pkg = appContextRef?.packageName ?: return
         Bg.run("go-grid") {
-            if (!startOn(grid, "$pkg/${GridActivity::class.java.name}")) Log.w(TAG, "回桌面失败")
-            // 离开聊天 App：撤掉聊天密度（桌面在超采样屏，聊天 App 多在应用屏，还原时桌面不会闪）
+            if (!startOn(grid, "$pkg/${GridActivity::class.java.name}")) Log.w(TAG, "back to desktop failed")
+            // Leaving a chat app: remove the chat density (the desktop is on the supersampled display and chat apps are mostly on the app
+            // display, so the desktop does not flicker on restore)
             ChatMode.restore { logSink?.invoke(it) }
         }
         composer?.requestActiveApp(appHiDisplayId >= 0 && grid == appHiDisplayId)
-        // 桌面上的提示没有意义（顶层不是第三方应用），直接收起
+        // A hint on the desktop is meaningless (the top is not a third-party app), so collapse it directly
         LetterboxHintController.clear()
     }
 
-    // ---- 仪表盘（分屏）与 home 键模式循环 ----
+    // ---- Dashboard (split) and the home-key mode cycle ----
     //
-    // home 键语义（用户定义）：应用 → 仪表盘；桌面 → 仪表盘；仪表盘 → 桌面。
-    // 仪表盘 = 应用区左半为地图 tile（地图屏 resize 至 tile 尺寸）、右半为
-    // GridActivity 的音乐卡；地图任务常驻地图屏，全屏 ⇄ 分屏只 resize 不迁移，
-    // 导航等应用状态不丢。
+    // Home-key semantics (user-defined): app -> dashboard; desktop -> dashboard; dashboard -> desktop.
+    // Dashboard = left half of the app area is the map tile (map display resized to the tile size), right half is the
+    // GridActivity music card; the map task stays on the map display, and fullscreen <-> split only resizes without migrating,
+    // so navigation and other app state is not lost.
 
     /**
-     * dock 的 ⌂ 键：模式循环（仪表盘 ⇄ 桌面；应用/全屏地图 → 仪表盘）。
-     * 注意必须先复位 mapFullscreen——路由闸门依赖它，漏复位会把桌面触摸
-     * 继续送进已隐藏的地图屏（实测：桌面无法点击而日志注入成功的根因）。
+     * The dock's home key: mode cycle (dashboard <-> desktop; app / fullscreen map -> dashboard).
+     * Note mapFullscreen must be reset first - the routing gate depends on it, and forgetting to reset would keep sending desktop touches
+     * into the already hidden map display (measured: root cause of "desktop cannot be tapped although the log shows injection succeeded").
      */
+
+    /**
+     * Incoming call: bring the dashboard's card side forward so the call card is visible (fullscreen map or app ->
+     * dashboard, a player in the media pane -> card). Background thread, like the dock's home key.
+     */
+    fun showDashboardForCall() {
+        if (isMediaPaneVisible()) closeMediaPane()
+        when {
+            mapFullscreen -> {
+                setMapFullscreen(false)
+                showDashboard()
+            }
+
+            !dashboardMode -> showDashboard()
+        }
+    }
+
     fun onHomePressed() {
         when {
             mapFullscreen -> {
@@ -1518,25 +1782,28 @@ object VirtualLauncher {
         }
     }
 
-    /** 进入仪表盘：地图屏缩回 tile、默认地图占屏（缺则启动）、桌面切分屏布局。 */
+    /**
+     * Enter the dashboard: map display shrinks back to the tile, the default map takes the display (launched if missing), the desktop
+     * switches to the split layout.
+     */
     fun showDashboard() {
         syncDashboard(true)
         goGrid()
         composer?.requestActiveApp(appHiDisplayId >= 0 && gridDisplayId == appHiDisplayId)
-        logSink?.invoke("LAUNCHER: 仪表盘模式（地图 tile + 音乐卡）")
+        logSink?.invoke("LAUNCHER: dashboard mode (map tile + music card)")
     }
 
     /**
-     * 仪表盘模式唯一对账口：置 dashboardMode → 通知（dock 图标/GridActivity pager）
-     * → 进入时补地图任务并切 SPLIT，退出时隐藏 tile。
-     * pager 滑动过程只做 tile 位移预览（showMapTile），状态一律在落定（IDLE）时经此对账。
+     * The single reconciliation point of dashboard mode: set dashboardMode -> notify (dock icon / GridActivity pager)
+     * -> on entry ensure the map task and switch to SPLIT, on exit hide the tile.
+     * Pager swiping only previews the tile displacement (showMapTile); state is always reconciled here when it settles (IDLE).
      */
     fun syncDashboard(dashboard: Boolean) {
         val changed = dashboardMode != dashboard
         dashboardMode = dashboard
         if (changed) {
             dashboardPageAnimating = true
-            // 进入时先把地图放到画外；退出时保留地图到整页滑出完毕。
+            // On entry first put the map off-screen; on exit keep the map until the whole page has slid out.
             if (dashboard) setTileSlide(1f)
             composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
             notifyDashboard()
@@ -1559,30 +1826,36 @@ object VirtualLauncher {
         }
     }
 
-    /** 滑动预览：仅切 tile 可见（不动 dashboardMode/监听），落定后由 syncDashboard 对账。 */
+    /** Swipe preview: only toggles tile visibility (does not touch dashboardMode / listeners); reconciled by syncDashboard once settled. */
     fun showMapTile() {
         composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
     }
 
-    /** 回普通桌面：隐藏地图层并退出仪表盘，桌面恢复全宽图标网格（地图任务保留）。 */
+    /**
+     * Back to the plain desktop: hide the map layer and leave the dashboard; the desktop restores the full-width icon grid (map task kept).
+     */
     fun showDesktop() {
         syncDashboard(false)
         goGrid()
-        logSink?.invoke("LAUNCHER: 桌面模式（图标网格）")
+        logSink?.invoke("LAUNCHER: desktop mode (icon grid)")
     }
 
     /**
-     * 地图屏全屏 ⇄ 分屏：动态 resize 地图屏到目标尺寸（全屏=应用区、分屏=tile 显示尺寸），
-     * 屏上地图应用由系统派发配置变更并 relayout（任务不迁移，导航等状态天然连续）。
-     * 合成器同步切换布局：resize 后地图屏内容即目标区域内容，整幅映射、不再裁剪采样。
+     * Map display fullscreen <-> split: dynamically resizes the map display to the target size (fullscreen = app area, split = tile
+     * display size);
+     * the map app on the display receives a configuration change from the system and relayouts (the task is not migrated, so navigation
+     * state stays continuous).
+     * The compositor switches layout in step: after the resize the map display content is the target-region content, mapped whole with no
+     * cropped sampling.
      */
     fun setMapFullscreen(fullscreen: Boolean) {
         if (mapDisplayId < 0) return
-        // 从应用页打开全屏地图时，清除仪表盘滑出进度，触控才能命中地图屏。
+        // When opening the fullscreen map from the app page, clear the dashboard slide-out progress so touches can hit the map display.
         if (fullscreen) setTileSlide(0f)
         if (mapFullscreen == fullscreen) return
         mapFullscreen = fullscreen
-        // binder/屏幕配置操作始终串行在后台，快点切换时只应用最新目标。
+        // Binder / screen-configuration operations are always serialized in the background; on fast toggling only the latest target is
+        // applied.
         mapResizeExecutor.execute { resizeMapDisplay(mapFullscreen) }
         composer?.setTileLayout(
             if (fullscreen) {
@@ -1592,12 +1865,12 @@ object VirtualLauncher {
             },
         )
         notifyMapLayout()
-        logSink?.invoke("LAUNCHER: 地图屏 ${if (fullscreen) "全屏" else "分屏"}")
-        // 地图屏 resize 后 letterbox 内外框变了：全屏时重探，分屏 tile 太小不提示
+        logSink?.invoke("LAUNCHER: map display ${if (fullscreen) "fullscreen" else "split"}")
+        // After the map display resize the letterbox inner/outer frames change: re-probe on fullscreen; the split tile is too small to hint
         if (fullscreen) {
             appContextRef?.let {
-                // resize 已生效，目标就是地图屏（不必等合成器切布局）
-                LetterboxHintController.scheduleProbe(it, "地图全屏", displayIdHint = mapDisplayId)
+                // The resize has taken effect and the target is the map display (no need to wait for the compositor to switch layout)
+                LetterboxHintController.scheduleProbe(it, "map fullscreen", displayIdHint = mapDisplayId)
             }
         } else {
             LetterboxHintController.clear()
@@ -1605,29 +1878,30 @@ object VirtualLauncher {
     }
 
     /**
-     * 拖动中预览分屏位置：**只改合成器绘制矩形**（地图纹理整幅拉伸渲染，不动
-     * buffer、不动虚拟屏）——拖动流畅、不触发地图应用配置变更。松手才
-     * [commitDashSplit] 真实 resize。
+     * Preview the split position during a drag: **only changes the compositor's draw rectangle** (the map texture is stretched whole, the
+     * buffer and the virtual display are untouched) - the drag stays smooth and triggers no map-app configuration change. The real resize
+     * happens on release in
+     * [commitDashSplit].
      *
-     * @param streamPos 把手中心（流像素，顶部原点；横屏 x / 竖屏 y），内部钳制
+     * @param streamPos handle center (stream pixels, origin at top; landscape x / portrait y), clamped internally
      */
     fun previewDashSplit(streamPos: Float) = Unit
 
     /**
-     * 松手落定：钳制 → 更新把手位置与 tile 派生尺寸 → 真实 resize 地图屏（含
-     * 消费端 buffer 同步）→ 持久化比例 → 通知（音乐卡壁纸切片重切）。
+     * Settle on release: clamp -> update the handle position and tile-derived sizes -> real resize of the map display (including
+     * consumer-side buffer sync) -> persist the ratio -> notify (the music card wallpaper slice is re-cut).
      *
-     * @return 钳制后的把手中心（流像素）——UI 据此校正 margin，防显示与状态漂移
+     * @return the clamped handle center (stream pixels) - the UI uses it to correct margins, preventing display/state drift
      */
     fun commitDashSplit(streamPos: Float): Float = dashSplitPos
 
-    /** 当前把手中心换算到应用屏像素（GridActivity 布局用；未 attach 返回 -1）。 */
+    /** Converts the current handle center to app-display pixels (used by GridActivity layout; returns -1 when not attached). */
     fun dashSplitScreenPos(): Float = if (dashSplitPos < 0) -1f else dashSplitPos * gridScale()
 
-    /** 把手中心·应用屏像素（应用区坐标系，已扣 dock 偏移；把手 DOWN 起点，<0=未 attach）。 */
+    /** Handle center in app-display pixels (app-area coordinates, dock offset subtracted; the handle DOWN origin, <0 = not attached). */
     fun dashHandleCenterScreen(): Float = if (dashSplitPos < 0) -1f else (dashSplitPos - splitMainOffset()) * gridScale()
 
-    /** 音乐卡内容侧起始·应用屏像素（横=左缘、竖=顶缘；<0=未 attach）。 */
+    /** Content-side start of the music card in app-display pixels (landscape = left edge, portrait = top edge; <0 = not attached). */
     fun dashMusicStartScreen(): Int =
         if (dashSplitPos < 0) {
             -1
@@ -1635,12 +1909,15 @@ object VirtualLauncher {
             ((dashSplitPos - splitMainOffset() + DASH_GAP_PX / 2f) * gridScale()).toInt()
         }
 
-    /** [previewDashSplit] 的应用屏像素入参版（把手拖动直调，内部换回流像素）。 */
+    /**
+     * App-display-pixel input version of [previewDashSplit] (called directly by handle dragging, converted back to stream pixels
+     * internally).
+     */
     fun previewDashSplitScreen(centerScreen: Float) {
         previewDashSplit(splitMainOffset() + centerScreen / gridScale().coerceAtLeast(1e-6f))
     }
 
-    /** [commitDashSplit] 的应用屏像素入参版；返回钳制后的把手中心（应用屏像素）。 */
+    /** App-display-pixel input version of [commitDashSplit]; returns the clamped handle center (app-display pixels). */
     fun commitDashSplitScreen(centerScreen: Float): Float =
         (
             commitDashSplit(splitMainOffset() + centerScreen / gridScale().coerceAtLeast(1e-6f)) -
@@ -1648,27 +1925,32 @@ object VirtualLauncher {
         ) * gridScale()
 
     /**
-     * 触点是否落在分屏把手条内（流像素坐标）——TouchRouter 粘性路由判定用：
-     * 按下命中即整条触摸流固定路由应用屏（拖动中把手落后手指、坐标越界也不改投，
-     * 否则跨屏重注会掐断拖拽并误触地图，2026-10-21 方案评审定谳）。
+     * Whether a touch point falls inside the split handle strip (stream pixel coordinates) - used by TouchRouter sticky routing:
+     * once a press hits it, the whole touch stream is routed to the app display (during a drag the handle lags behind the finger and
+     * coordinates go out of bounds without re-routing,
+     * otherwise cross-display re-injection would cut off the drag and mis-touch the map; settled in the 2026-10-21 design review).
      */
     fun dashHandleHit(
         x: Float,
         y: Float,
     ): Boolean {
-        return false // 固定比例，中缝不再有拖动命中区。
+        return false // Fixed ratio: the gap no longer has a drag hit area.
     }
 
-    /** 流坐标把手中心 → 应用区坐标系偏移（横屏减 dock 宽；竖屏 y 原点即流原点）。 */
+    /**
+     * Stream-coordinate handle center -> app-area coordinate offset (landscape subtracts the dock width; in portrait the y origin is the
+     * stream origin).
+     */
     private fun splitMainOffset(): Float = if (splitVertical || dockAtBottom) 0f else dockWidthPx.toFloat()
 
-    /** 主轴可用长度 = 应用区主轴 − 两端边距 − 中缝宽（与 dashSplitGeom 同式）。 */
+    /** Usable main-axis length = app-area main axis - end margins - gap width (same formula as dashSplitGeom). */
     private fun splitUsableLen(): Int = (if (splitVertical) appAreaHeight else appAreaWidth) - CARD_MARGIN_PX * 2 - DASH_GAP_PX.toInt()
 
     /**
-     * 钳制流坐标把手中心；未 attach 返回 null。
-     * 边界必须按**比例钳制域**（20%~80%）换算——按 [边距, 边距+可用] 钳等于允许
-     * 比例 [0,1]，卡片能被拉成一条线（2026-10-22 用户实测「拉到 0」根因）。
+     * Clamps the stream-coordinate handle center; returns null when not attached.
+     * The bounds must be converted from the **ratio clamp domain** (20%-80%) - clamping to [margin, margin+usable] is equivalent to
+     * allowing
+     * ratio [0,1], and a card could be dragged into a line (root cause of the 2026-10-22 user report "can be dragged to 0").
      */
     private fun clampDashSplitStream(streamPos: Float): Float? {
         val usable = splitUsableLen()
@@ -1680,9 +1962,10 @@ object VirtualLauncher {
     }
 
     /**
-     * resize 地图屏到目标布局尺寸（幂等：尺寸未变不调——每次 resize 都会触发屏上
-     * 应用的配置变更/重布局，能免则免）。Shizuku 未绑定或调用失败时保持现尺寸，
-     * 合成器整幅映射依旧成立（只是地图 UI 密度与可视区域暂不匹配）。
+     * Resizes the map display to the target layout size (idempotent: no call when the size is unchanged - every resize triggers a
+     * configuration change / relayout
+     * of the app on the display, so avoid it when possible). When Shizuku is not bound or the call fails the current size is kept,
+     * and the compositor's whole-picture mapping still holds (only the map UI density and visible area temporarily do not match).
      */
     private val mapResizeExecutor =
         java.util.concurrent.Executors
@@ -1698,12 +1981,12 @@ object VirtualLauncher {
         runCatching {
             val applied =
                 if (displaysViaService) {
-                    // 受信形态：shell 侧 resize
+                    // Trusted form: shell-side resize
                     val svc = CarInputClient.service ?: return@runCatching
                     svc.resizeDisplay(id, w, h, MAP_DISPLAY_DPI)
                 } else {
-                    // 回退形态：屏由本应用创建，直接用应用侧公开 API——shell 对
-                    // 他人创建的 display 没有 resize 权限（token 属主校验）
+                    // Fallback form: the display was created by this app, so use the app-side public API directly - the shell
+                    // has no resize permission on displays created by others (token owner check)
                     val display = mapDisplay ?: return@runCatching
                     display.resize(w, h, MAP_DISPLAY_DPI)
                     true
@@ -1711,19 +1994,20 @@ object VirtualLauncher {
             if (applied) {
                 mapDisplayW = w
                 mapDisplayH = h
-                // 消费端 buffer 尺寸必须同步——否则新尺寸内容画进旧 buffer 左上区域
-                // （tile 内容偏左、宽度只剩比例值、右侧全黑）
+                // The consumer-side buffer size must be synced - otherwise the new-size content is drawn into the top-left of the old
+                // buffer
+                // (tile content shifted left, width reduced to the ratio value, right side all black)
                 composer?.resizeMapInput(w, h)
                 logSink?.invoke(
-                    "LAUNCHER: 地图屏 resize → ${w}x$h@${MAP_DISPLAY_DPI}dpi（${if (fullscreen) "全屏" else "分屏"}）",
+                    "LAUNCHER: map display resize -> ${w}x$h@${MAP_DISPLAY_DPI}dpi (${if (fullscreen) "fullscreen" else "split"})",
                 )
             }
         }
     }
 
     /**
-     * 地图应用启动到地图屏（全屏形态）：resize 地图屏 → 启动 → 合成器全屏布局。
-     * 地图应用之间的切换（高德 ↔ 百度）也在同一块屏上进行，旧任务被清（互斥）。
+     * Launch a map app onto the map display (fullscreen form): resize the map display -> launch -> compositor fullscreen layout.
+     * Switching between map apps (Amap <-> Baidu) also happens on the same display, and the old task is cleared (mutually exclusive).
      */
     private fun launchMapOnMapDisplay(component: ComponentName): Boolean {
         if (!switchMap(component)) return false
@@ -1735,7 +2019,7 @@ object VirtualLauncher {
         return true
     }
 
-    /** singleTask 应用可能忽略启动屏，先把已有车机任务移到目标屏。 */
+    /** A singleTask app may ignore the launch display, so first move the existing head-unit task to the target display. */
     private fun reuseVehicleTask(
         pkg: String,
         target: Int,
@@ -1753,47 +2037,138 @@ object VirtualLauncher {
         return moved.ok && task in taskIdsOnDisplayPkg(pkg, target)
     }
 
-    /** 指定屏上指定包的任务 ID 列表（清屏用）。 */
+    /** List of task IDs of a given package on a given display (used for clearing a display). */
     private fun taskIdsOnDisplayPkg(
         pkg: String,
         displayId: Int,
     ): List<String> = tasksOf(taskIdsByDisplayPkg(), pkg, displayId)
 
     /**
-     * 在指定屏启动地图应用：按 [mapLaunchCandidates] 逐个候选尝试 `am start -n`。
+     * A call app that opened its call screen on a car app display (the answer action started it on the focused display)
+     * goes back to the phone, so the dashboard call card stays visible. Background thread. Returns the number of tasks moved.
+     */
+
+    /** The media pane currently shows the call app opened from the call card (closed again when the call ends). */
+    @Volatile
+    var callAppInMediaPane: String? = null
+        private set
+
+    /**
+     * Tap on the call card: open the call app's call screen in the dashboard media pane (the notification's tap target on the
+     * media display). A call screen moved to the phone on answer is reused by the system on the phone, so it is moved over
+     * afterwards. Background thread.
+     */
+    fun openCallAppInMediaPane(
+        context: Context,
+        pkg: String,
+        open: android.app.PendingIntent?,
+    ): Boolean {
+        val target = mediaDisplayId
+        if (target < 0) return false
+        val sent =
+            open != null &&
+                runCatching {
+                    val options =
+                        android.app.ActivityOptions
+                            .makeBasic()
+                            .setLaunchDisplayId(target)
+                    if (android.os.Build.VERSION.SDK_INT >= 34) {
+                        options.setPendingIntentBackgroundActivityStartMode(
+                            android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED,
+                        )
+                    }
+                    open.send(context, 0, null, null, null, null, options.toBundle())
+                    true
+                }.getOrDefault(false)
+        // No intent (ringtone-only call): the app's call screen is already open on the phone, move it over as it is
+        val moved =
+            !sent &&
+                tasksOf(taskIdsByDisplayPkg(), pkg, 0)
+                    .onEach { Shell.exec("am display move-stack $it $target", timeoutMs = 4000) }
+                    .isNotEmpty()
+        if (!sent && !moved) {
+            val component = context.packageManager.getLaunchIntentForPackage(pkg)?.component ?: return false
+            startMapApp(component, target, forceNewTask = false, extraArgs = "--windowingMode 1")
+        }
+        Thread.sleep(700)
+        if (tasksOf(taskIdsByDisplayPkg(), pkg, target).isEmpty()) {
+            for (task in tasksOf(taskIdsByDisplayPkg(), pkg, 0)) Shell.exec("am display move-stack $task $target", timeoutMs = 4000)
+        }
+        callAppInMediaPane = pkg
+        mediaPaneOpen = true
+        composer?.showMediaPane = true
+        notifyMapLayout()
+        logSink?.invoke(
+            "CALL: call app $pkg -> media area display=$target via=${if (sent) {
+                "notification"
+            } else if (moved) {
+                "moved"
+            } else {
+                "launcher"
+            }}",
+        )
+        return true
+    }
+
+    /** Call ended: a call screen opened in the media pane makes way for the music card again. */
+    fun closeCallAppInMediaPane() {
+        if (callAppInMediaPane == null) return
+        callAppInMediaPane = null
+        if (mediaPaneOpen) closeMediaPane()
+    }
+
+    fun moveCallAppToPhone(pkg: String): Int {
+        val byDisplay = taskIdsByDisplayPkg()
+        var moved = 0
+        for (display in listOf(appDisplayId, appHiDisplayId, gridDisplayId).filter { it >= 0 }.distinct()) {
+            for (task in tasksOf(byDisplay, pkg, display)) {
+                if (Shell.exec("am display move-stack $task 0", timeoutMs = 4000).ok) moved++
+            }
+        }
+        if (moved > 0) logSink?.invoke("CALL: moved $moved call-app task(s) of $pkg from the car display to the phone")
+        return moved
+    }
+
+    /**
+     * Launch a map app on a given display: try `am start -n` over the [mapLaunchCandidates] one by one.
      *
-     * 车机版地图的显式主界面（高德 `MainMapActivity`、百度 `NaviAutoActivity`）在
-     * 部分定制固件/版本上可能不存在，写死单点会让地图屏黑着且日志只有一句 `Starting:` 缺失。
-     * 因此首个候选失败即回退到 launcher 解析出的 component，并把每次尝试记进日志。
+     * The explicit main activity of the car-version map (Amap `MainMapActivity`, Baidu `NaviAutoActivity`) may not exist on
+     * some customized firmware / versions, and hard-coding a single point would leave the map display black with the log missing even a
+     * `Starting:` line.
+     * So when the first candidate fails it falls back to the launcher-resolved component, and every attempt is logged.
      */
 
     /**
-     * 第三方 App 按「点桌面图标」的方式启动（2026-11-18）：Android 12+ 对 MAIN+LAUNCHER 启动的任务，
-     * 在根页面按返回只「移到后台」、保留状态；裸 `am start -n` 启动的则直接 finish——仪表盘里的地图 /
-     * 音乐 App 一按返回就整个退出（用户实测）。
+     * Third-party apps launch the way "tapping a desktop icon" does (2026-11-18): on Android 12+, for a task started with MAIN+LAUNCHER,
+     * pressing back at the root page only "moves it to the background" and keeps state; a bare `am start -n` launch finishes directly -
+     * the map /
+     * music app in the dashboard would exit entirely on a back press (user test).
      */
     private const val LAUNCHER_INTENT = "-a android.intent.action.MAIN -c android.intent.category.LAUNCHER"
 
     /**
-     * 返回键发到地图 / 媒体屏后调用（后台线程）：若那块屏因此空了（根页面被移到后台或结束），
-     * 立刻把它带回来——仪表盘的地图卡 / 音乐区不能变成空白。带 LAUNCHER 启动的任务仍在后台，
-     * 带回前台是热恢复、状态不丢。
+     * Called after the back key is sent to the map / media display (background thread): if that display became empty as a result (root
+     * page moved to the background or finished),
+     * bring it back at once - the dashboard map card / music area must not turn blank. Tasks launched with LAUNCHER are still in the
+     * background,
+     * and bringing them forward is a hot resume that loses no state.
      */
     fun restorePaneAfterBack(displayId: Int) {
         if (displayId < 0 || (displayId != mapDisplayId && displayId != mediaDisplayId)) return
         Thread.sleep(600)
         if (displayHasVisibleTask(displayId)) return
-        logSink?.invoke("LAUNCHER: 返回后屏 $displayId 已无可见任务——带回前台")
+        logSink?.invoke("LAUNCHER: display $displayId has no visible task after back - bringing it to the foreground")
         if (displayId == mapDisplayId) {
-            ensureMapTask()
-            // ensureMapTask 只在「没有任务」时才启动；任务只是被移到后台时要显式带回
-            if (!displayHasVisibleTask(displayId)) activeMapComponent?.let { startMapApp(it, displayId, forceNewTask = false) }
+            activeMapComponent?.let { switchMap(it) } ?: ensureMapTask()
         } else {
             activeMediaComponent?.let { startMapApp(it, displayId, forceNewTask = false, extraArgs = "--windowingMode 1") }
         }
     }
 
-    /** 该屏上是否有可见任务（解析 dumpsys 的 Task 行 visible=true）。读不到就当有，免得误拉起。 */
+    /**
+     * Whether the display has a visible task (parses the Task lines of dumpsys for visible=true). Treated as yes when unreadable, to avoid
+     * a spurious launch.
+     */
     private fun displayHasVisibleTask(displayId: Int): Boolean {
         val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
         val header = Regex("""^Display #$displayId\b""", RegexOption.MULTILINE).find(dump) ?: return true
@@ -1802,13 +2177,64 @@ object VirtualLauncher {
         return Regex("""\* Task\{[^\n]*visible=true""").containsMatchIn(rest.substring(0, end))
     }
 
+    private fun openMapTask(
+        component: ComponentName,
+        target: Int,
+    ): Boolean {
+        // A reconnect can race the previous display's async release. Wait on this launch worker before looking for its task.
+        val handoff = pendingDisplayRelease
+        try {
+            handoff?.get(10, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (_: java.util.concurrent.TimeoutException) {
+            logSink?.invoke("MAP: previous display release is still pending")
+            return false
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return false
+        } catch (failure: java.util.concurrent.ExecutionException) {
+            logSink?.invoke("MAP: previous display cleanup failed: ${failure.cause?.message}")
+        }
+        val context = appContextRef ?: return false
+        if (target !in setOf(mapDisplayId, appDisplayId, appHiDisplayId)) return false
+        val pkg = component.packageName
+        val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val saved = prefs.getString(KEY_RETAINED_MAP, null)
+        val snapshot = readTaskSnapshot() ?: return false
+        val existing = findMapTask(snapshot, pkg, target, listOf(mapDisplayId, appDisplayId, appHiDisplayId), saved)
+        if (existing != null) {
+            val (id, display) = existing
+            if (display != target &&
+                (!Shell.exec("am display move-stack $id $target", timeoutMs = 4000).ok || id !in taskIdsOnDisplayPkg(pkg, target))
+            ) {
+                logSink?.invoke("MAP: task #$id could not move from display $display to $target")
+                return false
+            }
+            if (display == target && !Shell.exec("am task focus $id", timeoutMs = 4000).ok) return false
+            prefs.edit().putString(KEY_RETAINED_MAP, "$pkg:$id").apply()
+            parkedMap?.takeIf { it.displayId != target }?.let { releaseParkedMap(it) }
+            logSink?.invoke("MAP: resumed $pkg task #$id on display $target")
+            return true
+        }
+
+        val result = startMapApp(component, target, forceNewTask = true, extraArgs = "--windowingMode 1")
+        val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
+        if (ok) {
+            parkedMap?.takeIf { it.displayId != target }?.let { releaseParkedMap(it) }
+            taskIdsOnDisplayPkg(pkg, target).firstOrNull()?.let { id ->
+                prefs.edit().putString(KEY_RETAINED_MAP, "$pkg:$id").apply()
+            }
+        }
+        return ok
+    }
+
     private fun startMapApp(
         component: ComponentName,
         displayId: Int,
         forceNewTask: Boolean,
         extraArgs: String = "",
     ): Shell.Result {
-        // 地图忽略方向请求只会触发系统直式黑边；启动前完成会话横屏覆盖。
+        // Ignoring the orientation request on the map only triggers the system's portrait letterbox bars; finish the session landscape
+        // override before launching.
         if (displayId == mapDisplayId) appContextRef?.let { AppOrientationCompat.prepareMap(it, component.packageName) }
         val suffix =
             (if (forceNewTask) " -f 0x18000000" else "") +
@@ -1823,7 +2249,7 @@ object VirtualLauncher {
             val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
             if (ok) return result
             logSink?.invoke(
-                "LAUNCH(${component.packageName}): 入口 $target 启动失败（${result.output.take(80)}）——尝试下一个候选",
+                "LAUNCH(${component.packageName}): entry $target failed to launch (${result.output.take(80)}) - trying the next candidate",
             )
             last = result
         }
@@ -1835,25 +2261,27 @@ object VirtualLauncher {
     }
 
     /**
-     * 一次 `dumpsys activity activities` 解析出「displayId → 包 → 任务 ID 列表」。
-     * 此前三个查询函数各自 dump 一遍（launchApp 一次启动最多跑 3 遍、每遍 4s 超时
-     * 的 shell 命令）——统一从这里取快照复用。
+     * One `dumpsys activity activities` is parsed into "displayId -> package -> task ID list".
+     * Previously the three query functions each dumped separately (one launchApp ran up to 3 dumps, each a shell command
+     * with a 4s timeout) - now they all reuse a snapshot taken here.
      */
 
-    /**
-     * 车机屏上见过的任务 ID（持久化）。连接结束时理应全部移除；若那次没走到（App 被强停、
-     * 崩溃、UserService 换代），下次会话开始时据此补删——否则手机「最近使用」每重连一次多一张
-     * （2026-11-18 用户实测）。屏带 DESTROY_CONTENT_ON_REMOVAL，车机任务不会搬到手机继续用，
-     * 记下的 ID 只要还在就一定是残留。
-     */
+    /** Car-owned tasks are cleaned up across sessions. The active map is tracked separately for handoff. */
     private const val KEY_CAR_TASKS = "carTaskIds"
+    private const val KEY_RETAINED_MAP = "retainedVehicleMapTask"
+    private const val PARKED_MAP_TTL_MS = 30 * 60_000L
+
+    private fun retainedMapId(entry: String?): String? = entry?.substringAfter(':', "")?.takeIf { it.toIntOrNull() != null }
 
     private fun rememberCarTasks(
         snapshot: Map<Int, Map<String, List<String>>>,
         displays: Collection<Int>,
+        ctx: Context? = appContextRef,
     ) {
-        val ctx = appContextRef ?: return
+        if (ctx == null) return
         val own = ctx.packageName
+        val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val retained = retainedMapId(prefs.getString(KEY_RETAINED_MAP, null))
         val ids =
             displays
                 .flatMap { id ->
@@ -1863,36 +2291,41 @@ object VirtualLauncher {
                         .values
                         .flatten()
                 }.filter { it.all(Char::isDigit) }
-        if (ids.isEmpty()) return
-        val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
-        val merged = prefs.getStringSet(KEY_CAR_TASKS, emptySet()).orEmpty() + ids
-        prefs.edit().putStringSet(KEY_CAR_TASKS, merged).apply()
+        val remembered = prefs.getStringSet(KEY_CAR_TASKS, emptySet()).orEmpty()
+        val merged = (remembered + ids).filterNot { it == retained }.toSet()
+        if (merged != remembered) prefs.edit().putStringSet(KEY_CAR_TASKS, merged).apply()
     }
 
     /**
-     * 补删上次会话留下的车机任务（后台线程）。当前会话车机屏上正在用的任务一律保留——
-     * 新会话可能已经开了 App 并记进同一份名单。
+     * Remove the head-unit tasks left over from the previous session (background thread). Tasks being used on the head-unit displays in
+     * the current session are all kept -
+     * the new session may already have opened apps and recorded them in the same list.
      */
     private fun purgeRememberedTasks(ctx: Context) {
         val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
         val remembered = prefs.getStringSet(KEY_CAR_TASKS, emptySet()).orEmpty()
         if (remembered.isEmpty()) return
-        val live = listOf(appDisplayId, appHiDisplayId, mapDisplayId, mediaDisplayId).filter { it >= 0 }
+        val live = (listOf(appDisplayId, appHiDisplayId, mapDisplayId, mediaDisplayId) + preservedDisplayIds()).filter { it >= 0 }
         val snapshot = if (live.isEmpty()) emptyMap() else taskIdsByDisplayPkg()
         val keep = live.flatMap { id -> snapshot[id].orEmpty().values.flatten() }.toSet()
-        val ids = remembered - keep
+        val retained = retainedMapId(prefs.getString(KEY_RETAINED_MAP, null))
+        val ids = (remembered - keep).filterNot { it == retained }
         if (ids.isEmpty()) return
         val removed =
             runCatching {
                 CarInputClient.service?.removeTasks(ids.mapNotNull { it.toIntOrNull() }.toIntArray())
             }.getOrNull()
-        prefs.edit().putStringSet(KEY_CAR_TASKS, keep).apply()
-        logSink?.invoke("LAUNCHER: 清理上次会话残留的车机任务 ${ids.size} 个（removeTask 成功 ${removed ?: "服务不可用"}）")
+        prefs.edit().putStringSet(KEY_CAR_TASKS, remembered - ids.toSet()).apply()
+        logSink?.invoke(
+            "LAUNCHER: cleaned up ${ids.size} leftover head-unit tasks of the last session " +
+                "(removeTask ok ${removed ?: "service unavailable"})",
+        )
     }
 
     /**
-     * 彻底移除任务：优先 UserService 的 removeTask（连手机「最近使用」记录一起删），
-     * 不可用时退回 `am stack remove`（只删任务，最近使用会留一张卡）。后台线程调用。
+     * Remove a task completely: prefer the UserService's removeTask (also deletes the phone's "recents" record),
+     * and when unavailable fall back to `am stack remove` (deletes only the task, leaving a card in recents). Called on a background
+     * thread.
      */
     fun removeTask(taskId: String): Boolean {
         val id = taskId.toIntOrNull() ?: return false
@@ -1901,19 +2334,19 @@ object VirtualLauncher {
         return Shell.exec("am stack remove $id", timeoutMs = 4000).ok
     }
 
-    private fun taskIdsByDisplayPkg(): Map<Int, Map<String, List<String>>> {
-        val dump = Shell.exec("dumpsys -t 3 activity activities", timeoutMs = 4000).output
-        return runCatching { parseTaskDisplays(dump) }.getOrElse {
-            logSink?.invoke("LAUNCHER: 任务快照解析失败 ${it.javaClass.simpleName}")
-            emptyMap()
-        }
+    private fun taskIdsByDisplayPkg(): Map<Int, Map<String, List<String>>> = readTaskSnapshot().orEmpty()
+
+    private fun readTaskSnapshot(): Map<Int, Map<String, List<String>>>? {
+        val result = Shell.exec("dumpsys -t 3 activity activities", timeoutMs = 4000)
+        if (!result.ok || !result.output.contains("Display")) return null
+        return parseTaskDisplays(result.output).takeIf { it.isNotEmpty() }
     }
 
-    /** 后台管理只查看车机任务；读取失败抛错，不能伪装成空列表。 */
+    /** Background management only views head-unit tasks; a read failure throws and must not be disguised as an empty list. */
     fun vehicleAppTasks(): Map<String, List<String>> {
         val result = Shell.exec("dumpsys activity activities", timeoutMs = 4000)
         check(result.ok && result.output.contains("Display")) {
-            logSink?.invoke("RECENTS: 查询车机任务失败 exit=${result.exitCode}")
+            logSink?.invoke("RECENTS: head-unit task query failed exit=${result.exitCode}")
             "Unable to read vehicle tasks"
         }
         return vehicleTasks(
@@ -1923,13 +2356,18 @@ object VirtualLauncher {
         )
     }
 
-    /** 重新取真实任务后移除指定车机窗口，不 force-stop 手机进程。后台调用。 */
+    /**
+     * Re-fetch the real tasks and then remove the given head-unit windows, without force-stopping the phone process. Called in the
+     * background.
+     */
     fun closeVehicleApps(packages: Set<String>): Boolean {
         val requested = packages.intersect(sessionApps().map { it.packageName }.toSet())
         if (requested.isEmpty()) return true
         val mediaPackages = taskIdsByDisplayPkg()[mediaDisplayId]?.keys.orEmpty()
-        // 移除后立刻复查会误报：任务移除有时间差，导航/音乐/聊天类应用被移除后还会立刻重建任务。
-        // 最多三轮「移除 → 分次等待复查」，仍在的才算失败，并把包名与任务号写进日志。
+        // A re-check right after removal would give false alarms: task removal lags, and navigation / music / chat apps may rebuild the
+        // task right after being removed.
+        // At most three rounds of "remove -> staged wait and re-check"; only those still present count as failures, and the package and
+        // task id are written to the log.
         var after = vehicleAppTasks()
         for (round in 1..CLOSE_ROUNDS) {
             val ids = requested.flatMap { after[it].orEmpty() }.distinct()
@@ -1945,7 +2383,7 @@ object VirtualLauncher {
             } while (requested.any { it in after } && SystemClock.uptimeMillis() < deadline)
             if (requested.none { it in after }) break
             logSink?.invoke(
-                "RECENTS: 第 $round 轮关闭后仍在：" +
+                "RECENTS: still present after round $round of closing: " +
                     requested.filter { it in after }.joinToString { "$it${after[it]}" },
             )
         }
@@ -1986,29 +2424,31 @@ object VirtualLauncher {
     ): List<String> = snapshot[displayId]?.get(pkg).orEmpty()
 
     /**
-     * 确保默认地图在地图屏：am start 对既有任务=带回前台（状态保留，导航不断），
-     * 无任务=新启动。后台线程调用。
+     * Ensure the default map is on the map display: am start on an existing task = bring it to the foreground (state kept, navigation
+     * uninterrupted),
+     * no task = fresh launch. Called on a background thread.
      */
     @Synchronized
     private fun ensureMapTask() {
         if (mapDisplayId < 0) {
-            // 诊断（2026-10-18「重装后地图卡不渲染」）：此前静默 return，无法区分
-            // 「没创建地图屏」与「地图屏已创建但没启动 app」
-            logSink?.invoke("LAUNCHER: 地图屏未创建（mapDisplayId=-1）——跳过默认地图启动")
+            // Diagnostics (2026-10-18 "map card does not render after reinstall"): this used to return silently, making it impossible to
+            // tell
+            // "map display not created" from "map display created but app not launched"
+            logSink?.invoke("LAUNCHER: map display not created (mapDisplayId=-1) - skipping default map launch")
             return
         }
         val ctx =
             appContextRef ?: run {
-                logSink?.invoke("LAUNCHER: appContext 未就绪——跳过默认地图启动")
+                logSink?.invoke("LAUNCHER: appContext not ready - skipping default map launch")
                 return
             }
         val component =
             activeMapComponent?.takeIf { ctx.packageManager.getLaunchIntentForPackage(it.packageName) != null }
                 ?: defaultMapComponent(ctx) ?: run {
-                logSink?.invoke("LAUNCHER: 未找到任何地图应用（白名单内）——地图 tile 空")
+                logSink?.invoke("LAUNCHER: no map app found (within the whitelist) - map tile empty")
                 return
             }
-        // 不带 MULTIPLE_TASK：任务已在地图屏时等价于带回前台
+        // Without MULTIPLE_TASK: when the task is already on the map display this is equivalent to bringing it to the foreground
         val target = mapDisplayId
         if (activeMapComponent != component || taskIdsOnDisplayPkg(component.packageName, target).isEmpty()) {
             switchMap(component)
@@ -2016,30 +2456,34 @@ object VirtualLauncher {
     }
 
     /**
-     * 启动/切换应用。
-     * 目标屏按每应用超采样偏好路由（SupersamplePrefs）：
-     *  - 超采样开启（或自动判定为竖屏应用）→ 超采样屏（1551×810 缩回，固定像素顶带占比小）
-     *  - 超采样关闭（横屏/地图类）→ 原生屏（1:1 渲染，更清晰、GPU 开销 1/2.25）
+     * Launch / switch an app.
+     * The target display is routed by the per-app supersampling preference (SupersamplePrefs):
+     * - supersampling on (or auto-detected as a portrait app) -> supersampled display (1551x810 scaled back, the fixed-pixel top band
+     * takes a small share)
+     *  - supersampling off (landscape / map apps) -> native display (1:1 rendering, sharper, GPU cost 1/2.25)
      *
-     * 本 ROM（MagicOS）实测行为：`am start --display X` 对已有任务只做"带到前台"，
-     * 不落到 X 屏；`am task move` 静默无效；`am task remove` 不存在，清任务用
-     * `am stack remove <taskId>`（本版本 RootTask id == taskId）。可靠做法：
-     *  1) 目标屏已有该包任务 → 普通启动带回前台（复用，保留任务栈）
-     *  2) 目标屏没有 → 先清掉该包在**另一个应用屏**上的任务（偏好切换后避免双实例），
-     *     再 `-f 0x18000000`（NEW_TASK|MULTIPLE_TASK）在目标屏新建实例
+     * Behavior measured on this ROM (MagicOS): `am start --display X` on an existing task only "brings it to the foreground"
+     * and does not land it on display X; `am task move` silently does nothing; `am task remove` does not exist, and tasks are cleared with
+     * `am stack remove <taskId>` (RootTask id == taskId in this version). The reliable approach:
+     *  1) the target display already has a task of the package -> plain launch brings it forward (reuse, keeping the task stack)
+     * 2) the target display has none -> first clear the package's task on the **other app display** (to avoid dual instances after a
+     * preference switch),
+     *     then create a new instance on the target display with `-f 0x18000000` (NEW_TASK|MULTIPLE_TASK)
      *
-     * 已知局限（2026-10-10 实测）：应用在手机侧也有实例时，进程基准密度停留在
-     * 手机屏（560dpi），车机屏渲染文字偏大（≈2.2 倍）。唯一根治是强制重启该进程，
-     * 但会杀掉用户手机侧正在用的实例（不可接受）——故维持现状不处理。
+     * Known limitation (measured 2026-10-10): when the app also has an instance on the phone side, the process baseline density stays at
+     * the phone display (560dpi) and text on the head-unit display renders too large (~2.2x). The only real fix is force-restarting that
+     * process,
+     * but it would kill the instance the user is using on the phone (unacceptable) - so it is left as is.
      */
     fun launchApp(component: ComponentName): Boolean {
         if (appDisplayId < 0) return false
-        // 会话建立时的「强制横屏」覆盖是异步写的，而 am compat 会立即杀掉目标应用：
-        // 必须等队列排空再启动，否则应用刚起来就被覆盖写入杀掉（表现为闪退/落回手机屏）。
-        // 执行器单线程 FIFO，正常情况下覆盖早已写完，这里立即返回。
+        // The "force landscape" override at session setup is written asynchronously, and am compat kills the target app immediately:
+        // the queue must drain before launching, otherwise the app is killed by the override write right after it starts (seen as a crash
+        // / falling back to the phone display).
+        // The executor is single-thread FIFO, so normally the override was written long ago and this returns immediately.
         AppOrientationCompat.awaitPending()
-        // 地图应用 → 地图屏全屏（任务常驻地图屏；从桌面 grid 点击同样去地图屏，
-        // 与仪表盘共用同一任务，导航状态不丢）
+        // Map app -> map display fullscreen (the task stays on the map display; tapping from the desktop grid also goes to the map display,
+        // sharing the same task with the dashboard, so navigation state is not lost)
         if (isMapPackage(component.packageName) && mapDisplayId >= 0) {
             return launchMapOnMapDisplay(component)
         }
@@ -2049,20 +2493,23 @@ object VirtualLauncher {
                 appHiDisplayId >= 0 &&
                 SupersamplePrefs.shouldSupersample(ctx, component)
         val targetDisplay = if (wantHi) appHiDisplayId else appDisplayId
-        // 聊天模式：聊天 App 启动前先把目标屏调成平板密度（启动即是双栏，不闪一次手机版）；其它 App 还原
+        // Chat mode: before a chat app launches, set the target display to tablet density (it starts directly in two-pane, without
+        // flashing the phone version once); restore for other apps
         if (ctx != null) ChatMode.beforeLaunch(ctx, targetDisplay, component.packageName) { logSink?.invoke(it) }
-        // 任务查询共用一次 dumpsys 快照（此前 onTarget + 清理两块屏最多连跑 3 遍 4s 超时命令）
+        // Task queries share one dumpsys snapshot (previously onTarget + cleaning two displays ran up to 3 commands with 4s timeouts back
+        // to back)
         val tasks = taskIdsByDisplayPkg()
         rememberCarTasks(tasks, listOf(appDisplayId, appHiDisplayId, mapDisplayId, mediaDisplayId).filter { it >= 0 })
-        // singleTask 媒体入口会复用媒体屏上的任务，切到普通应用屏只会看到空白。
-        // 按用户设定留在媒体区域，并把仪表盘带回前台。
+        // A singleTask media entry reuses the task on the media display, and switching to the ordinary app display would only show blank.
+        // Stay in the media area as the user set, and bring the dashboard to the foreground.
         val onMedia = mediaDisplayId >= 0 && tasksOf(tasks, component.packageName, mediaDisplayId).isNotEmpty()
         if (onMedia && ctx != null && isMusicApp(ctx, component.packageName)) {
             showDashboard()
             return launchMediaApp(component)
         }
         if (onMedia) {
-            // 非音乐 App 误入了媒体屏：移走它，照常开在应用屏，不再每次被带回媒体区
+            // A non-music app wrongly entered the media display: move it away and open it on the app display as usual, so it is no longer
+            // brought back to the media area every time
             tasksOf(tasks, component.packageName, mediaDisplayId).forEach { taskId ->
                 if (taskId.all(Char::isDigit)) removeTask(taskId)
             }
@@ -2070,38 +2517,33 @@ object VirtualLauncher {
                 activeMediaComponent = null
                 closeMediaPane()
             }
-            logSink?.invoke("MEDIA: ${component.packageName} 不是音乐 App，从媒体区移回应用屏")
+            logSink?.invoke("MEDIA: ${component.packageName} is not a music app, moving it from the media area back to the app display")
         }
         val onTarget = tasksOf(tasks, component.packageName, targetDisplay).isNotEmpty()
-        if (!onTarget) {
-            // 偏好切换后清理另一块应用屏上的旧任务（不同屏双实例会各自维护状态，易混淆）
+        if (!onTarget && !isMapPackage(component.packageName)) {
+            // After a preference switch clean up the old task on the other app display (dual instances on different displays each keep
+            // their own state and are confusing)
             val otherDisplay = if (targetDisplay == appHiDisplayId) appDisplayId else appHiDisplayId
             if (otherDisplay >= 0) {
                 tasksOf(tasks, component.packageName, otherDisplay).forEach { taskId ->
                     removeTask(taskId)
-                    Log.i(TAG, "清理旧屏任务 pkg=${component.packageName} task=$taskId display=$otherDisplay")
+                    Log.i(TAG, "cleaning old-display task pkg=${component.packageName} task=$taskId display=$otherDisplay")
                 }
             }
         }
         var ok: Boolean
         val result: Shell.Result
         if (isMapPackage(component.packageName)) {
-            // 地图屏不可用（mapDisplayId < 0）时的回退：仍按车机版主界面启动，
-            // 但落到应用屏并强制全屏窗口模式。
-            result = startMapApp(component, targetDisplay, forceNewTask = !onTarget, extraArgs = "--windowingMode 1")
-            ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
-            if (!ok && onTarget) {
-                val retry =
-                    startMapApp(component, targetDisplay, forceNewTask = true, extraArgs = "--windowingMode 1")
-                ok = retry.ok && retry.output.contains("Starting:", ignoreCase = true)
-            }
+            ok = openMapTask(component, targetDisplay)
+            if (ok) activeMapComponent = component
+            result = Shell.Result(if (ok) 0 else -1, "map task")
         } else {
             val target = component.flattenToShortString()
             result =
                 if (onTarget) {
                     Shell.exec("am start $LAUNCHER_INTENT -n ${target.asShellArgument()} --display $targetDisplay", timeoutMs = 8000)
                 } else {
-                    // MULTIPLE_TASK：即使该应用在其他屏有任务，也强制在目标屏新建实例
+                    // MULTIPLE_TASK: even if the app has a task on another display, force a new instance on the target display
                     Shell.exec(
                         "am start $LAUNCHER_INTENT -n ${target.asShellArgument()} --display $targetDisplay -f 0x18000000",
                         timeoutMs = 8000,
@@ -2109,7 +2551,7 @@ object VirtualLauncher {
                 }
             ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
             if (!ok && onTarget) {
-                // 复用路径失败（任务可能已被系统移走）：退回 MULTIPLE_TASK 新建
+                // The reuse path failed (the task may have been moved away by the system): fall back to a fresh MULTIPLE_TASK launch
                 val retry =
                     Shell.exec(
                         "am start $LAUNCHER_INTENT -n ${target.asShellArgument()} --display $targetDisplay -f 0x18000000",
@@ -2124,35 +2566,37 @@ object VirtualLauncher {
         )
         if (ok) {
             recordSessionApp(component, targetDisplay)
-            // 仪表盘/全屏地图中打开普通应用：退出仪表盘并隐藏地图层，
-            // 否则 SPLIT 带区继续画在应用上面（实测地图 tile 盖住打开的应用）
+            // Opening an ordinary app in dashboard / fullscreen map: leave the dashboard and hide the map layer,
+            // otherwise the SPLIT band keeps drawing over the app (measured: the map tile covered the opened app)
             dashboardPageAnimating = false
             dashboardUserDragging = false
             if (dashboardMode || mapFullscreen) {
                 dashboardMode = false
                 mapFullscreen = false
                 notifyDashboard()
-                logSink?.invoke("LAUNCHER: 退出仪表盘（普通应用已打开）")
+                logSink?.invoke("LAUNCHER: leaving dashboard (an ordinary app was opened)")
             }
             composer?.setTileLayout(DualDisplayComposer.TileLayout.HIDDEN)
-            // 合成器切到目标屏（超采样屏等其出帧再切；原生屏即时切换）
+            // The compositor switches to the target display (supersampled display waits for its first frame; native display switches
+            // instantly)
             composer?.requestActiveApp(targetDisplay == appHiDisplayId)
             composer?.animateAppEntry()
-            // 应用已在运行、被系统按旧配置带回前台的情况：启动后探测一次是否仍
-            // letterbox（提示卡只对「应用横屏」名单内的应用生效，其它应用不计）
+            // When the app is already running and was brought forward by the system with its old configuration: probe once after launch
+            // whether it is still
+            // letterboxed (the hint card only applies to apps on the "app landscape" list; other apps do not count)
             val ctx = appContextRef
             if (ctx != null) {
-                LetterboxHintController.scheduleProbe(ctx, "应用启动", displayIdHint = targetDisplay)
+                LetterboxHintController.scheduleProbe(ctx, "app launch", displayIdHint = targetDisplay)
             }
         } else {
-            Log.w(TAG, "启动失败：${result.output.take(120)}")
+            Log.w(TAG, "launch failed: ${result.output.take(120)}")
         }
         return ok
     }
 
-    // ICU 汉字→拼音转写（Android 内置，无需第三方拼音库）。
-    // "Han-Latin" 输出带声调，追加 Latin-ASCII 去音调（gāo → gao）。
-    // Transliterator 非线程安全，统一加锁访问。
+    // ICU Han-character -> pinyin transliteration (built into Android, no third-party pinyin library needed).
+    // "Han-Latin" output carries tones; append Latin-ASCII to strip them (gao with tone -> gao).
+    // Transliterator is not thread-safe, so all access takes a lock.
     private val hanLatinLock = Any()
     private val hanLatin by lazy {
         android.icu.text.Transliterator
@@ -2164,16 +2608,18 @@ object VirtualLauncher {
             runCatching { hanLatin.transliterate(text) }.getOrDefault(text)
         }
 
-    /** 排序键：全名转拼音小写、仅保留字母数字（数字 < 字母，即 # 组自然在前）。 */
+    /**
+     * Sort key: full name to lowercase pinyin, keeping only letters and digits (digits < letters, so the # group naturally comes first).
+     */
     private fun pinyinKey(label: String): String = toLatin(label).lowercase().filter { it.isLetterOrDigit() }
 
-    /** 拼音排序键（设置页等外部列表按字母分组排序用）。 */
+    /** Pinyin sort key (used by external lists such as settings pages for letter-grouped sorting). */
     fun sortKeyOf(label: String): String = pinyinKey(label)
 
     @Volatile
     private var appsCache: List<AppEntry>? = null
 
-    /** 应用清单缓存（桌面与车机设置共享；安装/卸载广播时失效）。 */
+    /** App list cache (shared by the desktop and head-unit settings; invalidated on install/uninstall broadcasts). */
     private val appsScanLock = Any()
 
     fun cachedApps(context: Context): List<AppEntry> {
@@ -2185,12 +2631,13 @@ object VirtualLauncher {
     }
 
     /**
-     * 仅读取共享缓存，**绝不扫描**：设置页等必须在主线程取列表的界面用这个，
-     * 缓存未命中时自行异步扫描（cachedApps 的同步兜底会把整页应用扫描压上 UI 线程）。
+     * Reads only the shared cache and **never scans**: screens that must fetch the list on the main thread (settings pages etc.) use this,
+     * and on a cache miss they scan asynchronously themselves (the synchronous fallback of cachedApps would put a whole-page app scan on
+     * the UI thread).
      */
     fun peekCachedApps(): List<AppEntry>? = appsCache
 
-    /** 把外部线程扫描的结果纳入共享缓存（桌面扫描后设置页即可秒开）。 */
+    /** Feeds a result scanned by an external thread into the shared cache (so the settings page opens instantly after the desktop scan). */
     fun adoptAppsCache(apps: List<AppEntry>) {
         if (appsCache == null) appsCache = apps
     }
@@ -2202,23 +2649,23 @@ object VirtualLauncher {
     fun launchableApps(context: Context): List<AppEntry> = cachedApps(context)
 
     /**
-     * 扫描所有可启动应用（桌面网格与设置页共用）。
+     * Scans all launchable apps (shared by the desktop grid and the settings page).
      *
-     * 三处必须容错（2026-10-23 用户反馈「部分 app 没被扫描出来」后复查）：
-     *  1. **不再 `take(200)`**：旧实现把上限写在 `sortedBy` **之前**，取的是
-     *     `queryIntentActivities` 返回顺序的前 200 个——应用装得多时后面的直接丢失，
-     *     且丢哪些取决于系统返回顺序（看起来像「随机漏几个」）。现在全部保留。
-     *  2. **逐应用 try/catch**：`loadLabel`/`loadIcon` 对资源异常的 APK 会抛
-     *     `Resources.NotFoundException` 等；旧实现是 Sequence 链，一个坏应用就让
-     *     `toList()` 整体抛出 → 桌面**一个应用都不显示**。现在单个失败就跳过并计数。
-     *  3. **同包去重**：一个包可以有多个 launcher activity（实测 K40 上 83 个
-     *     activity 只对应 82 个包，com.android.contacts 有 4 个），旧实现会重复显示。
+     * Three places must be fault-tolerant (rechecked after the 2026-10-23 user report "some apps were not scanned"):
+     *  1. **No more `take(200)`**: the old implementation put the cap **before** `sortedBy`, taking the first 200 in the
+     *     order returned by `queryIntentActivities` - with many apps installed the later ones were simply lost,
+     *     and which ones depended on the system's return order (looking like "a few random misses"). All are kept now.
+     *  2. **try/catch per app**: `loadLabel`/`loadIcon` throw `Resources.NotFoundException` etc. for APKs with broken resources; the old
+     *     implementation was a Sequence chain, and one bad app made
+     *     `toList()` throw as a whole -> the desktop showed **no apps at all**. Now a single failure is skipped and counted.
+     *  3. **Same-package dedup**: one package can have several launcher activities (measured on K40: 83
+     *     activities map to only 82 packages, com.android.contacts has 4), and the old implementation displayed duplicates.
      *
-     * 仍然查不到的应用属于 Android 包可见性/多用户层面，不在本函数的控制范围：
-     *  - 工作资料（work profile）、应用分身/双开运行在别的 userId 下，
-     *    `queryIntentActivities` 只返回当前用户的；
-     *  - ROM 的「应用隐藏」功能会让应用对本进程不可见；
-     *  - 只有 LEANBACK/自定义 category 入口的应用不属于 LAUNCHER 语义。
+     * Apps that still cannot be found belong to Android package visibility / multi-user layers, outside this function's control:
+     *  - work profile, app clones / dual apps run under another userId,
+     *    and `queryIntentActivities` returns only the current user's;
+     *  - the ROM's "hide apps" feature makes apps invisible to this process;
+     *  - apps with only a LEANBACK / custom category entry do not fall under LAUNCHER semantics.
      */
     private fun scanLaunchableApps(context: Context): List<AppEntry> {
         val pm = context.packageManager
@@ -2230,27 +2677,28 @@ object VirtualLauncher {
             try {
                 pm.queryIntentActivities(intent, 0)
             } catch (error: Throwable) {
-                logSink?.invoke("LAUNCHER: 应用扫描失败 - ${error.message}（桌面将为空）")
+                logSink?.invoke("LAUNCHER: app scan failed - ${error.message} (the desktop will be empty)")
                 return emptyList()
             }
         var skipped = 0
         val infos = resolved.mapNotNull { it.activityInfo }
-        // 同包多入口去重（策略见 dedupeLauncherPackages，有单测）：保留每个包的首个入口
+        // Same-package multi-entry dedup (strategy in dedupeLauncherPackages, unit-tested): keep the first entry of each package
         val keepOrder = dedupeLauncherPackages(infos.map { it.packageName }, context.packageName)
         val firstInfoByPackage = LinkedHashMap<String, android.content.pm.ActivityInfo>(keepOrder.size)
         infos.forEach { info -> firstInfoByPackage.putIfAbsent(info.packageName, info) }
-        // 拼音键每应用只算一次（此前在比较器里逐对重复转写，150 应用 ≈ 上千次 ICU 调用）
+        // Pinyin key computed once per app (previously repeated transliteration per pair inside the comparator, 150 apps ~ thousands of
+        // ICU calls)
         val apps =
             keepOrder
                 .mapNotNull { firstInfoByPackage[it] }
                 .mapNotNull { info ->
-                    // 单个应用 loadLabel/loadIcon 抛异常不能拖垮整张列表
+                    // A single app's loadLabel/loadIcon throwing must not bring down the whole list
                     runCatching {
                         val label = info.loadLabel(pm).toString().ifBlank { info.packageName }
                         AppEntry(
                             component = ComponentName(info.packageName, info.name),
                             label = label,
-                            // 不缓存各 APK 的超大原始图标，避免上百个自适应图标挤爆内存。
+                            // Do not cache the oversized raw icon of each APK, to avoid hundreds of adaptive icons blowing up memory.
                             icon =
                                 android.graphics.drawable.BitmapDrawable(
                                     context.resources,
@@ -2262,17 +2710,17 @@ object VirtualLauncher {
                     }.getOrNull()
                 }
         if (skipped > 0 || resolved.size != apps.size) {
-            // 诊断留痕：用户反馈「少应用」时，凭这一行就能区分
-            // 「系统只给了这么多 / 同包多入口被合并」与「标签/图标加载失败被跳过」
+            // Diagnostic trace: when users report "missing apps", this single line is enough to tell
+            // "the system only returned this many / same-package entries were merged" from "label/icon loading failed and was skipped"
             logSink?.invoke(
-                "LAUNCHER: 应用扫描 系统返回 ${resolved.size} 个 activity → ${apps.size} 个应用" +
-                    if (skipped > 0) "（跳过 $skipped 个：标签/图标加载失败）" else "（同包多入口已合并）",
+                "LAUNCHER: app scan system returned ${resolved.size} activities -> ${apps.size} apps" +
+                    if (skipped > 0) " (skipped $skipped: label/icon load failed)" else " (same-package entries merged)",
             )
         }
         return apps.sortedBy { it.second }.map { it.first }
     }
 
-    /** 字母导航条分组键：数字→"#"，ASCII 字母→大写字母，汉字→拼音首字母。 */
+    /** Letter index group key: digit -> "#", ASCII letter -> uppercase letter, Han character -> pinyin initial. */
     fun indexLetterOf(label: String): String {
         val first = label.firstOrNull() ?: return "#"
         return when {
@@ -2285,7 +2733,7 @@ object VirtualLauncher {
         }
     }
 
-    // ---- Shizuku 自愈 ----
+    // ---- Shizuku self-healing ----
 
     @Volatile
     private var watchdogActive = false
@@ -2293,21 +2741,23 @@ object VirtualLauncher {
 
     val taskRegex = Regex("""Task\{[0-9a-f]+ #(\d+) type=standard A=\d+:(\S+)""")
 
-    /** 诊断日志出口（由 MainActivity 接到文件日志）。 */
+    /** Diagnostics log outlet (wired to the file log by MainActivity). */
     @Volatile
     var logSink: ((String) -> Unit)? = null
 
-    /** 应用上下文（Shizuku 自愈需要）。 */
+    /** Application context (needed by Shizuku self-healing). */
     @Volatile
     private var appContextRef: android.content.Context? = null
 
     /**
-     * Shizuku 触摸注入自愈：服务断开时尝试解冻并重绑（每 4s 一次；健康时
-     * service 非空直接跳过、零开销）。解决「必须强行停止 App 重开」问题。
+     * Shizuku touch-injection self-healing: when the service disconnects, try to unfreeze and rebind (once every 4s; when healthy
+     * the service is non-null and it is skipped at zero cost). Fixes the "must force-stop the app and reopen it" problem.
      *
-     * 注：原「任务看护」（应用逃逸到主屏后自动拉回）已于 2026-10-10 实机验证后移除：
-     * 受信虚拟屏下应用内跳转天然留在车机屏、手机侧打开自然跟随到手机、从车机 dock
-     * 重开又回到车机侧——不再需要任何拉回干预。
+     * Note: the former "task guard" (pulling an app back after it escaped to the main screen) was removed after real-device verification
+     * on 2026-10-10:
+     * under a trusted virtual display in-app jumps naturally stay on the head-unit display, opening on the phone side naturally follows to
+     * the phone,
+     * and reopening from the head-unit dock returns to the head-unit side - no pull-back intervention is needed any more.
      */
     private fun startShizukuHealer() {
         if (watchdogActive) return
@@ -2339,34 +2789,39 @@ object VirtualLauncher {
     }
 
     /**
-     * 让应用屏**忽略应用请求的方向**（保持虚拟屏创建时的横/竖形态）。
+     * Make the app display **ignore the orientation requested by apps** (keeping the landscape/portrait form the virtual display was
+     * created with).
      *
-     * 命令只接受 true/1/false/0 —— 传 `reset` 会报
-     * `Error: expecting true, 1, false, 0, but we get reset` 且**只写 stderr**，
-     * 而 `Shell.exec` 不读 stderr，于是静默无效（本方法的前身就是这么写的：
-     * 方向策略从未生效，头条把 AppHi 屏整块旋转成竖屏）。因此这里写完必须读回校验。
+     * The command accepts only true/1/false/0 - passing `reset` prints
+     * `Error: expecting true, 1, false, 0, but we get reset` and **writes only to stderr**,
+     * while `Shell.exec` does not read stderr, so it silently had no effect (this method's predecessor was written that way:
+     * the orientation policy never took effect, and Toutiao rotated the whole AppHi display to portrait). Hence read-back verification is
+     * required after writing.
      */
     private fun applyIgnoreOrientationRequest(vararg ids: Int) {
         val targets = ids.filter { it >= 0 }
         if (targets.isEmpty()) return
         val failed = targets.filter { id -> !setIgnoreOrientationRequest(id, true) }
         if (failed.isEmpty()) {
-            logSink?.invoke("LAUNCHER: 应用屏已忽略方向请求 ${targets.joinToString("/")}（防竖屏应用旋转虚拟屏）")
+            logSink?.invoke(
+                "LAUNCHER: app displays ignore orientation requests ${targets.joinToString("/")} (guards against rotation)",
+            )
         } else {
             logSink?.invoke(
-                "LAUNCHER: ⚠ 应用屏忽略方向请求失败 $failed（读回非 true）" +
-                    "——竖屏应用可能旋转虚拟屏，导致画面比例异常与触摸漂移",
+                "LAUNCHER: WARNING failed to make app displays ignore orientation requests $failed (read-back is not true)" +
+                    " - portrait apps may rotate the virtual display, causing a wrong picture ratio and touch drift",
             )
         }
     }
 
     /**
-     * 设置单个屏的忽略方向策略。
+     * Sets the ignore-orientation policy of a single display.
      *
-     * @param verify true 时读回校验（**仅用于会话建立路径**——那条路径本就在后台线程，
-     *   且策略不生效会导致整屏旋转、必须确认）。清理路径传 false，避免触发一连串
-     *   shell 往返（那是 ANR 根因，2026-10-18）。
-     * @return verify=false 时恒为 true（只表示命令已投递）
+     * @param verify when true, read back to verify (**only for the session-setup path** - that path is already on a background thread,
+     *  and a policy that does not take effect would rotate the whole display, so it must be confirmed). The cleanup path passes false, to
+     * avoid triggering a chain of
+     *   shell round trips (the root cause of the ANR, 2026-10-18).
+     * @return always true when verify=false (only means the command was posted)
      */
     private fun setIgnoreOrientationRequest(
         displayId: Int,
@@ -2392,13 +2847,13 @@ object VirtualLauncher {
 }
 
 /**
- * 应用扫描结果的**去重与过滤**（[VirtualLauncher.scanLaunchableApps] 的纯函数部分）。
+ * **Dedup and filtering** of app scan results (the pure-function part of [VirtualLauncher.scanLaunchableApps]).
  *
- * 抽出来是为了可单测：旧实现用 `take(200)` 且**写在排序之前**，应用多的机型上
- * 会按系统返回顺序砍掉尾部、表现为「偶尔漏几个 app」（2026-10-23 用户反馈）。
+ * Extracted for unit testing: the old implementation used `take(200)` **placed before sorting**, which on devices with many apps
+ * cut off the tail in the system's return order, seen as "a few apps occasionally missing" (user report 2026-10-23).
  *
- * @param candidates 系统 `queryIntentActivities` 的 packageName 序列（保持原顺序）
- * @param selfPackage 本应用包名（不出现在桌面）
+ * @param candidates packageName sequence from the system `queryIntentActivities` (original order kept)
+ * @param selfPackage this app's package name (does not appear on the desktop)
  */
 internal fun dedupeLauncherPackages(
     candidates: List<String>,

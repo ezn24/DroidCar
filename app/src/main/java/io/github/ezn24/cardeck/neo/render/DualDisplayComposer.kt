@@ -18,17 +18,19 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 仪表盘卡片边距（流像素）——地图 tile 与音乐卡共用的契约值，四方统一引用：
- * 本类 SPLIT 绘制矩形、VirtualLauncher 建屏 tile 尺寸、GridActivity 音乐卡布局、
- * TouchRouter tile 触摸命中域。此前 16 在四个文件各自定义/裸写、仅靠注释结盟，
- * 改一处即静默错位（触摸命中域/卡片布局/绘制矩形三者不一致，坏味道审查 P1 收敛）。
+ * Dashboard card margin (stream pixels): a contract value shared by the map tile and the music card, referenced by four parties:
+ * this class's SPLIT draw rectangle, the tile size VirtualLauncher uses to create displays, the GridActivity music-card layout, and
+ * the TouchRouter tile touch hit area. Previously 16 was defined/hard-coded separately in four files, aligned only by comments,
+ * so changing one place silently misaligned them (touch area / card layout / draw rectangle disagreed; converged in
+ * the code-smell review, P1).
  */
 val CARD_MARGIN_PX: Int get() = (16f * DashMetrics.scale).toInt().coerceAtLeast(4)
 
 /**
- * 仪表盘版式缩放（2026-11-17：此前所有流像素常量按 1920×720 写死，换分辨率后
- * 边距/中缝/圆角比例全变）。以**流画布短边 720px 为 1.0** 等比缩放——1920×720 车机
- * 下所有值与旧版完全一致。会话 attach 时由 VirtualLauncher 按画布设定；单测不设即 1.0。
+ * Dashboard layout scale (2026-11-17: all stream-pixel constants used to be hard-coded for 1920x720, so at other resolutions
+ * the margins/gap/corner proportions all changed). Scales proportionally with the **stream canvas short side 720px = 1.0**, so on a
+ * 1920x720 head unit every value equals the old one. Set by VirtualLauncher from the canvas at session attach; 1.0
+ * in unit tests when unset.
  */
 object DashMetrics {
     const val BASE_SHORT_SIDE = 720f
@@ -46,32 +48,36 @@ object DashMetrics {
 }
 
 /**
- * 仪表盘分屏中缝宽（流像素）——地图 tile 与音乐卡之间**视觉**缝隙，几何契约同
- * [CARD_MARGIN_PX]：tile 内容侧边缘 = 把手中心 − DASH_GAP_PX/2，音乐卡内容侧
- * 边缘 = 把手中心 + DASH_GAP_PX/2（VirtualLauncher.dashSplitGeom 统一推导）。
+ * Dashboard split gap width (stream pixels): the **visual** gap between the map tile and the music card, with the same geometry contract as
+ * [CARD_MARGIN_PX]: tile content-side edge = handle center - DASH_GAP_PX/2, music-card content-side
+ * edge = handle center + DASH_GAP_PX/2 (derived uniformly by VirtualLauncher.dashSplitGeom).
  */
 val DASH_GAP_PX: Float get() = 24f * DashMetrics.scale
 
 /**
- * 分屏把手**触达**宽（流像素）：把手 View 宽度与 TouchRouter 粘性路由域按此值，
- * 比 [DASH_GAP_PX] 宽——两侧各溢出 (TOUCH−GAP)/2 压在卡片上扩大触控目标
- * （音乐卡侧把手叠在其上层；地图侧溢出段被 tile 盖住不可见但可触摸——
- * 视觉与触摸分层，2026-10-22 用户反馈「中缝太宽」的解法）。
+ * Split handle **touch** width (stream pixels): the handle View width and the TouchRouter sticky-routing zone use this value,
+ * wider than [DASH_GAP_PX]: it overflows (TOUCH-GAP)/2 on each side onto the cards to enlarge the touch target
+ * (the music-card-side handle sits on top of it; the map-side overflow is covered by the tile, invisible but touchable:
+ * visuals and touch are layered; the fix for the 2026-10-22 user feedback "the gap is too wide").
  */
 val DASH_HANDLE_TOUCH_PX: Float get() = 60f * DashMetrics.scale
 
-/** 画面静止后保持 33ms 心跳的时长：让编码器码控把刚变化的画面补清，再降频。 */
+/**
+ * How long the 33ms heartbeat is kept after the picture goes still: lets the encoder rate control sharpen the just-
+ * changed picture before dropping the rate.
+ */
 internal const val SETTLE_HEARTBEAT_MS = 1_000L
 
-/** 长时间静止时的保底心跳（每秒 1 帧）。 */
+/** Floor heartbeat during long stillness (1 frame per second). */
 internal const val IDLE_HEARTBEAT_MS = 1_000L
 
 /**
- * 合成间隔：有新帧按目标帧率；静止 [SETTLE_HEARTBEAT_MS] 内 33ms；之后 [IDLE_HEARTBEAT_MS]。
+ * Compose interval: with a new frame the target frame rate; within [SETTLE_HEARTBEAT_MS] of stillness 33ms; afterwards [IDLE_HEARTBEAT_MS].
  *
- * 依据（2026-11-20 WinPlay 诊断对照真 iPhone）：iPhone 画面静止时**完全不送帧**
- * （10 秒窗口内 0~0.4fps、≈0Mbps），我们旧版恒 30fps 心跳 + 3s 周期 I 帧，静止仍有 1~2Mbps。
- * 不降到 0 是保留 2026-10-09「无帧→接收端冻结」的兜底。
+ * Basis (2026-11-20 WinPlay diagnostics against a real iPhone): when the picture is still an iPhone **sends no frames at all**
+ * (0~0.4fps in a 10-second window, ~0Mbps), while our old version used a constant 30fps heartbeat + 3s periodic
+ * I-frames and still produced 1~2Mbps at rest.
+ * It does not drop to 0 so as to keep the 2026-10-09 "no frames -> receiver freezes" safeguard.
  */
 internal fun composeIntervalMs(
     hasNew: Boolean,
@@ -85,31 +91,36 @@ internal fun composeIntervalMs(
     }
 
 /**
- * 双虚拟屏 GL 合成器：dock 屏 + 应用屏（原生 / 超采样两块，按活动切换）→ 拼接输出到编码器输入 Surface。
+ * Dual virtual-display GL compositor: dock display + app display (native / supersampled, switched by activity) ->
+ * stitched into the encoder input Surface.
  *
- * 三路 SurfaceTexture 作为各虚拟屏的输出；GL 线程轮询新帧标志，有新帧即重绘合成画面。
- * 应用区同一时刻只画两块应用屏中的**活动**一块（[requestActiveApp] 切换；超采样屏
- * 等其画出首帧再切换，避免闪黑）。两块应用屏的内容持续消费（纹理保持最新）。
- * 输入 Surface 在 EGL/纹理就绪后经 [onSurfacesReady] 交给调用方去 createVirtualDisplay。
+ * Three SurfaceTextures serve as the outputs of the virtual displays; the GL thread polls new-frame flags and
+ * redraws the composed picture on a new frame.
+ * The app area draws only the **active** one of the two app displays at any time (switched via [requestActiveApp]; the supersampled display
+ * waits for its first frame before the switch, avoiding a black flash). Both app displays keep being consumed (textures stay current).
+ * After EGL/textures are ready the input Surfaces are handed to the caller via [onSurfacesReady] to call createVirtualDisplay.
  */
 class DualDisplayComposer(
     private val output: Surface,
     private val outWidth: Int,
     private val outHeight: Int,
-    /** true：dock 是底部横条（竖屏车机）；false：dock 是左侧竖条（横屏车机）。 */
+    /** true: the dock is a bottom bar (portrait head unit); false: the dock is a left strip (landscape head unit). */
     private val dockAtBottom: Boolean = false,
-    /** 地图在上、媒体在下（竖屏车机 / 音乐条）；默认随 dock 位置（旧行为）。 */
+    /** Map on top, media below (portrait head unit / music strip); defaults to following the dock position (old behavior). */
     private val splitVertical: Boolean = dockAtBottom,
 ) {
-    /** 仪表盘↔桌面滑动进度（0=tile 原位，1=完全滑出左侧），由 GridActivity 随滑动驱动。 */
+    /**
+     * Dashboard <-> desktop slide progress (0 = tile in place, 1 = fully slid out to the left), driven by GridActivity
+     * during the slide.
+     */
     @Volatile
     var tileSlideFraction: Float = 0f
 
     /**
-     * 地图 tile 把手侧边缘覆盖值（流像素，顶部原点；横屏=tile 右缘 x、竖屏=tile
-     * 下缘 y）。>0 时替代 SPLIT 公式值——拖动分屏把手时由 VirtualLauncher 逐帧写入，
-     * **只改绘制矩形（纹理整幅拉伸），不动 buffer、不动虚拟屏**；松手 commit 才真实
-     * resize。≤0 = 用默认中线公式。语义与 [tileSlideFraction] 同类：连续视觉态。
+     * Override for the map tile's handle-side edge (stream pixels, origin top-left; landscape = tile right edge x, portrait = tile
+     * bottom edge y). When >0 it replaces the SPLIT formula value; VirtualLauncher writes it every frame while the split handle is dragged,
+     * **changing only the draw rectangle (the texture is stretched whole), not the buffer or the virtual display**; only the commit on
+     * release actually resizes. <=0 = use the default centerline formula. Semantics like [tileSlideFraction]: a continuous visual state.
      */
     @Volatile
     private var tileEdgeOverride = -1f
@@ -119,8 +130,8 @@ class DualDisplayComposer(
     }
 
     /**
-     * 目标帧率（30/60，合成出帧节奏上限；「显示」设置运行中实时切换）。
-     * 有新输入帧时按 1000/targetFps 节流；静止画面保底 30fps 心跳（编码器不能断粮）。
+     * Target frame rate (30/60, upper bound of the composition cadence; switched live from the "Display" settings).
+     * With a new input frame it is throttled to 1000/targetFps; static pictures keep a 30fps floor heartbeat (the encoder must not starve).
      */
     @Volatile
     var targetFps: Int = 30
@@ -129,9 +140,12 @@ class DualDisplayComposer(
         private const val TAG = "DualComposer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
 
+        /** Upper bound for one map-region read (about 1.2 MB of RGBA); arrows and lane rows are far smaller. */
+        private const val MAX_REGION_PIXELS = 300_000L
+
         private val TILE_CORNER_RADIUS: Float get() = 24f * DashMetrics.scale
 
-        /** 2D 纹理程序用的单位纹理矩阵（Bitmap 已按目标方向摆好顶点）。 */
+        /** Identity texture matrix for the 2D texture program (the Bitmap vertices are already laid out for the target orientation). */
         private val IDENTITY_ST =
             floatArrayOf(
                 1f,
@@ -156,23 +170,29 @@ class DualDisplayComposer(
     private val running = AtomicBoolean(false)
     private var glThread: Thread? = null
 
-    /** start() 的就绪闩：GL 交付输入 Surface 后放行（注意不能等合成循环退出） */
+    /**
+     * Readiness latch for start(): released after GL hands over the input Surfaces (note it must not wait for the
+     * composition loop to exit)
+     */
     @Volatile
     private var startLatch: CountDownLatch? = null
 
-    /** 是否创建了超采样应用屏（start 时根据传入尺寸确定）。 */
+    /** Whether a supersampled app display was created (decided at start() from the sizes passed in). */
     @Volatile
     private var hasHiInput = false
 
-    /** 是否创建了地图屏输入（start 时根据传入尺寸确定）。 */
+    /** Whether a map display input was created (decided at start() from the sizes passed in). */
     @Volatile
     private var hasMapInput = false
 
-    /** 当前应用区显示的是超采样屏（true）还是原生屏（false）。触摸路由以它为准。 */
+    /** Whether the app area currently shows the supersampled display (true) or the native one (false). Touch routing follows it. */
     @Volatile
     private var activeAppHi = false
 
-    /** 待切换的目标屏（true=超采样屏；null=无待切换）；切屏等目标出帧，避免闪黑/闪旧帧。 */
+    /**
+     * Target display awaiting a switch (true = supersampled; null = none pending); the switch waits for the target's
+     * frame, avoiding a black/stale flash.
+     */
     @Volatile
     private var pendingTargetHi: Boolean? = null
 
@@ -183,8 +203,9 @@ class DualDisplayComposer(
     private var pendingSince = 0L
 
     /**
-     * 叠加卡片（输出画面坐标，顶部原点）。由调用方在后台线程生成位图后设置；
-     * GL 线程负责上传纹理并绘制在最上层。触控命中用同一坐标，见 [OverlayCard.contains]。
+     * Overlay cards (output-frame coordinates, origin top-left). Set by the caller after generating the bitmap on a background thread;
+     * the GL thread uploads the texture and draws it on the top layer. Touch hit-testing uses the same coordinates,
+     * see [OverlayCard.contains].
      */
     @Volatile
     var overlayCard: OverlayCard? = null
@@ -194,7 +215,7 @@ class DualDisplayComposer(
             wake()
         }
 
-    /** 合成循环的唤醒信号：有输入新帧 / 叠加层变化 / 布局动画开始时立即叫醒。 */
+    /** Wake signal for the composition loop: woken at once on new input frames / overlay changes / start of a layout animation. */
     private val frameSignal = Object()
 
     private fun wake() {
@@ -204,20 +225,60 @@ class DualDisplayComposer(
     @Volatile
     private var overlayDirty = false
 
-    /** 待处理的截图请求（GL 线程下一次合成后读回并回调；回调在 GL 线程，调用方自行切线程）。 */
+    /**
+     * Pending screenshot request (read back after the GL thread's next composition and called back; the callback runs on
+     * the GL thread, the caller switches threads itself).
+     */
     @Volatile
     private var captureRequest: ((android.graphics.Bitmap?) -> Unit)? = null
 
     /**
-     * 截取合成后的整幅车机画面（与推流同一帧：dock + 桌面/应用 + 地图/媒体卡 + 叠加层）。
-     * 各虚拟屏单独 screencap 只能拿到碎片，完整画面只在这里存在。
+     * Captures the whole composed car picture (the same frame as the stream: dock + desktop/app + map/media cards + overlays).
+     * A screencap of each virtual display alone yields only fragments; the complete picture exists only here.
      */
     fun requestCapture(callback: (android.graphics.Bitmap?) -> Unit) {
         captureRequest = callback
         wake()
     }
 
-    /** glReadPixels 读回输出画面（GL 原点在左下，需上下翻转）。 */
+    /** A pending read of one rectangle of the map display's current frame, see [requestMapRegion]. */
+    private class RegionRequest(
+        val left: Int,
+        val top: Int,
+        val width: Int,
+        val height: Int,
+        val displayWidth: Int,
+        val displayHeight: Int,
+        val callback: (IntArray?) -> Unit,
+    )
+
+    private val regionRequests = java.util.concurrent.ConcurrentLinkedQueue<RegionRequest>()
+
+    /**
+     * Reads one rectangle (map display pixels, top-left origin) of the map display's current frame as ARGB, row by
+     * row from the top. Used by the navigation reader for maneuver arrows and lane rows: the map frame is already a
+     * texture here, so only that small block is rendered off-screen and read back, instead of the system taking a
+     * whole-display screenshot (3.5 MB copy, about 1 per second at most). [callback] runs on the GL thread.
+     * Returns false when there is no map input to read.
+     */
+    fun requestMapRegion(
+        left: Int,
+        top: Int,
+        width: Int,
+        height: Int,
+        displayWidth: Int,
+        displayHeight: Int,
+        callback: (IntArray?) -> Unit,
+    ): Boolean {
+        if (!running.get() || mapInput?.hasContent != true) return false
+        if (width <= 0 || height <= 0 || displayWidth <= 0 || displayHeight <= 0) return false
+        if (width.toLong() * height > MAX_REGION_PIXELS) return false
+        regionRequests += RegionRequest(left, top, width, height, displayWidth, displayHeight, callback)
+        wake()
+        return true
+    }
+
+    /** glReadPixels read-back of the output picture (GL origin is bottom-left, so flip vertically). */
     private fun readOutputFrame(): android.graphics.Bitmap? =
         runCatching {
             val buffer =
@@ -235,13 +296,13 @@ class DualDisplayComposer(
         }.getOrNull()
 
     /**
-     * 桌面页点（输出画面坐标）。页点本在应用屏的 GridActivity 里，但仪表盘的地图/媒体
-     * 卡在 GL 层画在应用屏之上，会把页点盖掉；所以由 GridActivity 把页点快照成位图交给
-     * 这里，在卡片之后、dock 之前补画。是否绘制由 [VirtualLauncher.pageDotsOnTop] 决定，
-     * 与 GridActivity 隐藏自身页点用同一判据（避免两份重叠或都不显示）。
+     * Desktop page dots (output-frame coordinates). They live in GridActivity on the app display, but the dashboard's map/media
+     * cards are drawn by GL above the app display and would cover them; so GridActivity snapshots the page dots into a bitmap and hands it
+     * over here, to be drawn after the cards and before the dock. Whether to draw is decided by [VirtualLauncher.pageDotsOnTop],
+     * the same criterion GridActivity uses to hide its own page dots (avoids two overlapping copies or none at all).
      */
 
-    /** 页点显隐淡入淡出（与 GridActivity 本地页点同节奏：入 120ms / 出 220ms）。 */
+    /** Page-dot show/hide fade (same pace as GridActivity's local page dots: in 120ms / out 220ms). */
     @Volatile
     private var pageDotsTarget = 0f
 
@@ -278,7 +339,7 @@ class DualDisplayComposer(
             wake()
         }
 
-    /** 辅助小白点（[io.github.ezn24.cardeck.neo.launcher.AssistiveDot]）：独立纹理槽，画在最上层。 */
+    /** Assistive dot ([io.github.ezn24.cardeck.neo.launcher.AssistiveDot]): its own texture slot, drawn on the top layer. */
     @Volatile
     var assistiveDot: OverlayCard? = null
         set(value) {
@@ -287,7 +348,7 @@ class DualDisplayComposer(
             wake()
         }
 
-    /** 一张叠加位图的 GL 纹理与已上传的卡片引用（仅 GL 线程访问）。 */
+    /** GL texture of one overlay bitmap and the card reference already uploaded (GL thread only). */
     private class OverlaySlot {
         var texture = 0
         var uploaded: OverlayCard? = null
@@ -297,15 +358,15 @@ class DualDisplayComposer(
     private val pageDotsSlot = OverlaySlot()
     private val assistiveDotSlot = OverlaySlot()
 
-    /** 超采样输入（GL 线程创建；start() 返回后对其他线程安全可读）。 */
+    /** Supersampled input (created on the GL thread; safe to read from other threads after start() returns). */
     @Volatile
     private var appHi: Input? = null
 
-    /** 原生应用屏输入（同上；requestActiveApp 读其帧号作切换判据）。 */
+    /** Native app-display input (same; requestActiveApp reads its frame counter as the switch criterion). */
     @Volatile
     private var appInput: Input? = null
 
-    /** 地图屏输入（GL 线程创建）。 */
+    /** Map-display input (created on the GL thread). */
     @Volatile
     private var mapInput: Input? = null
 
@@ -321,9 +382,10 @@ class DualDisplayComposer(
     fun hasMediaContent(): Boolean = mediaInput?.hasContent == true
 
     /**
-     * 语音助理层：Gemini 浮层所在的透明虚拟屏（CarPlayAssist，与应用区同尺寸）。
-     * 可见时按预乘 alpha 叠在地图/媒体卡之上、dock 之下——浮层本身半透明，
-     * 卡片照常可见，光效与对话条铺满整个应用区。
+     * Voice-assistant layer: the transparent virtual display hosting the Gemini overlay (CarPlayAssist, same size as the app area).
+     * When visible it is composited with premultiplied alpha above the map/media cards and below the dock; the
+     * overlay itself is semi-transparent,
+     * so the cards stay visible, and the glow and dialogue bar fill the whole app area.
      */
     @Volatile
     var assistLayerVisible = false
@@ -331,10 +393,10 @@ class DualDisplayComposer(
     @Volatile
     private var assistLayerInput: Input? = null
 
-    /** 交给助理虚拟屏的 Surface（合成器未就绪时 null）。 */
+    /** Surface handed to the assistant virtual display (null when the compositor is not ready). */
     fun assistLayerSurface(): Surface? = assistLayerInput?.surface
 
-    /** 语音助理浮层开在应用屏上：暂停绘制地图/媒体卡（它们会盖住原生浮层）。 */
+    /** Voice-assistant overlay is open on the app display: pause drawing the map/media cards (they would cover the native overlay). */
     @Volatile
     var tilesSuppressed = false
 
@@ -389,10 +451,12 @@ class DualDisplayComposer(
     }
 
     /**
-     * 切换应用区显示：false=原生屏，true=超采样屏。目标屏出帧后生效（期间继续显示原
-     * 画面）：等待「目标屏帧号前进」（新应用首帧）；600ms 兜底（目标屏有历史内容时
-     * 平滑切换）；2s 超时兜底（目标屏迟迟不出帧也要把画面切过去）。
-     * 无超采样屏（未创建）时恒为原生屏。
+     * Switches the app area display: false = native display, true = supersampled display. Takes effect after the
+     * target display produces a frame
+     * (the old picture stays meanwhile): waits for "the target's frame counter to advance" (the new app's first frame); a 600ms fallback
+     * (smooth switch when the target already has history content); a 2s timeout fallback (switch even if the target
+     * is very slow to produce frames).
+     * With no supersampled display (not created) it is always the native display.
      */
     fun requestActiveApp(hi: Boolean) {
         val target = if (!hasHiInput) false else hi
@@ -402,19 +466,20 @@ class DualDisplayComposer(
         pendingSince = android.os.SystemClock.uptimeMillis()
         pendingTargetHi = target
         if (!hasHiInput) {
-            // 无超采样屏：无需等待，直接生效
+            // No supersampled display: no need to wait, takes effect directly
             activeAppHi = false
             pendingTargetHi = null
         }
     }
 
-    /** 应用区当前活动屏（触摸路由/坐标换算以此为准）。 */
+    /** The app area's currently active display (touch routing/coordinate conversion follow it). */
     fun isActiveAppHi(): Boolean = activeAppHi
 
     /**
-     * 地图屏（tile）布局状态：HIDDEN=普通桌面；SPLIT=采样画面中央带区映射到
-     * 应用区左半（地图中心≈车辆位置，裁剪语义正确）；FULLSCREEN=整个应用区。
-     * 地图屏始终以全屏尺寸创建（应用窗口稳定，任务不迁移），分/全屏只是采样几何。
+     * Map display (tile) layout state: HIDDEN = normal desktop; SPLIT = the central band of the sampled picture is mapped to
+     * the left half of the app area (map center ~ vehicle position, correct crop semantics); FULLSCREEN = the whole app area.
+     * The map display is always created at full-screen size (stable app window, no task migration); split/fullscreen
+     * only change the sampling geometry.
      */
     enum class TileLayout { HIDDEN, SPLIT, FULLSCREEN }
 
@@ -431,7 +496,7 @@ class DualDisplayComposer(
             false
         }
 
-    /** 切换地图 tile 布局。 */
+    /** Switches the map tile layout. */
     fun setTileLayout(layout: TileLayout) {
         if (tileLayout == layout) return
         val now = android.os.SystemClock.uptimeMillis()
@@ -467,9 +532,10 @@ class DualDisplayComposer(
     }
 
     /**
-     * 地图屏动态 resize 后同步消费端 buffer 尺寸。VirtualDisplay.resize 只改系统侧
-     * 显示设备——SurfaceTexture 的 defaultBufferSize 仍锁在创建时的旧尺寸，投影会把
-     * 新尺寸内容画进旧 buffer 的左上区域（tile 内容偏居左、宽度只剩比例值、右侧全黑）。
+     * Syncs the consumer buffer size after a dynamic map-display resize. VirtualDisplay.resize only changes the system-side
+     * display device; the SurfaceTexture's defaultBufferSize stays locked at the old creation size, so the projection draws
+     * the new-size content into the top-left of the old buffer (tile content shifted left, only a fraction of the
+     * width, black on the right).
      */
     fun resizeMapInput(
         width: Int,
@@ -492,11 +558,14 @@ class DualDisplayComposer(
         @Volatile
         var hasNewFrame = false
 
-        /** 是否已产出过至少一帧（未产出的输入不参与绘制，避免空纹理） */
+        /**
+         * Whether at least one frame has been produced (inputs that have produced none take no part in drawing, avoiding
+         * empty textures)
+         */
         @Volatile
         var hasContent = false
 
-        /** 累计产出帧数（活动屏切换的「已出帧」判据）。 */
+        /** Cumulative frames produced (the "has produced a frame" criterion for switching the active display). */
         @Volatile
         var frameCount = 0
     }
@@ -563,7 +632,7 @@ class DualDisplayComposer(
             "eglMakeCurrent",
         )
 
-        // ---- 输入纹理 ----
+        // ---- Input textures ----
         fun newInput(
             width: Int,
             height: Int,
@@ -589,7 +658,7 @@ class DualDisplayComposer(
         val map = if (hasMapInput) newInput(mapW, mapH).also { mapInput = it } else null
         val media = newInput(mediaW, mediaH).also { mediaInput = it }
         val assistLayer = newInput(appW, appH).also { assistLayerInput = it }
-        // ---- 着色器 ----
+        // ---- Shaders ----
         val program = buildProgram(oes = true)
         GLES20.glUseProgram(program)
         val aPos = GLES20.glGetAttribLocation(program, "aPos")
@@ -604,7 +673,90 @@ class DualDisplayComposer(
 
         val matrix = FloatArray(16)
 
-        // ---- 叠加卡片着色器（普通 2D 纹理；Bitmap 由 Canvas 预排版）----
+        // ---- Map-region read-back (navigation reader): an off-screen RGBA target sized to the request ----
+        var regionFbo = 0
+        var regionTexture = 0
+        var regionWidth = 0
+        var regionHeight = 0
+        var regionBuffer: java.nio.ByteBuffer? = null
+
+        fun readMapRegion(
+            input: Input,
+            request: RegionRequest,
+        ): IntArray? {
+            val w = request.width
+            val h = request.height
+            if (regionFbo == 0) {
+                val ids = IntArray(1)
+                GLES20.glGenFramebuffers(1, ids, 0)
+                regionFbo = ids[0]
+                GLES20.glGenTextures(1, ids, 0)
+                regionTexture = ids[0]
+            }
+            if (w != regionWidth || h != regionHeight) {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, regionTexture)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, regionFbo)
+                GLES20.glFramebufferTexture2D(
+                    GLES20.GL_FRAMEBUFFER,
+                    GLES20.GL_COLOR_ATTACHMENT0,
+                    GLES20.GL_TEXTURE_2D,
+                    regionTexture,
+                    0,
+                )
+                regionWidth = w
+                regionHeight = h
+                regionBuffer =
+                    java.nio.ByteBuffer
+                        .allocateDirect(w * h * 4)
+                        .order(java.nio.ByteOrder.nativeOrder())
+            }
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, regionFbo)
+            try {
+                if (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) != GLES20.GL_FRAMEBUFFER_COMPLETE) return null
+                GLES20.glViewport(0, 0, w, h)
+                GLES20.glDisable(GLES20.GL_BLEND)
+                GLES20.glUseProgram(program)
+                GLES20.glUniform1i(uClipEnabled, 0)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                input.surfaceTexture.getTransformMatrix(matrix)
+                GLES20.glUniformMatrix4fv(uSTMatrix, 1, false, matrix, 0)
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, input.texture)
+                // The whole texture is the whole display; v = 0 is the picture's bottom (see drawInputUV)
+                val u0 = request.left.toFloat() / request.displayWidth
+                val u1 = (request.left + w).toFloat() / request.displayWidth
+                val vTop = 1f - request.top.toFloat() / request.displayHeight
+                val vBottom = 1f - (request.top + h).toFloat() / request.displayHeight
+                val positions = vertexBuffer(posBuf, -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
+                val coords = vertexBuffer(texBuf, u0, vBottom, u1, vBottom, u0, vTop, u1, vTop)
+                GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, positions)
+                GLES20.glEnableVertexAttribArray(aPos)
+                GLES20.glVertexAttribPointer(aTexCoord, 2, GLES20.GL_FLOAT, false, 0, coords)
+                GLES20.glEnableVertexAttribArray(aTexCoord)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                val buffer = regionBuffer ?: return null
+                buffer.rewind()
+                GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer)
+                buffer.rewind()
+                val bytes = ByteArray(w * h * 4)
+                buffer.get(bytes)
+                // GL rows run bottom-up; callers want top-down ARGB
+                return IntArray(w * h) { i ->
+                    val x = i % w
+                    val y = i / w
+                    val o = ((h - 1 - y) * w + x) * 4
+                    (0xFF shl 24) or ((bytes[o].toInt() and 255) shl 16) or ((bytes[o + 1].toInt() and 255) shl 8) or
+                        (bytes[o + 2].toInt() and 255)
+                }
+            } finally {
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+                GLES20.glViewport(0, 0, outWidth, outHeight)
+            }
+        }
+
+        // ---- Overlay-card shaders (plain 2D textures; the Bitmap is pre-laid-out by Canvas) ----
         val overlayProgram = buildProgram(oes = false)
         val oaPos = GLES20.glGetAttribLocation(overlayProgram, "aPos")
         val oaTexCoord = GLES20.glGetAttribLocation(overlayProgram, "aTexCoord")
@@ -612,7 +764,7 @@ class DualDisplayComposer(
         val ouTexture = GLES20.glGetUniformLocation(overlayProgram, "uTexture")
         val ouAlpha = GLES20.glGetUniformLocation(overlayProgram, "uAlpha")
 
-        /** 上传/更新叠加卡片纹理（仅 GL 线程；卡片引用变化时才重新上传）。 */
+        /** Uploads/updates an overlay-card texture (GL thread only; re-uploads only when the card reference changes). */
         fun syncOverlayTexture(
             slot: OverlaySlot,
             source: OverlayCard?,
@@ -643,8 +795,9 @@ class DualDisplayComposer(
         }
 
         /**
-         * 绘制叠加卡片。[left]/[top]/[right]/[bottom] 是输出画面坐标（顶部原点），
-         * 这里转成 GL 底部原点；Bitmap 首行在顶部，故纹理 v 轴与顶点方向相反。
+         * Draws an overlay card. [left]/[top]/[right]/[bottom] are output-frame coordinates (origin top-left),
+         * converted here to GL bottom-left origin; the Bitmap's first row is at the top, so the texture v axis is
+         * opposite to the vertex direction.
          */
         fun drawOverlay(
             slot: OverlaySlot,
@@ -680,7 +833,7 @@ class DualDisplayComposer(
                     px(right),
                     py(yTop),
                 )
-            // Bitmap v=0 在顶部：底部顶点取 v=1，顶部顶点取 v=0
+            // Bitmap v=0 is at the top: bottom vertices take v=1, top vertices take v=0
             val coords = vertexBuffer(texBuf, 0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f)
             GLES20.glVertexAttribPointer(oaPos, 2, GLES20.GL_FLOAT, false, 0, positions)
             GLES20.glEnableVertexAttribArray(oaPos)
@@ -688,12 +841,12 @@ class DualDisplayComposer(
             GLES20.glEnableVertexAttribArray(oaTexCoord)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GLES20.glDisable(GLES20.GL_BLEND)
-            // 恢复主着色器状态（后续帧继续用 OES 程序）
+            // Restore the main shader state (later frames keep using the OES program)
             GLES20.glUseProgram(program)
             GLES20.glUniform1i(uTexture, 0)
         }
 
-        /** [u0]/[u1]：横向纹理采样区间（地图分屏时采样缓冲中央带区用）。 */
+        /** [u0]/[u1]: horizontal texture sampling range (used to sample the central band of the buffer in map split mode). */
         fun drawInputUV(
             input: Input,
             x0: Float,
@@ -707,10 +860,11 @@ class DualDisplayComposer(
             input.surfaceTexture.getTransformMatrix(matrix)
             GLES20.glUniformMatrix4fv(uSTMatrix, 1, false, matrix, 0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, input.texture)
-            // 圆角裁剪：shader 用 gl_FragCoord（GL 底部原点）与 uClipRect 比较，
-            // 故直接传顶点坐标（本函数 y 即 GL 坐标）。此前翻转成屏幕坐标——
-            // 全高 tile（横屏）对称区间恰好重合未暴露；竖屏半高 tile 顶点区域
-            // 与裁剪区域完全不相交，整块被 discard（「地图卡不可见」根因）
+            // Rounded-corner clipping: the shader compares gl_FragCoord (GL bottom-left origin) with uClipRect,
+            // so vertex coordinates are passed directly (here y is already GL coordinates). It used to be flipped to screen coordinates;
+            // for a full-height tile (landscape) the symmetric range happened to coincide and went unnoticed; for a
+            // portrait half-height tile the vertex area
+            // and clip area did not intersect at all and the whole tile was discarded (root cause of "map card invisible")
             if (cornerRadius > 0f) {
                 GLES20.glUniform1i(uClipEnabled, 1)
                 GLES20.glUniform4f(uClipRect, x0, y0, x1, y1)
@@ -719,7 +873,7 @@ class DualDisplayComposer(
                 GLES20.glUniform1i(uClipEnabled, 0)
             }
 
-            // 像素坐标 → 裁剪坐标（GL 左下原点；纹理翻转由 uSTMatrix 处理，勿重复翻转）
+            // Pixel coordinates -> clip coordinates (GL bottom-left origin; the texture flip is handled by uSTMatrix, do not flip again)
             fun px(v: Float) = v / outWidth * 2f - 1f
 
             fun py(v: Float) = v / outHeight * 2f - 1f
@@ -752,7 +906,8 @@ class DualDisplayComposer(
         ) = drawInputUV(input, x0, x1, y0, y1, u0 = 0f, u1 = 1f)
 
         fun composeFrame(fullRedraw: Boolean) {
-            // 待切应用屏：目标屏出帧即切（帧号前进 / 已有内容 600ms 兜底 / 2s 超时兜底）
+            // Pending app-display switch: switch once the target produces a frame (frame counter advances / 600ms
+            // fallback if it has content / 2s timeout fallback)
             pendingTargetHi?.let { targetHi ->
                 val nowMs = android.os.SystemClock.uptimeMillis()
                 val target = if (targetHi) hi else app
@@ -768,8 +923,9 @@ class DualDisplayComposer(
             GLES20.glViewport(0, 0, outWidth, outHeight)
             GLES20.glClearColor(0.04f, 0.07f, 0.09f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            // 只对有新帧的输入 updateTexImage；已有内容的输入沿用旧纹理（画面持久）。
-            // 两块应用屏都持续消费（非活动屏也保持最新，切换时不闪旧帧）。
+            // Call updateTexImage only for inputs with a new frame; inputs that already have content keep the old
+            // texture (picture persists).
+            // Both app displays are consumed continuously (the inactive one also stays current, so no stale-frame flash when switching).
             if (dock.hasNewFrame) {
                 dock.hasNewFrame = false
                 dock.hasContent = true
@@ -899,7 +1055,7 @@ class DualDisplayComposer(
                     cornerRadius = TILE_CORNER_RADIUS,
                 )
             }
-            // 页点压在地图/媒体卡之上（固定不随 tile 滑动，与 GridActivity 原位置一致）
+            // Page dots sit above the map/media cards (fixed, not sliding with the tile, same position as GridActivity's original)
             val dotsAlpha = pageDotsAlphaAt(nowMs)
             if (VirtualLauncher.pageDotsOnTop() && dotsAlpha > 0.001f) {
                 syncOverlayTexture(pageDotsSlot, pageDots)?.let { dots ->
@@ -907,7 +1063,7 @@ class DualDisplayComposer(
                 }
             }
             if (assistLayerVisible && assistLayer.hasContent) {
-                // 预乘 alpha 混合：虚拟屏空白处 alpha=0，只有浮层像素压在卡片上
+                // Premultiplied-alpha blending: blank areas of the virtual display have alpha=0, so only overlay pixels sit on the cards
                 GLES20.glEnable(GLES20.GL_BLEND)
                 GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
                 drawInput(assistLayer, appLeft, outWidth.toFloat(), appBottom, outHeight.toFloat())
@@ -920,17 +1076,24 @@ class DualDisplayComposer(
                     drawInput(dock, 0f, dockW.toFloat(), 0f, outHeight.toFloat())
                 }
             }
-            // 叠加卡片最后绘制（最上层，不受分支影响）：卡片坐标为输出画面坐标（顶部原点）
+            // Overlay cards are drawn last (top layer, unaffected by branches): card coordinates are output-frame
+            // coordinates (origin top-left)
             syncOverlayTexture(overlaySlot, overlayCard)?.let { card ->
                 drawOverlay(overlaySlot, card.left, card.top, card.right, card.bottom, card.alpha)
             }
             syncOverlayTexture(assistiveDotSlot, assistiveDot)?.let { dot ->
                 drawOverlay(assistiveDotSlot, dot.left, dot.top, dot.right, dot.bottom, dot.alpha)
             }
-            // 截图请求：读回刚合成好的这一帧（即推给车机的画面），在交换缓冲之前读
+            // Screenshot request: read back the frame just composed (the picture pushed to the car), before the buffer swap
             captureRequest?.let { callback ->
                 captureRequest = null
                 callback(readOutputFrame())
+            }
+            // Map-region reads for the navigation reader (off-screen; the composed picture is untouched)
+            while (true) {
+                val request = regionRequests.poll() ?: break
+                val pixels = map?.takeIf { it.hasContent }?.let { runCatching { readMapRegion(it, request) }.getOrNull() }
+                runCatching { request.callback(pixels) }
             }
             if (fullRedraw ||
                 overlayDirty ||
@@ -944,7 +1107,7 @@ class DualDisplayComposer(
             overlayDirty = false
         }
 
-        // 初始黑帧（只清屏，不碰空纹理）+ 交付输入 Surface + 放行 start()
+        // Initial black frame (clear only, do not touch empty textures) + hand over the input Surfaces + release start()
         GLES20.glViewport(0, 0, outWidth, outHeight)
         GLES20.glClearColor(0.04f, 0.07f, 0.09f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -952,22 +1115,25 @@ class DualDisplayComposer(
         onSurfacesReady?.invoke(dock.surface, app.surface, hi?.surface, map?.surface, media.surface)
         startLatch?.countDown()
 
-        // ---- 合成循环 ----
-        // 节奏见 [composeIntervalMs]：有新帧按目标帧率；静止后先保持 33ms 心跳 1 秒（编码器
-        // 码控把刚变化的画面补清），再降到每秒 1 帧。旧版静止时一直 33ms 心跳——2026-10-09
-        // 曾因完全没有帧导致接收端「画面冻结」（触摸送到了但没有帧反映）；1 秒保底心跳仍保留
-        // 这层兜底，漏判的画面变化最多晚 1 秒出现。
+        // ---- Composition loop ----
+        // Cadence see [composeIntervalMs]: with a new frame the target frame rate; after stillness first keep a 33ms
+        // heartbeat for 1 second (so the encoder
+        // rate control sharpens the just-changed picture), then drop to 1 frame per second. The old version kept a
+        // 33ms heartbeat at rest, and on 2026-10-09
+        // having no frames at all made the receiver "freeze the picture" (touch arrived but no frame reflected it);
+        // the 1-second floor heartbeat
+        // keeps that safeguard, so a missed picture change appears at most 1 second late.
         try {
             var lastComposeAt = System.currentTimeMillis()
             var lastChangeAt = lastComposeAt
             while (running.get()) {
-                // 快车道（60fps 节流）只由「会被画进输出画面」的输入驱动：
-                // dock + 当前活动应用屏（app/hi 二选一）+ tile 可见时的地图屏。
-                // 高德走地图屏、竖屏应用走超采样屏——只看 dock/原生屏会漏掉它们，
-                // 60fps 档被 33ms 静止心跳锁死在 30fps。
-                // 非活动屏的新帧不在判定内（画面不含它）：帧仍会在 composeFrame 里
-                // 持续消费（纹理保持最新，避免 SurfaceTexture 队列积压卡住后台应用），
-                // 但不为看不见的内容白烧 GPU/带宽。
+                // The fast lane (60fps throttle) is driven only by inputs that "will be drawn into the output picture":
+                // dock + the current active app display (app/hi, one of the two) + the map display while the tile is visible.
+                // Amap runs on the map display and portrait apps on the supersampled display; looking only at dock/native would miss them,
+                // and the 60fps tier would be locked at 30fps by the 33ms still heartbeat.
+                // New frames of inactive displays are not counted (the picture does not contain them): frames are still
+                // consumed in composeFrame (textures stay current, avoiding a backlogged SurfaceTexture queue that stalls background apps),
+                // but no GPU/bandwidth is burned on content nobody sees.
                 val hasNew =
                     isLayoutTransitioning() ||
                         pageDotsFading(android.os.SystemClock.uptimeMillis()) ||
@@ -985,8 +1151,8 @@ class DualDisplayComposer(
                     composeFrame(fullRedraw = false)
                     lastComposeAt = now
                 } else {
-                    // 等到下一个出帧点，或被新帧/状态变化提前叫醒（此前固定 sleep(8) 轮询：
-                    // 静止时每秒白醒 ~125 次，且新帧最多晚 8ms 才被发现）
+                    // Wait for the next frame point, or be woken early by a new frame/state change (the old fixed sleep(8) polling:
+                    // woke ~125 times per second at rest for nothing, and a new frame was noticed up to 8ms late)
                     synchronized(frameSignal) { frameSignal.wait(waitMs) }
                 }
             }
@@ -1031,7 +1197,7 @@ class DualDisplayComposer(
         }
     }
 
-    /** [oes]=true：外部纹理采样（SurfaceTexture）；false：普通 2D 采样（壁纸位图）。 */
+    /** [oes] = true: external texture sampling (SurfaceTexture); false: plain 2D sampling (wallpaper bitmap). */
     private fun buildProgram(oes: Boolean): Int {
         val fragment =
             if (oes) {
@@ -1060,7 +1226,7 @@ class DualDisplayComposer(
                 uniform sampler2D uTexture;
                 uniform float uAlpha;
                 void main() {
-                    // 位图是预乘 alpha：四个通道同乘才是正确的整体淡化
+                    // The bitmap is premultiplied alpha: all four channels must be scaled together for a correct overall fade
                     gl_FragColor = texture2D(uTexture, vTexCoord) * uAlpha;
                 }
                 """.trimIndent()
@@ -1084,11 +1250,12 @@ class DualDisplayComposer(
             val shader = GLES20.glCreateShader(type)
             GLES20.glShaderSource(shader, source)
             GLES20.glCompileShader(shader)
-            // 编译失败必须留痕并抛出：静默继续 = 黑屏无从排查（EGL 有 checkEgl，GLSL 这层此前漏了）
+            // A compile failure must leave a trace and throw: silently continuing = black screen with no way to
+            // diagnose (EGL has checkEgl, the GLSL layer was missed before)
             val status = IntArray(1)
             GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0)
             if (status[0] == 0) {
-                Log.e(TAG, "GLSL 编译失败（type=$type）：${GLES20.glGetShaderInfoLog(shader)}")
+                Log.e(TAG, "GLSL compile failed (type=$type): ${GLES20.glGetShaderInfoLog(shader)}")
                 GLES20.glDeleteShader(shader)
                 throw IllegalStateException("GLSL compile type=$type")
             }
@@ -1103,9 +1270,9 @@ class DualDisplayComposer(
     }
 
     /**
-     * 每次绘制的顶点/纹理坐标写进这两块**复用**的直接缓冲（仅 GL 线程用）。此前每次
-     * draw 都 allocateDirect 两块新缓冲——每帧 6~10 次直接内存分配，靠 Cleaner 回收，
-     * 是合成线程上的稳定 GC 压力。glDrawArrays 调用时即读取客户端数组，复用安全。
+     * Each draw's vertex/texture coordinates are written into these two **reused** direct buffers (GL thread only). Previously every
+     * draw called allocateDirect for two new buffers: 6~10 direct-memory allocations per frame, reclaimed by the Cleaner,
+     * a steady GC pressure on the composition thread. glDrawArrays reads the client array at call time, so reuse is safe.
      */
     private val posBuf = floatBuffer(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
     private val texBuf = floatBuffer(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
@@ -1135,7 +1302,7 @@ class DualDisplayComposer(
         stage: String,
     ) {
         if (!ok) {
-            Log.e(TAG, "EGL 失败：$stage")
+            Log.e(TAG, "EGL failed: $stage")
             throw IllegalStateException("EGL $stage")
         }
     }

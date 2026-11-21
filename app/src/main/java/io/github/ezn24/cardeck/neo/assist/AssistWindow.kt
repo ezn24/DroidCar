@@ -1,6 +1,6 @@
 package io.github.ezn24.cardeck.neo.assist
 
-/** 语音助理窗口（Gemini / Google 助理浮层）的状态快照。 */
+/** Snapshot of the voice assistant window (Gemini / Google Assistant overlay) state. */
 data class AssistWindow(
     val visible: Boolean,
     val displayId: Int = 0,
@@ -14,15 +14,15 @@ data class AssistWindow(
 }
 
 /**
- * 解析 `dumpsys window windows`，找语音助理窗口。两种形态都要认（2026-11-15 S24 Ultra 实测）：
+ * Parses `dumpsys window windows` to find the voice assistant window. Both forms must be recognized (2026-11-15 S24 Ultra tests):
  *
- *  - 经典 VoiceInteractionSession：`ty=VOICE_INTERACTION`（排除 `_STARTING` 启动占位窗）；
- *  - **Gemini 浮层是普通 Activity**：`googlequicksearchbox/...assistant...FloatyActivity`，
- *    `ty=BASE_APPLICATION`。它开在**当前焦点屏**——用户刚在车机上点过，就直接开在
- *    车机虚拟屏上（原生光效 + 「問 Gemini」条），只是被仪表盘卡片盖住。
+ * - Classic VoiceInteractionSession: `ty=VOICE_INTERACTION` (excluding the `_STARTING` placeholder window);
+ * - **The Gemini overlay is a plain Activity**: `googlequicksearchbox/...assistant...FloatyActivity`,
+ * `ty=BASE_APPLICATION`. It opens on the **currently focused display**: if the user just tapped on the car, it opens straight on
+ * the car virtual display (native glow + "Ask Gemini" bar), only covered by the dashboard cards.
  *
- * 可见性：12+ 有 `isVisible=true` / `isOnScreen=true`；更早靠 `mHasSurface=true` 加
- * `mViewVisibility=0x0`。返回第一个**可见**的助理窗口；都不可见时返回 visible=false。
+ * Visibility: 12+ has `isVisible=true` / `isOnScreen=true`; earlier versions rely on `mHasSurface=true` plus
+ * `mViewVisibility=0x0`. Returns the first **visible** assistant window; visible=false if none is visible.
  */
 fun parseAssistWindow(dump: String): AssistWindow {
     var fallback: AssistWindow? = null
@@ -61,7 +61,7 @@ fun parseAssistWindow(dump: String): AssistWindow {
 
 private val VOICE_TYPE = Regex("\\bty=VOICE_INTERACTION(?!_STARTING)\\b")
 
-/** 已知的助理浮层 Activity（窗口标题 = 包名/类名）。 */
+/** Known assistant overlay Activities (window title = package/class). */
 private val ASSIST_ACTIVITY =
     Regex(
         "com\\.google\\.android\\.googlequicksearchbox/\\S*(?:assistant|Floaty)" +

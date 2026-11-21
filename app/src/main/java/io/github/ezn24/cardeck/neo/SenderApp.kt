@@ -12,15 +12,15 @@ import io.github.ezn24.cardeck.neo.ui.UiStrings
 import io.github.ezn24.cardeck.neo.util.DebugFileLog
 
 /**
- * 进程级安全网：任一线程的未捕获异常只记录并让该线程结束，
- * 不再走默认处理器杀死整个进程（连接会话横跨多个后台线程，
- * 一个套接字异常不应毁掉全部链路与前台服务）。
- * 各线程自身仍应尽量用 try/catch 精确处理；这里是最后防线。
+ * Process-wide safety net: an uncaught exception on any thread is only logged and ends that thread,
+ * instead of the default handler killing the whole process (a connection session spans several background
+ * threads; one socket exception must not take down every link and the foreground service).
+ * Each thread should still handle its own errors with a precise try/catch; this is the last line of defense.
  */
 open class SenderApp : Application() {
     override fun onCreate() {
         super.onCreate()
-        // 车机壁纸跟随手机深浅色：配置变更时通知车机侧重载
+        // Head-unit wallpaper follows the phone's light/dark mode: notify the head-unit side to reload on config change
         io.github.ezn24.cardeck.neo.ui.WallpaperStore
             .attach(this)
         // Retry pending restoration after process restart or Shizuku reconnect.
@@ -31,16 +31,16 @@ open class SenderApp : Application() {
             .initialize(this)
         io.github.ezn24.cardeck.neo.ui.AppLanguage
             .restore(this)
-        // 会话日志起点标记：日志文件跨进程累积（2MB 上限），导出默认只取本次启动
-        // 之后的部分。必须在这里写（Application 是进程最早入口），晚于任何业务日志
-        // 都会让它被算进「历史」。
+        // Session log start marker: the log file accumulates across processes (2MB cap) and export defaults to the part after
+        // this launch. It must be written here (Application is the earliest process entry point); anything later than
+        // the first business log would count it as "history".
         DebugFileLog.markSessionStart(this)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            Log.e(TAG, "未捕获异常（线程 ${thread.name}，已吞掉保进程）", throwable)
-            // 不调用 previous：默认处理器会 killProcess 杀死整个 app
+            Log.e(TAG, "Uncaught exception (thread ${thread.name}, swallowed to keep the process alive)", throwable)
+            // Do not call previous: the default handler would killProcess the whole app
         }
-        // 应用安装/卸载/更新 → 桌面与车机设置的共享应用清单缓存失效
+        // App install/uninstall/update: invalidate the shared app-list cache used by the desktop and head-unit settings
         val packageFilter =
             IntentFilter().apply {
                 addAction(Intent.ACTION_PACKAGE_ADDED)
@@ -56,7 +56,7 @@ open class SenderApp : Application() {
                 ) {
                     VirtualLauncher
                         .invalidateAppsCache()
-                    Log.i(TAG, "应用清单缓存已失效（包变化）")
+                    Log.i(TAG, "App list cache invalidated (package change)")
                 }
             },
             packageFilter,

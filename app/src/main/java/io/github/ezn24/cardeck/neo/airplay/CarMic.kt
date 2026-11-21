@@ -1,15 +1,15 @@
 package io.github.ezn24.cardeck.neo.airplay
 
 /**
- * 车机麦克风上行的纯逻辑部分（格式协商 + 封包解密），协议事实见 docs/MIC-RESEARCH.md。
+ * Pure-logic part of the head-unit microphone uplink (format negotiation + packet decryption); protocol facts are in docs/MIC-RESEARCH.md.
  *
- * 方向：车机 → 手机。手机在 SETUP 里声明 `input=true` + 自己监听的 `dataPort`，
- * 车机把麦克风 RTP 包送到「手机地址:dataPort」。封包与我们送车机的媒体音频同构：
- * 12B 明文 RTP 头 + ChaCha20-Poly1305 密文（AAD = 头[4..12]）+ 16B tag + 8B 小端 nonce 计数；
- * 密钥 = HKDF-SHA512(共享密钥, "DataStream-Salt<connId>", "DataStream-Input-Encryption-Key")。
+ * Direction: head unit -> phone. In SETUP the phone declares `input=true` plus the `dataPort` it listens on,
+ * and the head unit sends microphone RTP packets to "phone address:dataPort". The packets are isomorphic to the media audio we send to the head unit:
+ * 12B plaintext RTP header + ChaCha20-Poly1305 ciphertext (AAD = header[4..12]) + 16B tag + 8B little-endian nonce counter;
+ * key = HKDF-SHA512(shared secret, "DataStream-Salt<connId>", "DataStream-Input-Encryption-Key").
  */
 object CarMic {
-    /** 协商结果：AirPlay audioFormat 位 + 采样率（单声道 16-bit PCM）。 */
+    /** Negotiation result: AirPlay audioFormat bit + sample rate (mono 16-bit PCM). */
     data class Format(
         val bit: Long,
         val sampleRate: Int,
@@ -17,9 +17,9 @@ object CarMic {
     )
 
     /**
-     * 只取 PCM 单声道（Opus 需要另接解码器，先不做）。按 Siri 常用 24k 优先：
-     * AirPlay 格式位 bit2/4/6/8/14 = 8k/16k/24k/32k/48k 单声道 16-bit
-     * （DiPlay PR #898 实测 0x154 = 8/16/24/32k 单声道、0x4000 = 48k 单声道）。
+     * PCM mono only (Opus would need a separate decoder; not done yet). 24k is preferred, as commonly used by Siri:
+     * AirPlay format bits bit2/4/6/8/14 = 8k/16k/24k/32k/48k mono 16-bit
+     * (DiPlay PR #898 measured 0x154 = 8/16/24/32k mono, 0x4000 = 48k mono).
      */
     private val PCM_MONO_PREFERENCE =
         listOf(
@@ -35,9 +35,9 @@ object CarMic {
     private const val DEFAULT_LATENCY_MS = 50
 
     /**
-     * 从车机 /info 选麦克风格式：type=100、audioType=speechRecognition 的档位里，
-     * **上下行共用同一格式**（车机按一个 audioFormat 建双向流），所以取输入 ∩ 输出；
-     * 车机没声明输出位时只看输入。返回 null = 车机没有可用的语音输入通路。
+     * Picks the microphone format from the head unit's /info: among entries with type=100 and audioType=speechRecognition,
+     * **the uplink and downlink share one format** (the head unit builds the bidirectional stream from a single audioFormat), so take input intersected with output;
+     * if the head unit declares no output bits, only input counts. Returns null = no usable speech input path.
      */
     fun pickFormat(info: Map<*, *>?): Format? {
         val formats = (info?.get("audioFormats") as? List<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
@@ -70,8 +70,8 @@ object CarMic {
     private const val NONCE_LEN = 8
 
     /**
-     * 解开一个车机麦克风包，返回 **s16le** PCM（车机线上是大端，Android 要小端）；
-     * 长度不对或认证失败返回 null（丢包即可，不影响后续包）。
+     * Decrypts one head-unit microphone packet and returns **s16le** PCM (the head unit is big-endian on the wire; Android wants little-endian);
+     * returns null on bad length or failed authentication (just drop the packet; later packets are unaffected).
      */
     fun openPacket(
         key: ByteArray,
@@ -79,9 +79,9 @@ object CarMic {
         length: Int = packet.size,
     ): ByteArray? {
         if (length < RTP_HEADER_LEN + TAG_LEN + NONCE_LEN) return null
-        // 不校验 RTP 版本位：WinPlay 的麦克风包 `h.writeUInt16BE(m.seq)` 漏了 offset，序号写在字节 0..1、
-        // 盖掉了 0x80 与 PT（2026-11-17 抓包：首包头 12 字节全 0）。真伪靠 Poly1305 认证把关，
-        // AAD 只覆盖字节 4..12，不受影响。
+        // The RTP version bit is not checked: WinPlay's microphone packets use `h.writeUInt16BE(m.seq)` without an offset, so the sequence number is written at bytes 0..1,
+        // overwriting 0x80 and the PT (2026-11-17 capture: the first packet's 12 header bytes were all zero). Authenticity is guaranteed by Poly1305,
+        // and the AAD only covers bytes 4..12, so it is unaffected.
         val nonce = ByteArray(12)
         System.arraycopy(packet, length - NONCE_LEN, nonce, 4, NONCE_LEN)
         val aad = packet.copyOfRange(4, RTP_HEADER_LEN)
@@ -103,9 +103,9 @@ object CarMic {
     }
 
     /**
-     * 下行封包（手机 → 车机），布局同媒体音频：[RTP 头][密文+tag][8B 小端 nonce]，PT = 100、SSRC = 0。
-     * 麦克风流期间要持续发（哪怕是静音）：WinPlay 等接收端**收到这条流的第一个下行包才开麦**
-     * （其 cpStack：「the mic runs while audio flows」），只收不发 = 车机永远不回传麦克风。
+     * Downlink packet (phone -> head unit), same layout as media audio: [RTP header][ciphertext+tag][8B little-endian nonce], PT = 100, SSRC = 0.
+     * Must keep sending while the mic stream is up (even silence): receivers such as WinPlay **only open the mic after receiving the first downlink packet of this stream**
+     * (their cpStack: "the mic runs while audio flows"); receive-only means the head unit never sends the microphone back.
      */
     fun sealDownlink(
         key: ByteArray,
@@ -133,7 +133,7 @@ object CarMic {
         return wire
     }
 
-    /** 下行（手机 → 车机）密钥：标签 Output。 */
+    /** Downlink (phone -> head unit) key: label Output. */
     fun outputKey(
         sharedSecret: ByteArray,
         connectionId: Long,
@@ -144,7 +144,7 @@ object CarMic {
             "DataStream-Output-Encryption-Key".toByteArray(Charsets.US_ASCII),
         )
 
-    /** 麦克风流的解密密钥（与下行同一推导，标签换成 Input）。 */
+    /** Decryption key for the microphone stream (same derivation as downlink, with label Input). */
     fun inputKey(
         sharedSecret: ByteArray,
         connectionId: Long,

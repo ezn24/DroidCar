@@ -16,7 +16,7 @@ class DashboardRightSwipeTest {
         assertFalse(dashboardLeftSwipe(-100f, 200f, 72f))
     }
 
-    /** 按下不注入；向左拖过 slop 认领，之后逐段给出位移，0,0 抬手不参与位移。 */
+    /** Press does not inject; dragging left past the slop claims it, after which displacement is given segment by segment, a 0,0 lift does not contribute displacement. */
     @Test fun leftDragFollowsFingerAndIgnoresZeroRelease() {
         val swipe = DashboardSwipeGesture()
         assertEquals(Result.CONSUME, swipe.update(0, true, 1400f, 240f, true, slop))
@@ -31,7 +31,7 @@ class DashboardRightSwipeTest {
         assertFalse(swipe.tracks(0))
     }
 
-    /** 防误触：没怎么动就抬起 = 点按，由调用方在起点补发 down+up。 */
+    /** Anti-mistouch: lifting with barely any movement = tap, the caller replays down+up at the start point. */
     @Test fun shortPressBecomesTapAtStartPoint() {
         val swipe = DashboardSwipeGesture()
         assertEquals(Result.CONSUME, swipe.update(0, true, 900f, 200f, true, slop))
@@ -42,7 +42,7 @@ class DashboardRightSwipeTest {
         assertFalse(swipe.tracks(0))
     }
 
-    /** 竖滑与右滑交还给应用（列表滚动、进度条向右拖不受影响）。 */
+    /** Vertical swipes and right swipes are handed back to the app (list scrolling and rightward progress-bar drags are unaffected). */
     @Test fun verticalAndRightMovesAreReleasedToTheApp() {
         val swipe = DashboardSwipeGesture()
         swipe.update(0, true, 900f, 200f, true, slop)

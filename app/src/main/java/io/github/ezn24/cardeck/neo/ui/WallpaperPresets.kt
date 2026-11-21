@@ -9,18 +9,19 @@ import android.graphics.Shader
 import io.github.ezn24.cardeck.neo.R
 
 /**
- * 内置壁纸图案：代码绘制的渐变（对角底色 + 两团柔光），不占 APK 体积、任意分辨率清晰。
- * 深色组给夜间/深色模式，浅色组给日间；用户可在任一槽位选任意图案。
+ * Built-in wallpaper patterns: gradients drawn in code (diagonal base color + two soft glows); no APK size cost and sharp at any
+ * resolution.
+ * The dark group serves night/dark mode and the light group serves daytime; users can pick any pattern for either slot.
  */
 object WallpaperPresets {
     data class Preset(
         val id: String,
         val nameRes: Int,
         val light: Boolean,
-        /** 对角渐变两端。 */
+        /** Both ends of the diagonal gradient. */
         val from: Int,
         val to: Int,
-        /** 左上 / 右下两团柔光（带透明度）。 */
+        /** Two soft glows at top-left / bottom-right (with alpha). */
         val glowA: Int,
         val glowB: Int,
     )
@@ -54,7 +55,7 @@ object WallpaperPresets {
 
     fun find(id: String): Preset? = ALL.firstOrNull { it.id == id }
 
-    /** 按 16:9 渲染（长边 = [maxSize]，上限 1920；调用方 aspectFill 裁切）。 */
+    /** Rendered at 16:9 (long side = [maxSize], capped at 1920; the caller crops with aspectFill). */
     fun render(
         id: String,
         maxSize: Int,

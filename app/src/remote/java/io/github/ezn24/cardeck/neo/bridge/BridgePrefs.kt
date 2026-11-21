@@ -3,7 +3,7 @@ package io.github.ezn24.cardeck.neo.bridge
 import android.content.Context
 import java.util.UUID
 
-/** 远程调试桥偏好（独立文件 "bridge"，不与业务设置混放）。 */
+/** Remote debug bridge preferences (separate file "bridge", not mixed with business settings). */
 object BridgePrefs {
     private const val FILE = "bridge"
     private const val KEY_URL = "serverUrl"
@@ -30,7 +30,7 @@ object BridgePrefs {
             .apply()
     }
 
-    /** 本机稳定设备标识（首次生成后持久化；服务端按它区分设备）。 */
+    /** Stable device identifier of this phone (persisted after first generation; the server tells devices apart by it). */
     fun deviceId(context: Context): String {
         val p = prefs(context)
         p.getString(KEY_DEVICE_ID, null)?.let { return it }
@@ -39,7 +39,7 @@ object BridgePrefs {
         return id
     }
 
-    /** App 启动即自动连桥（用户在设置页点过「连接」后置位；「断开」清零）。 */
+    /** Auto-connect the bridge when the app starts (set after the user taps "Connect" on the settings page; cleared by "Disconnect"). */
     fun autoConnect(context: Context): Boolean = prefs(context).getBoolean(KEY_AUTO, false)
 
     fun setAutoConnect(
@@ -49,10 +49,10 @@ object BridgePrefs {
         prefs(context).edit().putBoolean(KEY_AUTO, value).apply()
     }
 
-    /** 重装前置位：新版本首次启动时弹「继续进入调试模式？」。 */
+    /** Set before reinstall: on the first launch of the new version, ask "Continue into debug mode?". */
     fun resumePending(context: Context): Boolean = prefs(context).getBoolean(KEY_RESUME, false)
 
-    // ---- 差分基线 sha 缓存（版本键控：装新包后自然失效重算）----
+    // ---- Delta baseline sha cache (keyed by version: naturally invalidated and recomputed after installing a new package) ----
 
     fun baseApkSha(
         context: Context,

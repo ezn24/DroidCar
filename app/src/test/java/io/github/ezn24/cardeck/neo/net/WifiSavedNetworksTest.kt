@@ -4,11 +4,11 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * `cmd wifi list-networks` 解析：只用于「询问用户是否清除」，
- * 判错会误删用户网络，因此边界必须锁死。
+ * `cmd wifi list-networks` parsing: used only for "asking the user whether to clear",
+ * a misjudgment would wrongly delete the user's network, so the boundaries must be locked down.
  */
 class WifiSavedNetworksTest {
-    /** 真机（荣耀 Android 17）实测输出：空格对齐、无制表符。 */
+    /** Measured output from a real device (Honor Android 17): space-aligned, no tabs. */
     private val realOutput =
         """
         Network Id      SSID                         Security type
@@ -27,20 +27,20 @@ class WifiSavedNetworksTest {
 
     @Test
     fun dedupesMultipleSecurityRowsForSameNetwork() {
-        // 同一 netId 可能有 wpa2/wpa3 两行
+        // The same netId may have two rows, wpa2/wpa3
         assertEquals(listOf(0), WifiSavedNetworks.idsOf(realOutput, "2-502"))
     }
 
     @Test
     fun handlesSsidWithSpacesAndNonAscii() {
-        // SSID 中间的空白被重组为单个空格
+        // Whitespace inside the SSID is reassembled into a single space
         assertEquals(listOf(2), WifiSavedNetworks.idsOf(realOutput, "Weimob_office"))
         assertEquals(listOf(1), WifiSavedNetworks.idsOf(realOutput, "李志华的iPhone"))
     }
 
     @Test
     fun noMatchReturnsEmpty() {
-        // 不存在的 SSID 绝不能被近似匹配到（否则就是误删别人的网络）
+        // A nonexistent SSID must never be matched approximately (otherwise another person's network gets wrongly deleted)
         assertEquals(emptyList<Int>(), WifiSavedNetworks.idsOf(realOutput, "Audi_MMI_9310"))
         assertEquals(emptyList<Int>(), WifiSavedNetworks.idsOf(realOutput, "Redmi K40"))
         assertEquals(emptyList<Int>(), WifiSavedNetworks.idsOf(realOutput, ""))

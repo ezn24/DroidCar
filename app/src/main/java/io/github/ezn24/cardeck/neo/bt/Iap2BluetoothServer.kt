@@ -16,35 +16,38 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 手机侧（iPhone 角色）的 iAP2 蓝牙 RFCOMM 监听。
+ * iAP2 Bluetooth RFCOMM listener on the phone side (iPhone role).
  *
- * 真实无线 CarPlay 里 iPhone 配对后监听这个 SDP 服务等待车机回连；
- * 测试台上 DiPlay/xcertplay 会扫描已配对的 PHONE_SMART 设备并主动连入。
+ * In real wireless CarPlay the iPhone listens on this SDP service after pairing and waits for the head unit to connect back;
+ * on the test bench DiPlay/xcertplay scan paired PHONE_SMART devices and connect in actively.
  *
- * 连入后：链路协商（marker/同步/ACK）→ 完整发送端 bring-up（Phase 1），
- * 成功时回调 [onEndpoint] 交出热点 SSID/密码与 AirPlay 端点。
+ * After connection: link negotiation (marker/sync/ACK) -> full sender bring-up (Phase 1),
+ * and on success calls [onEndpoint] to hand over the hotspot SSID/password and the AirPlay endpoint.
  */
 class Iap2BluetoothServer(
     private val context: Context,
     private val log: (String) -> Unit,
     private val onEndpoint: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
-    /** 0x5703 一到即触发（绑 WiFi + 广播 _carplay-ctrl），真车 0x4301 的前置条件。 */
+    /** Fires as soon as 0x5703 arrives (bind WiFi + advertise _carplay-ctrl), the precondition of 0x4301 on real cars. */
     private val onWifiCredentials: (Iap2SenderSession.WifiConfiguration) -> Unit = {},
-    /** Phase 1 之后车机补发 0x4301（CarPlay 窗口晚开）时交给主控热更新端点。 */
+    /** Hands the endpoint to the controller for a hot update when the head unit sends 0x4301 after Phase 1 (CarPlay window opened late). */
     private val onEndpointUpdate: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
-    /** 发送端链路断开（保活泵退出）时通知主控（释放僵尸轮次，见 SessionController.onSenderLinkClosed）。 */
+    /**
+     * Notifies the controller when the sender link drops (keep-alive pump exited) so it releases the zombie round (see
+     * SessionController.onSenderLinkClosed).
+     */
     private val onLinkClosed: () -> Unit = {},
-    /** 本进程已知的车机热点 SSID（本轮无新凭据时沿用，避免每轮 8 秒拆链）。 */
+    /** Car hotspot SSID known to this process (reused when this round has no new credentials, avoids an 8s link teardown every round). */
     private val knownCarSsid: () -> String? = { null },
-    /** 0x1D01 画像判定的链路代际（Phase 1 完成后回调，AirPlay 阶段分派用）。 */
+    /** Link generation decided from the 0x1D01 profile (called back after Phase 1, used for dispatch in the AirPlay stage). */
     private val onGeneration: (ReceiverProfile.LinkGeneration) -> Unit = {},
-    /** 目标车机（动态读取：拒绝非目标设备的连入；null=来者不拒）。 */
+    /** Target head unit (read dynamically: connections from non-target devices are rejected; null = accept anyone). */
     private val targetProvider: () -> TargetDevicePrefs.Target? = { null },
 ) {
     companion object {
         /**
-         * iPhone 的 iAP2 服务 UUID（Oligo Security 公布；与 xcertplay
-         * CarPlayController.IAP2_IPHONE_UUID 一致）。配件端是 …decacaff。
+         * iPhone iAP2 service UUID (published by Oligo Security; same as xcertplay
+         * CarPlayController.IAP2_IPHONE_UUID). The accessory side is ...decacaff.
          */
         val IPHONE_IAP2_UUID: UUID = UUID.fromString("00000000-deca-fade-deca-deafdecacafe")
         private const val SDP_NAME = "iAP2"
@@ -92,7 +95,7 @@ class Iap2BluetoothServer(
             serverSocket.getAndSet(null)?.let { runCatching { it.close() } }
         }
         if (!hasPermission()) {
-            log("BT: 缺少 BLUETOOTH_CONNECT 权限")
+            log("BT: missing BLUETOOTH_CONNECT permission")
             return false
         }
         val adapter =
@@ -102,7 +105,7 @@ class Iap2BluetoothServer(
                 null
             }
         if (adapter == null || !adapter.isEnabled) {
-            log("BT: 蓝牙不可用或未开启")
+            log("BT: Bluetooth unavailable or off")
             return false
         }
         return try {
@@ -110,9 +113,9 @@ class Iap2BluetoothServer(
             serverSocket.set(listener)
             publishedName = wantedName
             running = true
-            // toString() 形如「ServerSocket: Type: TYPE_RFCOMM Channel: N」：参考实现在
-            // smartBox 上用的是信道 4，信道号对排查「车机不回连」有用。
-            log("BT: 监听 $wantedName（$listener），等待接收端回连…")
+            // toString() looks like "ServerSocket: Type: TYPE_RFCOMM Channel: N": the reference implementation
+            // uses channel 4 on the smartBox, and the channel number helps when debugging "head unit does not reconnect".
+            log("BT: listening on $wantedName ($listener), waiting for the receiver to connect back...")
             if (AdapterMode.active) {
                 // Android picks the RFCOMM channel. Forcing 4 (the reference's) would need an unbound
                 // BluetoothServerSocket(type, auth, encrypt, ParcelUuid) or BluetoothSocket.bindListen(),
@@ -129,7 +132,7 @@ class Iap2BluetoothServer(
             }
             true
         } catch (error: IOException) {
-            log("BT: 监听失败 - ${error.message}")
+            log("BT: listen failed - ${error.message}")
             false
         }
     }
@@ -141,7 +144,7 @@ class Iap2BluetoothServer(
                 try {
                     listener.accept() ?: break
                 } catch (error: IOException) {
-                    if (running && serverSocket.get() === listener) log("BT: accept 失败 - ${error.message}")
+                    if (running && serverSocket.get() === listener) log("BT: accept failed - ${error.message}")
                     break
                 }
             val peerName =
@@ -150,8 +153,10 @@ class Iap2BluetoothServer(
                 } catch (_: SecurityException) {
                     null
                 } ?: "unknown"
-            // 指定了目标车机时拒绝其它设备的连入（用户配对了多台车机：非目标车机
-            // 的控制器也会周期回连，放行会抢占/误建会话）。地址比对，大小写不敏感。
+            // When a target head unit is set, reject connections from other devices (the user paired several head units: the
+            // controllers of non-target
+            // head units also reconnect periodically, and letting them in would hijack/wrongly build a session). Address comparison
+            // is case-insensitive.
             val target = targetProvider()
             val peerAddress =
                 try {
@@ -161,8 +166,8 @@ class Iap2BluetoothServer(
                 }
             if (target != null && !TargetDevicePrefs.matches(target, peerAddress)) {
                 log(
-                    "BT: 忽略非目标设备连入 name=$peerName addr=${peerAddress ?: "?"}" +
-                        "（当前目标：「${target.name}」）",
+                    "BT: ignoring connection from non-target device name=$peerName addr=${peerAddress ?: "?"}" +
+                        " (current target: \"${target.name}\")",
                 )
                 runCatching { socket.close() }
                 continue
@@ -179,13 +184,13 @@ class Iap2BluetoothServer(
                 continue
             }
             if (!AdapterMode.active && AdapterMode.looksLikeAdapter(peerName)) {
-                // 目标设为「自动」时 startConnection 判不出转接盒：盒子主动撥入即可确认，
-                // 必须在建 Iap2LinkChannel 之前置位（链路应答方模式在构造时读取）。
-                // 盒子没有 …caff 服务，出站客户端的 SDP 闸门本来就不会动它的配置文件。
+                // When the target is "auto", startConnection cannot recognize an adapter box: a box dialing in confirms it,
+                // and the flag must be set before Iap2LinkChannel is built (responder mode of the link is read at construction).
+                // The box has no ...caff service, so the SDP gate of the outbound client never touches its profiles anyway.
                 AdapterMode.active = true
-                log("ADAPTER: 撥入设备 \"$peerName\" 是无线 CarPlay 转接盒——本次连接改用转接盒流程")
+                log("ADAPTER: incoming device \"$peerName\" is a wireless CarPlay adapter box; this connection uses the adapter flow")
             }
-            log("BT: 接收端已连入 name=$peerName，开始 iAP2 发送端会话")
+            log("BT: receiver connected name=$peerName, starting iAP2 sender session")
             Thread({ runSession(socket) }, "iap2-bt-session").apply {
                 isDaemon = true
                 start()
@@ -223,21 +228,24 @@ class Iap2BluetoothServer(
                 onGeneration,
             )
         } catch (error: IOException) {
-            log("SESSION 失败: ${error.message}")
+            log("SESSION failed: ${error.message}")
         } finally {
             activeChannel = null
             BtSessionGate.inboundActive = false
             channel.close()
-            log("SESSION 结束，等待接收端重连（BT 监听仍在运行）")
+            log("SESSION ended, waiting for the receiver to reconnect (BT listener still running)")
         }
     }
 
-    /** 主动结束当前 BT 控制会话（不影响监听）。用于 AirPlay 配对前复现控制通道退役状态。 */
+    /**
+     * Actively end the current BT control session (the listener is unaffected). Used to reproduce the retired control channel state
+     * before AirPlay pairing.
+     */
     fun detachCurrentSession() {
         activeChannel?.let { channel ->
             activeChannel = null
             channel.close()
-            log("BT: 已主动断开当前控制会话（模拟 tunnel handoff 后的退役）")
+            log("BT: current control session actively disconnected (simulating retirement after tunnel handoff)")
         }
         closeHeldSockets()
     }
@@ -281,6 +289,6 @@ class Iap2BluetoothServer(
         closeHeldSockets()
         serverSocket.getAndSet(null)?.let { runCatching { it.close() } }
         publishedName = null
-        log("BT: 监听已停止")
+        log("BT: listener stopped")
     }
 }
