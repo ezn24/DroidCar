@@ -221,8 +221,14 @@ object CarRouteGuidance {
         }, delayMs.coerceAtLeast(DEBOUNCE_MS), TimeUnit.MILLISECONDS)
     }
 
+    /** Latest reading for the alternate (cluster) screen's turn card; null = no route. */
+    @Volatile
+    var onInfo: ((NavInfo?) -> Unit)? = null
+
     private fun push() {
-        val navigating = current() != null
+        val info = current()
+        runCatching { onInfo?.invoke(info) }
+        val navigating = info != null
         for (subscription in subscriptions.values) {
             for (frame in framesFor(subscription, force = false)) {
                 if (!subscription.send(frame)) {

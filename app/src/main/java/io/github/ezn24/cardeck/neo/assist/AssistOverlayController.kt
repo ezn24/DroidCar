@@ -160,6 +160,20 @@ object AssistOverlayController {
             .removeTask(task.toString())
     }
 
+    /** Until this uptime the window check keeps going without a mic (see [onAssistRequested]). */
+    @Volatile
+    private var requestedUntil = 0L
+
+    /**
+     * The car's voice key opened the assistant. The newer Gemini overlay opens as a text bar without using the mic, so the
+     * mic watch never fired and the bar stayed on the desktop display under the dashboard map (2026-11-23 ChairPlay).
+     */
+    fun onAssistRequested() {
+        val h = handler ?: return
+        requestedUntil = android.os.SystemClock.uptimeMillis() + REQUEST_WATCH_MS
+        h.post { beginPolling() }
+    }
+
     private fun beginPolling() {
         if (polling) return
         polling = true
@@ -192,7 +206,8 @@ object AssistOverlayController {
         }
         misses++
         if (carDisplayId >= 0 && misses >= HIDE_AFTER_MISSES) leaveCarDisplay()
-        if (carDisplayId < 0 && !micActive && misses >= HIDE_AFTER_MISSES) {
+        val awaitingRequested = android.os.SystemClock.uptimeMillis() < requestedUntil
+        if (carDisplayId < 0 && !micActive && !awaitingRequested && misses >= HIDE_AFTER_MISSES) {
             polling = false
             log("ASSIST: assistant window gone, stop checking")
         } else if (carDisplayId < 0 && misses >= GIVE_UP_MISSES) {
@@ -255,6 +270,9 @@ object AssistOverlayController {
     }
 
     private const val MIC_WATCH_MS = 400L
+
+    /** How long a voice-key request waits for the assistant window to appear. */
+    private const val REQUEST_WATCH_MS = 6_000L
     private const val POLL_INTERVAL_MS = 450L
 
     /** Consecutive misses before the window counts as closed (dumpsys occasionally drops a block, one read is not trustworthy). */

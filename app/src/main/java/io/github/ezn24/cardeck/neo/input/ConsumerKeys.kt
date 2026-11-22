@@ -75,7 +75,10 @@ object ConsumerKeys {
      *
      * Supports short item encoding (bSize: 0 -> 0 bytes / 1 -> 1 / 2 -> 2 / 3 -> 4).
      */
-    fun parseDescriptor(descriptor: ByteArray): KeyMap? {
+    fun parseDescriptor(
+        descriptor: ByteArray,
+        pageWanted: Int = USAGE_PAGE_CONSUMER,
+    ): KeyMap? {
         var index = 0
         var page = 0
         var inConsumerApp = false
@@ -106,7 +109,7 @@ object ConsumerKeys {
                 // Global item: Usage Page
                 type == 1 && tag == 0x0 -> {
                     page = value
-                    if (value == USAGE_PAGE_CONSUMER) sawConsumerPage = true
+                    if (value == pageWanted) sawConsumerPage = true
                 }
                 // Global item: Logical Maximum (bounds the index range in Array reports)
                 type == 1 && tag == 0x2 -> Unit
@@ -117,7 +120,7 @@ object ConsumerKeys {
                 // Main item: Collection / EndCollection
                 type == 0 && tag == 0xA -> {
                     // Start collecting only when the current page is Consumer and we are in a top-level Application
-                    if (!inConsumerApp && page == USAGE_PAGE_CONSUMER) inConsumerApp = true
+                    if (!inConsumerApp && page == pageWanted) inConsumerApp = true
                 }
                 type == 0 && tag == 0xC -> {
                     if (inConsumerApp) return KeyMap(usages, isArray)
@@ -144,8 +147,18 @@ object ConsumerKeys {
             0xB5 -> KeyEvent.KEYCODE_MEDIA_NEXT
             0xB6 -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
             0xB9 -> KeyEvent.KEYCODE_MEDIA_STOP
+            // Play/Pause toggle (ChairPlay's middle media button; the usual single play key on newer units)
+            0xCD -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
             else -> 0
         }
+
+    /** Telephony page (0x0B): head-unit answer / hang-up keys, an Array of usages like the Consumer devices. */
+    const val USAGE_PAGE_TELEPHONY = 0x0B
+
+    /** Telephony usages: Hook Switch (answer), Drop (end), Phone Mute. */
+    const val PHONE_HOOK_SWITCH = 0x20
+    const val PHONE_DROP = 0x26
+    const val PHONE_MUTE = 0x2F
 
     /** Readable name (for logs). */
     fun nameOf(usage: Int): String =
@@ -158,6 +171,7 @@ object ConsumerKeys {
             0xB6 -> "Previous"
             0xB9 -> "Stop"
             0xBC -> "Repeat"
+            0xCD -> "Play/Pause"
             else -> "unknown(0x%02x)".format(usage)
         }
 }

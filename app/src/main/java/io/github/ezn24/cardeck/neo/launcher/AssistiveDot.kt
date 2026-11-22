@@ -364,8 +364,11 @@ object AssistiveDot {
         return launcher.activeAppDisplayId()
     }
 
-    /** Back key: sent to the current foreground display (see [backTarget]). */
-    private fun back() {
+    /**
+     * Back key: sent to the current foreground display (see [backTarget]). Also the head unit's Back key, so both
+     * reach the same app (on the dashboard the last touched map / media pane, not the desktop behind them).
+     */
+    fun back() {
         val display = backTarget()
         if (display < 0) return
         Bg.run("assistive-back") {

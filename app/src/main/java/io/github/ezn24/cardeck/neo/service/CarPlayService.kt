@@ -162,6 +162,11 @@ class CarPlayService : Service() {
                 fileLog("SVC: received \"car-entry auto start\"; session already in progress, ignoring")
                 return START_STICKY
             }
+            val held = SessionController.autoConnectSuppressedForMillis()
+            if (held > 0) {
+                fileLog("SVC: received \"car-entry auto start\"; user disconnected by hand, ignoring for ${held / 1000}s more")
+                return START_STICKY
+            }
             fileLog("SVC: received \"car-entry auto start\"; starting session")
             val app = applicationContext
             Bg.run("auto-session-start") {

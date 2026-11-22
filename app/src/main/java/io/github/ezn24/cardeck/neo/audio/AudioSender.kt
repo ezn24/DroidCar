@@ -86,6 +86,44 @@ class AudioSender(
 
         private const val READ_TIMEOUT_QUIET_MILLIS = 500L
 
+        /** Pacer send queue cap (packets). Steady state holds 0..2; beyond the cap the oldest is dropped. */
+        const val SEND_QUEUE_CAP = 16
+
+        /** Queue depth the pacer drains back to (extra packets per tick, each taking a future tick). */
+        const val QUEUE_TARGET = 2
+
+        /** The tick follows the measured capture rate within +-this percent. */
+        const val TICK_ADJUST_PERCENT_MAX = 3L
+
+        /** Window in which the capture feed rate is measured for the tick. */
+        const val TICK_CALIB_WINDOW_NANOS = 10_000_000_000L
+
+        /** A pacer stall longer than this skips ahead instead of sending late packets in a burst. */
+        const val RESYNC_BEHIND_NANOS = 1_000_000_000L
+
+        /** Packets to skip after a pacer stall of [behindNanos] (0 = catch up by sending). */
+        internal fun resyncSkipPackets(
+            behindNanos: Long,
+            tickNanos: Long,
+            thresholdNanos: Long,
+        ): Long = if (behindNanos <= thresholdNanos || tickNanos <= 0) 0 else behindNanos / tickNanos
+
+        /**
+         * Wall time of sample [sampleTs] extrapolated from the last sent packet. The ts difference is in samples
+         * (1e9 / sampleRate ns each), not packets. null = nothing sent yet.
+         */
+        internal fun paceAnchorNanosOf(
+            sampleTs: Long,
+            lastSentTs: Long,
+            lastSentNanos: Long,
+            sampleRate: Int,
+        ): Long? =
+            if (lastSentTs >= 0 && lastSentNanos > 0) {
+                lastSentNanos + (sampleTs - lastSentTs) * 1_000_000_000L / sampleRate
+            } else {
+                null
+            }
+
         /** Persistence key for the pre-mute media volume (restore target survives a process kill). */
         private const val KEY_SAVED_VOLUME = "audio_saved_media_volume"
 
@@ -112,6 +150,72 @@ class AudioSender(
     private var record: AudioRecord? = null
     private var thread: Thread? = null
     private var syncThread: Thread? = null
+
+    // ---- Constant-rate sending (pacer; ported from upstream shaonialife/cardeck 90a3b6b..a813244) ----
+    // Capture and AAC encoding stall now and then (REMOTE_SUBMIX pipe, encoder, system load). The RTP timestamp
+    // counts content, so every stall left it permanently behind wall time and the receiver's playback delay grew
+    // in steps (upstream car logs: one 0.4 s hole in 5 min = +0.4 s for the rest of the drive). Capture now only
+    // queues; the pacer sends one packet per tick of wall time and fills an empty queue with a silence frame, so
+    // ts stays linear with wall time and a stall becomes a short gap instead of added delay.
+    private val sendQueue = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
+    private var pacerThread: Thread? = null
+
+    /** Last sent packet (ts, nanoTime): fallback anchor for sync packets. */
+    @Volatile private var lastSentTs = -1L
+
+    @Volatile private var lastSentNanos = 0L
+
+    /** Frames queued by capture (silent ones included): input of the tick calibration. */
+    private val captureFedFrames =
+        java.util.concurrent.atomic
+            .AtomicLong(0)
+    private var silenceFilledPackets = 0
+    private var queueDroppedPackets = 0
+    private var resyncCount = 0
+
+    /** Encoded silence frame for the AAC path, made once by a separate encoder (the capture encoder is single-threaded). */
+    private var aacSilenceFrame: ByteArray? = null
+
+    /**
+     * Capture anchors: sample number [syncAnchorTs] (same unit as RTP ts, counted from capture) arrived at
+     * [syncAnchorNanos]. Sync packets anchor ts to its capture time, not its send time: anchoring to send time put
+     * the queue + encoder delay (~350 ms upstream) into the receiver's playback schedule (upstream 2c59047).
+     */
+    @Volatile private var capturedSamples = 0L
+
+    @Volatile private var syncAnchorTs = -1L
+
+    @Volatile private var syncAnchorNanos = 0L
+
+    @Volatile private var prevAnchorTs = -1L
+
+    @Volatile private var prevAnchorNanos = 0L
+
+    /** Sample number -> capture time (nanoTime), extrapolated from the last two capture anchors; null = none yet. */
+    internal fun captureTimeOf(sampleTs: Long): Long? {
+        val t1 = syncAnchorTs
+        val n1 = syncAnchorNanos
+        if (t1 < 0 || n1 == 0L) return null
+        val t0 = prevAnchorTs
+        val n0 = prevAnchorNanos
+        return if (t0 >= 0 && n0 > 0 && t1 > t0) {
+            n1 + (sampleTs - t1) * (n1 - n0) / (t1 - t0)
+        } else {
+            n1 + (sampleTs - t1) * 1_000_000_000L / sampleRate
+        }
+    }
+
+    internal fun setCaptureAnchorForTest(
+        prevTs: Long,
+        prevNanos: Long,
+        ts: Long,
+        nanos: Long,
+    ) {
+        prevAnchorTs = prevTs
+        prevAnchorNanos = prevNanos
+        syncAnchorTs = ts
+        syncAnchorNanos = nanos
+    }
 
     /** AAC-LC encoder (created only for [AudioCodec.AAC_LC]). */
     private var aacEncoder: AacLcEncoder? = null
@@ -148,7 +252,6 @@ class AudioSender(
     /** Capture+send statistics (for log rate limiting). */
     private var packetsSent = 0L
     private var bytesSent = 0L
-    private var lastLogAt = 0L
     private var readFailures = 0
 
     val isRunning: Boolean get() = running.get()
@@ -256,6 +359,8 @@ class AudioSender(
                     return false
                 }
                 aacEncoder = encoder
+                aacSilenceFrame = encodeSilenceFrame()
+                if (aacSilenceFrame == null) log("AUDIO: no AAC silence frame - pacer waits for content during gaps")
             }
 
             val service = io.github.ezn24.cardeck.neo.shizuku.CarInputClient.service
@@ -320,6 +425,28 @@ class AudioSender(
             // Start the sync-packet thread first: the earlier the anchor exists, the sooner the receiver can schedule playback
             startSyncLoop()
 
+            // The pacer starts before capture: capture only queues, so there is no initial backlog
+            Thread(
+                {
+                    try {
+                        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                    } catch (_: Exception) {
+                    }
+                    try {
+                        runPacerLoop(samplesPerPacket * 1_000_000_000L / sampleRate)
+                    } catch (error: Throwable) {
+                        log("AUDIO: pacer exited abnormally - ${error.message}")
+                    } finally {
+                        stop()
+                    }
+                },
+                "audio-pacer",
+            ).apply {
+                isDaemon = true
+                start()
+                pacerThread = this
+            }
+
             Thread(
                 {
                     try {
@@ -370,6 +497,12 @@ class AudioSender(
         syncSocket = null
         syncThread = null
         thread = null
+        pacerThread?.let {
+            java.util.concurrent.locks.LockSupport
+                .unpark(it)
+        }
+        pacerThread = null
+        sendQueue.clear()
         restorePhoneMedia()
         log("AUDIO: stopped (sent $packetsSent packets / ${bytesSent / 1024}KB)")
     }
@@ -413,19 +546,28 @@ class AudioSender(
                 {
                     var syncSequence = 0
                     var first = true
+                    // The first send error ends the loop on purpose. Upstream tried retrying every second (and
+                    // sending to dataPort when SETUP gives no controlPort) and reverted both on 2026-11-18: the
+                    // build that played on the Audi stopped here, and the retries kept hitting a port the car had
+                    // already refused.
                     try {
                         while (running.get() && !client.isClosed) {
                             val next = timestamp
                             val current = (next - samplesPerPacket).coerceAtLeast(0L)
-                            val ntp = TimingServer.ntpFromNanos(System.nanoTime())
+                            val anchorNanos =
+                                captureTimeOf(next)
+                                    ?: paceAnchorNanosOf(next, lastSentTs, lastSentNanos, sampleRate)
+                                    ?: System.nanoTime()
+                            val ntp = TimingServer.ntpFromNanos(anchorNanos)
                             val packet = AudioSyncPacket.build(syncSequence, current, next, ntp, first)
                             client.send(DatagramPacket(packet, packet.size))
                             syncSequence = (syncSequence + 1) and 0xFFFF
                             if (first) {
                                 first = false
+                                val lagMs = (System.nanoTime() - anchorNanos) / 1_000_000
                                 log(
-                                    "AUDIO: first sync packet sent (X bit=1) ts=$current->$next - " +
-                                        "if the car is still silent it is not waiting on this anchor",
+                                    "AUDIO: first sync packet sent (X bit=1) ts=$current->$next, anchor = capture time " +
+                                        "(${lagMs}ms ago) - if the car is still silent it is not waiting on this anchor",
                                 )
                             }
                             Thread.sleep(SYNC_INTERVAL_MILLIS)
@@ -450,7 +592,8 @@ class AudioSender(
         val frameBytes = framePcmBytes
         val pcm = ByteArray(frameBytes)
         // Diagnostic sampling cadence: PCM ~125 packets/s (every 20s); AAC ~47 frames/s
-        val diagnosticStride = if (codec == AudioCodec.AAC_LC) 600 else 1875
+        val diagnosticStride = if (codec == AudioCodec.AAC_LC) 600L else 1875L
+        var capturedFrames = 0L
         try {
             while (running.get()) {
                 val read =
@@ -476,6 +619,12 @@ class AudioSender(
                 }
                 if (read < frameBytes) continue // Partial packet (buffer tail): drop, wait for the next full one
                 readFailures = 0
+                // Capture anchor for sync packets: once read returns, the last sample of this frame has arrived.
+                capturedSamples += read / (CHANNELS * 2)
+                prevAnchorTs = syncAnchorTs
+                prevAnchorNanos = syncAnchorNanos
+                syncAnchorTs = capturedSamples
+                syncAnchorNanos = System.nanoTime()
                 val captureNow = android.os.SystemClock.elapsedRealtime()
                 var silent = true
                 for (sampleIndex in 0 until read) {
@@ -505,7 +654,10 @@ class AudioSender(
                 // routed to Bluetooth / nothing playing). With all zeros the car is silent while the phone still plays and the
                 // user reports "sound is on the phone", so "nothing captured" must be distinguishable from "captured
                 // but the car did not play".
-                if (sequence < 3 || sequence % diagnosticStride == 0) {
+                capturedFrames++
+                // Counted per captured frame: with the pacer, `sequence` belongs to the send thread and can sit on
+                // one value for several reads, which logged the same sample line three times.
+                if (capturedFrames <= 3 || capturedFrames % diagnosticStride == 0L) {
                     var nonZero = 0
                     var peak = 0
                     var index = 0
@@ -518,7 +670,7 @@ class AudioSender(
                     }
                     val percent = nonZero * 100 / (read / 2).coerceAtLeast(1)
                     log(
-                        "AUDIO: capture sample seq=$sequence non-zero $percent% peak=$peak" +
+                        "AUDIO: capture sample frame=$capturedFrames non-zero $percent% peak=$peak" +
                             if (peak == 0) {
                                 " (WARNING: all zero: nothing captured - " +
                                     "the app may forbid playback capture or audio goes via Bluetooth)"
@@ -546,21 +698,20 @@ class AudioSender(
                     verifyEncodedFrame(payloads.first())
                 }
 
-                var sendFailed = false
+                // Queue only; the pacer sends on wall-time ticks. A full queue drops the oldest (a content hole the
+                // car conceals) and means capture runs faster than the tick has adapted to so far.
                 for (payload in payloads) {
-                    if (!sendPayload(payload)) {
-                        sendFailed = true
-                        break
+                    // The PCM buffer is reused for the next read, so the queued copy must be its own array
+                    val queued = if (codec == AudioCodec.AAC_LC) payload else payload.copyOf()
+                    if (sendQueue.size >= SEND_QUEUE_CAP) {
+                        sendQueue.poll()
+                        queueDroppedPackets++
+                        if (queueDroppedPackets == 1 || queueDroppedPackets % 50 == 0) {
+                            log("AUDIO: send queue full, dropped the oldest packet (total $queueDroppedPackets)")
+                        }
                     }
-                }
-                if (sendFailed) break
-                val now = android.os.SystemClock.uptimeMillis()
-                if (now - lastLogAt >= 30_000L) {
-                    lastLogAt = now
-                    log(
-                        "AUDIO: streaming (total $packetsSent packets, ${bytesSent / 1024}KB, " +
-                            "seq=$sequence ts=$timestamp)",
-                    )
+                    sendQueue.offer(queued)
+                    captureFedFrames.incrementAndGet()
                 }
             }
         } catch (error: Throwable) {
@@ -571,10 +722,135 @@ class AudioSender(
         }
     }
 
+    /** One encoded AAC frame of silence from a throwaway encoder (it needs 1-2 frames of lookahead). */
+    private fun encodeSilenceFrame(): ByteArray? {
+        val encoder = AacLcEncoder(sampleRate, CHANNELS, wrapAdts = adtsFrames, log = {})
+        if (!encoder.start()) return null
+        return try {
+            val zeros = ByteArray(framePcmBytes)
+            var frame: ByteArray? = null
+            for (attempt in 0 until 8) {
+                frame = encoder.encode(zeros, zeros.size).lastOrNull() ?: frame
+                if (frame != null && attempt >= 2) break
+            }
+            frame
+        } catch (_: Exception) {
+            null
+        } finally {
+            encoder.stop()
+        }
+    }
+
+    /** Filler for an empty queue: zero PCM, or the AAC silence frame (null = none, wait for content). */
+    private fun silencePayload(): ByteArray? = if (codec == AudioCodec.AAC_LC) aacSilenceFrame else ByteArray(framePcmBytes)
+
+    /**
+     * Sends one packet per tick of wall time: queued content first, silence when the queue is empty. A pacer stall
+     * over [RESYNC_BEHIND_NANOS] skips ahead (late packets would be discarded by the receiver anyway); shorter ones
+     * catch up by at most 12 packets. Extra packets that drain a deep queue take future ticks, so the send rate stays
+     * equal to the tick (draining "for free" pushed ts ahead of wall time and grew the car's buffer +15 ms/s upstream).
+     * The tick follows the measured capture rate (REMOTE_SUBMIX runs ~1.4% fast upstream), clamped to +-3%.
+     */
+    private fun runPacerLoop(tickNanos: Long) {
+        var nextTick = -1L
+        var lastLogAt = System.nanoTime()
+        var effectiveTick = tickNanos
+        var calibStartNanos = 0L
+        var calibFedFrames = 0L
+        var sentInLogWindow = 0L
+        while (running.get()) {
+            if (nextTick == -1L) {
+                // The schedule starts with the first packet that can be sent
+                val first = sendQueue.poll() ?: silencePayload()
+                if (first == null) {
+                    java.util.concurrent.locks.LockSupport
+                        .parkNanos(2_000_000)
+                    continue
+                }
+                if (!sendPayload(first)) break
+                nextTick = System.nanoTime() + effectiveTick
+                calibStartNanos = nextTick
+                calibFedFrames = captureFedFrames.get()
+                sentInLogWindow = 1
+                continue
+            }
+            val now = System.nanoTime()
+            if (now < nextTick) {
+                java.util.concurrent.locks.LockSupport
+                    .parkNanos(nextTick - now)
+                continue
+            }
+            val behind = now - nextTick
+            val skip = resyncSkipPackets(behind, effectiveTick, RESYNC_BEHIND_NANOS)
+            if (skip > 0) {
+                sequence = (sequence + skip.toInt()) and 0xFFFF
+                timestamp += skip * samplesPerPacket
+                nonceCounter += skip
+                nextTick += skip * effectiveTick
+                resyncCount++
+                log("AUDIO: pacer stalled ${behind / 1_000_000}ms - skipped $skip packets (resync #$resyncCount)")
+            }
+            var failed = false
+            var burst = 0
+            while (running.get() && System.nanoTime() >= nextTick && burst < 12) {
+                val payload = sendQueue.poll() ?: silencePayload()?.also { silenceFilledPackets++ }
+                if (payload == null) {
+                    // No silence frame (the AAC encoder could not make one): wait for content without advancing ts
+                    java.util.concurrent.locks.LockSupport
+                        .parkNanos(2_000_000)
+                    break
+                }
+                if (!sendPayload(payload)) {
+                    failed = true
+                    break
+                }
+                nextTick += effectiveTick
+                burst++
+                sentInLogWindow++
+            }
+            if (failed || !running.get()) break
+            var drained = 0
+            while (running.get() && sendQueue.size > QUEUE_TARGET && drained < 2) {
+                val extra = sendQueue.poll() ?: break
+                if (!sendPayload(extra)) {
+                    failed = true
+                    break
+                }
+                nextTick += effectiveTick
+                drained++
+                sentInLogWindow++
+            }
+            if (failed || !running.get()) break
+            val after = System.nanoTime()
+            if (calibStartNanos > 0 && after - calibStartNanos >= TICK_CALIB_WINDOW_NANOS) {
+                val fedNow = captureFedFrames.get()
+                val fed = fedNow - calibFedFrames
+                if (fed > 0) {
+                    val lo = tickNanos * (100 - TICK_ADJUST_PERCENT_MAX) / 100
+                    val hi = tickNanos * (100 + TICK_ADJUST_PERCENT_MAX) / 100
+                    effectiveTick = ((after - calibStartNanos) / fed).coerceIn(lo, hi)
+                }
+                calibStartNanos = after
+                calibFedFrames = fedNow
+            }
+            if (after - lastLogAt >= 30_000_000_000L) {
+                val ppsX10 = sentInLogWindow * 10_000_000_000L / (after - lastLogAt)
+                lastLogAt = after
+                sentInLogWindow = 0
+                log(
+                    "AUDIO: streaming (total $packetsSent packets, ${bytesSent / 1024}KB, seq=$sequence ts=$timestamp, " +
+                        "queue=${sendQueue.size} silence-filled=$silenceFilledPackets dropped=$queueDroppedPackets " +
+                        "rate=${ppsX10 / 10}.${ppsX10 % 10}pps tick=${effectiveTick / 1000}us)",
+                )
+            }
+        }
+    }
+
     /** Packetize + send one packet (updates the seq/ts/nonce cursors). Returns false if the link is down. */
     private fun sendPayload(payload: ByteArray): Boolean {
         val wire = sealPacket(payload, sequence, timestamp, nonceCounter, markerPending)
         markerPending = false
+        val sentTs = timestamp
         sequence = (sequence + 1) and 0xFFFF
         timestamp += samplesPerPacket
         nonceCounter++
@@ -583,6 +859,8 @@ class AudioSender(
             client.send(DatagramPacket(wire, wire.size))
             packetsSent++
             bytesSent += wire.size
+            lastSentTs = sentTs
+            lastSentNanos = System.nanoTime()
             true
         } catch (error: IOException) {
             log("AUDIO: UDP send failed - ${error.message}")

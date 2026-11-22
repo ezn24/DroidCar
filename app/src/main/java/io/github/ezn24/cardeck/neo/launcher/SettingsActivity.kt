@@ -27,6 +27,19 @@ class SettingsActivity :
     private val menus = mutableListOf<LinearLayout>()
     private var currentMenu = -1
 
+    override fun onResume() {
+        super.onResume()
+        // Knob focus frames this screen's controls while it is on the car
+        io.github.ezn24.cardeck.neo.input.KnobFocus
+            .onOwnScreenResumed(this)
+    }
+
+    override fun onPause() {
+        io.github.ezn24.cardeck.neo.input.KnobFocus
+            .onOwnScreenPaused(this)
+        super.onPause()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // Light/dark follows the phone (same criterion as the head-unit wallpaper dark/light slots), accent follows system Material You
         super.onCreate(savedInstanceState)

@@ -36,6 +36,29 @@ object TouchRouter {
 
     private var pressed = false
     private var pressedDisplay = -1
+
+    /**
+     * Multi-touch: the first finger of a gesture keeps every single-finger rule (dock, cards, swipes, sticky routing).
+     * Further fingers join only while the first one is injected into a display, are mapped into that display with the
+     * first finger's transform, and go into the same stream (pinch-zoom on maps). They end when the first finger lifts.
+     */
+    private var primarySlot = -1
+
+    /** Secondary slots that were pressed into [pressedDisplay]. */
+    private val secondarySlots = HashSet<Int>()
+
+    /**
+     * Fingers swallowed until they lift: ones that could not join, and ones still down after the first finger lifted.
+     * Without this the finger left over at the end of a pinch became a new press, and lifting it tapped the map.
+     */
+    private val ignoredSlots = HashSet<Int>()
+
+    /** Primary finger's last stream point and in-display point plus the display's scale: maps secondary fingers. */
+    private var primaryPx = 0
+    private var primaryPy = 0
+    private var primaryLocalX = 0
+    private var primaryLocalY = 0
+    private var primaryScale = 1f
     private var failStreak = 0
 
     /** Overlay-card gesture state (after hitting a card it owns the touch exclusively and nothing is injected into the app). */
@@ -97,8 +120,20 @@ object TouchRouter {
         report: Contact,
     ) {
         val contact = touchReleases.accept(report) ?: return
+        if (contact.down) KnobFocus.onTouch()
         val px = (contact.xPixels * coordScaleX).toInt().coerceAtLeast(0)
         val py = (contact.yPixels * coordScaleY).toInt().coerceAtLeast(0)
+
+        if (contact.slot in ignoredSlots) {
+            if (!contact.down) ignoredSlots.remove(contact.slot)
+            return
+        }
+        if (primarySlot >= 0 && contact.slot != primarySlot) {
+            onSecondary(contact, px, py)
+            return
+        }
+        if (contact.down && primarySlot < 0) primarySlot = contact.slot
+        if (!contact.down && contact.slot == primarySlot) primarySlot = -1
 
         // The assistive dot is drawn on the top layer, so ask it first
         if (io.github.ezn24.cardeck.neo.launcher.AssistiveDot
@@ -222,6 +257,51 @@ object TouchRouter {
         inject(context, contact, px, py)
     }
 
+    /** A second (third, ...) finger: joins the first finger's stream on its display, or is ignored. */
+    private fun onSecondary(
+        contact: Contact,
+        px: Int,
+        py: Int,
+    ) {
+        val svc = CarInputClient.service ?: return
+        val known = contact.slot in secondarySlots
+        if (!contact.down) {
+            if (known) {
+                secondarySlots.remove(contact.slot)
+                runCatching { svc.touchUp(contact.slot, pressedDisplay, 0, 0) }
+            }
+            return
+        }
+        // Only while the first finger is injected (not held by a card, swipe or overlay)
+        if (!pressed || pressedDisplay < 0) {
+            ignoredSlots.add(contact.slot)
+            return
+        }
+        val localX = (primaryLocalX + (px - primaryPx) * primaryScale).toInt().coerceAtLeast(0)
+        val localY = (primaryLocalY + (py - primaryPy) * primaryScale).toInt().coerceAtLeast(0)
+        try {
+            if (known) {
+                svc.touchMove(contact.slot, pressedDisplay, localX, localY)
+            } else if (svc.touchDown(contact.slot, pressedDisplay, localX, localY)) {
+                secondarySlots.add(contact.slot)
+                diag("second finger joined disp=$pressedDisplay ($localX,$localY)")
+            } else {
+                ignoredSlots.add(contact.slot)
+            }
+        } catch (e: Exception) {
+            diag("second finger injection error: ${e.message}")
+        }
+    }
+
+    /** Lifts the secondary fingers before the primary leaves its stream (Android ends a gesture with the last pointer). */
+    private fun liftSecondaries() {
+        if (secondarySlots.isEmpty()) return
+        val svc = CarInputClient.service
+        for (slot in secondarySlots) runCatching { svc?.touchUp(slot, pressedDisplay, 0, 0) }
+        ignoredSlots.addAll(secondarySlots)
+        secondarySlots.clear()
+    }
+
     /**
      * Stream-pixel displacement -> desktop (Grid) display pixels: with the dock on the left in landscape the desktop
      * display may be supersampled.
@@ -245,7 +325,10 @@ object TouchRouter {
                 .isOnAssistLayer()
         if (launcher.isLayoutTransitioning()) {
             if (!contact.down) {
-                if (pressed) runCatching { CarInputClient.service?.pointerUp(pressedDisplay, 0, 0) }
+                if (pressed) {
+                    liftSecondaries()
+                    runCatching { CarInputClient.service?.touchUp(contact.slot, pressedDisplay, 0, 0) }
+                }
                 pressed = false
                 pressedDisplay = -1
             }
@@ -288,6 +371,8 @@ object TouchRouter {
         var localX = 0
         var localY = 0
         var routedToMap = false
+        // In-display pixels per stream pixel of the chosen display (maps a second finger alongside the first)
+        var scaleOut = 1f
         // Split-handle sticky routing: a press landing in the handle bar -> the whole touch stream is pinned to the
         // app display (where Grid lives)
         // until lift. During a fast drag the handle lags behind the finger and coordinates leave the handle bar (even
@@ -308,6 +393,7 @@ object TouchRouter {
                 localY = py
             } else {
                 val scale = launcher.gridScale().coerceAtLeast(1f)
+                scaleOut = scale
                 localX = ((px - dockW) * scale).toInt()
                 localY = (py * scale).toInt()
             }
@@ -338,6 +424,7 @@ object TouchRouter {
                 // (a portrait head unit has no supersampled display, activeAppScale is always 1, behavior identical to the old version)
                 targetDisplay = if (inDock) launcher.dockDisplayId else launcher.activeAppDisplayId()
                 val scale = if (inDock) 1f else launcher.activeAppScale().coerceAtLeast(1f)
+                scaleOut = scale
                 localX = if (inDock) px else (px * scale).toInt()
                 localY = if (inDock) py - appH else (py * scale).toInt()
             }
@@ -365,6 +452,7 @@ object TouchRouter {
             if (!routedToMap) {
                 targetDisplay = if (inDock) launcher.dockDisplayId else launcher.activeAppDisplayId()
                 val scale = if (inDock) 1f else launcher.activeAppScale().coerceAtLeast(1f)
+                scaleOut = scale
                 localX = if (inDock) px else ((px - dockW) * scale).toInt()
                 localY = (py * scale).toInt()
             }
@@ -380,6 +468,7 @@ object TouchRouter {
         ) {
             inDock = false
             targetDisplay = launcher.mapDisplayId
+            scaleOut = 1f
             localX = (px - splitMapPane.left).toInt().coerceIn(0, splitMapPane.width - 1)
             localY = (py - splitMapPane.top).toInt().coerceIn(0, splitMapPane.height - 1)
         }
@@ -392,6 +481,7 @@ object TouchRouter {
                 targetDisplay = launcher.mediaDisplayId
                 // The media display is supersampled (VirtualLauncher.mediaSupersample)
                 val scale = VirtualLauncher.mediaSupersample
+                scaleOut = scale.toFloat()
                 localX = ((px - pane.left).toInt() * scale).coerceIn(0, pane.width * scale - 1)
                 localY = ((py - pane.top).toInt() * scale).coerceIn(0, pane.height * scale - 1)
             }
@@ -402,6 +492,7 @@ object TouchRouter {
         // subtracted; a gesture already on the assistant display at press time sticks to it.
         if (!inDock && (assistLayer || (pressed && pressedDisplay == launcher.assistDisplayId)) && launcher.assistDisplayId >= 0) {
             targetDisplay = launcher.assistDisplayId
+            scaleOut = 1f
             localX = (if (launcher.dockAtBottom) px else px - dockW).coerceIn(0, launcher.appAreaWidth - 1)
             localY = py.coerceIn(0, launcher.appAreaHeight - 1)
         }
@@ -443,24 +534,33 @@ object TouchRouter {
                         pressed = true
                         pressedDisplay = targetDisplay
                         launcher.lastTouchedDisplay = targetDisplay
-                        svc.pointerDown(targetDisplay, localX, localY)
+                        svc.touchDown(contact.slot, targetDisplay, localX, localY)
                     }
 
                     contact.down && pressedDisplay != targetDisplay -> {
-                        // Cross-display drag: lift on the old display first, then press on the new one
-                        runCatching { svc.pointerUp(pressedDisplay, 0, 0) }
+                        // Cross-display drag: lift on the old display first (with any second finger), then press on the new one
+                        liftSecondaries()
+                        runCatching { svc.touchUp(contact.slot, pressedDisplay, 0, 0) }
                         pressedDisplay = targetDisplay
                         launcher.lastTouchedDisplay = targetDisplay
-                        svc.pointerDown(targetDisplay, localX, localY)
+                        svc.touchDown(contact.slot, targetDisplay, localX, localY)
                     }
 
-                    contact.down -> svc.pointerMove(targetDisplay, localX, localY)
+                    contact.down -> svc.touchMove(contact.slot, targetDisplay, localX, localY)
 
                     else -> {
                         pressed = false
-                        svc.pointerUp(pressedDisplay, localX, localY)
+                        liftSecondaries()
+                        svc.touchUp(contact.slot, pressedDisplay, localX, localY)
                     }
                 }
+            if (contact.down) {
+                primaryPx = px
+                primaryPy = py
+                primaryLocalX = localX
+                primaryLocalY = localY
+                primaryScale = scaleOut
+            }
             if (ok) lastInjectAt = nowMs
             if (!ok) {
                 diag(
@@ -478,6 +578,9 @@ object TouchRouter {
     fun reset() {
         pressed = false
         pressedDisplay = -1
+        primarySlot = -1
+        secondarySlots.clear()
+        ignoredSlots.clear()
         overlayPressed = false
         splitHandlePressed = false
         dashboardSwipe.reset()

@@ -116,6 +116,10 @@ class DualDisplayComposer(
     @Volatile
     var tileSlideFraction: Float = 0f
 
+    /** Diagnostics sink: a 30 s line with each input's frame rate and the composed rate. */
+    @Volatile
+    var statsLog: ((String) -> Unit)? = null
+
     /**
      * Override for the map tile's handle-side edge (stream pixels, origin top-left; landscape = tile right edge x, portrait = tile
      * bottom edge y). When >0 it replaces the SPLIT formula value; VirtualLauncher writes it every frame while the split handle is dragged,
@@ -348,6 +352,15 @@ class DualDisplayComposer(
             wake()
         }
 
+    /** Knob focus frame ([io.github.ezn24.cardeck.neo.input.KnobFocus]), drawn above the cards and below the assistive dot. */
+    @Volatile
+    var focusRing: OverlayCard? = null
+        set(value) {
+            field = value
+            overlayDirty = true
+            wake()
+        }
+
     /** GL texture of one overlay bitmap and the card reference already uploaded (GL thread only). */
     private class OverlaySlot {
         var texture = 0
@@ -357,6 +370,7 @@ class DualDisplayComposer(
     private val overlaySlot = OverlaySlot()
     private val pageDotsSlot = OverlaySlot()
     private val assistiveDotSlot = OverlaySlot()
+    private val focusRingSlot = OverlaySlot()
 
     /** Supersampled input (created on the GL thread; safe to read from other threads after start() returns). */
     @Volatile
@@ -542,7 +556,16 @@ class DualDisplayComposer(
         height: Int,
     ) {
         mapInput?.surfaceTexture?.setDefaultBufferSize(width, height)
+        mapBufferWidth = width
+        mapBufferHeight = height
     }
+
+    /** Current map display buffer size (the alt screen crops it to its own aspect ratio). */
+    @Volatile
+    private var mapBufferWidth = 0
+
+    @Volatile
+    private var mapBufferHeight = 0
 
     fun stop() {
         if (!running.getAndSet(false)) return
@@ -656,6 +679,10 @@ class DualDisplayComposer(
         val app = newInput(appW, appH).also { appInput = it }
         val hi = if (hasHiInput) newInput(hiW, hiH).also { appHi = it } else null
         val map = if (hasMapInput) newInput(mapW, mapH).also { mapInput = it } else null
+        if (mapBufferWidth == 0) {
+            mapBufferWidth = mapW
+            mapBufferHeight = mapH
+        }
         val media = newInput(mediaW, mediaH).also { mediaInput = it }
         val assistLayer = newInput(appW, appH).also { assistLayerInput = it }
         // ---- Shaders ----
@@ -905,6 +932,123 @@ class DualDisplayComposer(
             y1: Float,
         ) = drawInputUV(input, x0, x1, y0, y1, u0 = 0f, u1 = 1f)
 
+        // ---- Alternate (cluster) screen: the whole map display, fitted into the receiver's view area, plus our turn
+        // card when the receiver asks for one (see AltScreenOutput). Fitted, not cropped: cropping cut Google Maps'
+        // own turn banner off the top (2026-11-23).
+        var altBound: AltScreenOutput.Target? = null
+        var altSurface: EGLSurface = EGL14.EGL_NO_SURFACE
+        var altLastAt = 0L
+        var altFailed: AltScreenOutput.Target? = null
+        var altCardTexture = 0
+        var altCardUploaded: android.graphics.Bitmap? = null
+
+        /** Quad in alt-screen pixels (top-left origin) -> GL clip space of a [w] x [h] target. */
+        fun altQuad(
+            x: Float,
+            y: Float,
+            qw: Float,
+            qh: Float,
+            w: Int,
+            h: Int,
+        ): FloatBuffer {
+            val x0 = x / w * 2f - 1f
+            val x1 = (x + qw) / w * 2f - 1f
+            val y0 = (h - (y + qh)) / h * 2f - 1f
+            val y1 = (h - y) / h * 2f - 1f
+            return vertexBuffer(posBuf, x0, y0, x1, y0, x0, y1, x1, y1)
+        }
+
+        fun renderAlt(input: Input?) {
+            val want = AltScreenOutput.target
+            if (want !== altBound) {
+                if (altSurface != EGL14.EGL_NO_SURFACE) runCatching { EGL14.eglDestroySurface(display, altSurface) }
+                altSurface = EGL14.EGL_NO_SURFACE
+                altBound = want
+                if (want != null && want !== altFailed) {
+                    altSurface =
+                        runCatching {
+                            EGL14.eglCreateWindowSurface(display, configs[0], want.surface, intArrayOf(EGL14.EGL_NONE), 0)
+                        }.getOrDefault(EGL14.EGL_NO_SURFACE)
+                    if (altSurface == EGL14.EGL_NO_SURFACE) altFailed = want
+                }
+            }
+            val target = altBound ?: return
+            if (altSurface == EGL14.EGL_NO_SURFACE) return
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - altLastAt < 1000L / target.fps.coerceIn(1, 60)) return
+            altLastAt = now
+            if (!EGL14.eglMakeCurrent(display, altSurface, altSurface, context)) return
+            val w = target.width
+            val h = target.height
+            try {
+                GLES20.glViewport(0, 0, w, h)
+                GLES20.glDisable(GLES20.GL_BLEND)
+                GLES20.glClearColor(0f, 0f, 0f, 1f)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                val area = AltScreenOutput.viewArea ?: intArrayOf(0, 0, w, h)
+                if (AltScreenOutput.mode != AltScreenOutput.Mode.CARD && input != null && input.hasContent) {
+                    GLES20.glUseProgram(program)
+                    GLES20.glUniform1i(uClipEnabled, 0)
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                    input.surfaceTexture.getTransformMatrix(matrix)
+                    GLES20.glUniformMatrix4fv(uSTMatrix, 1, false, matrix, 0)
+                    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, input.texture)
+                    // Fit the whole map into the area, centred
+                    val srcAspect = mapBufferWidth.toFloat() / mapBufferHeight.coerceAtLeast(1)
+                    val areaAspect = area[2].toFloat() / area[3].coerceAtLeast(1)
+                    val qw = if (srcAspect < areaAspect) area[3] * srcAspect else area[2].toFloat()
+                    val qh = if (srcAspect < areaAspect) area[3].toFloat() else area[2] / srcAspect
+                    val positions = altQuad(area[0] + (area[2] - qw) / 2f, area[1] + (area[3] - qh) / 2f, qw, qh, w, h)
+                    val coords = vertexBuffer(texBuf, 0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
+                    GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, positions)
+                    GLES20.glEnableVertexAttribArray(aPos)
+                    GLES20.glVertexAttribPointer(aTexCoord, 2, GLES20.GL_FLOAT, false, 0, coords)
+                    GLES20.glEnableVertexAttribArray(aTexCoord)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                }
+                val card = AltScreenOutput.card
+                val rect = AltScreenOutput.cardRect
+                if (card != null && rect != null) {
+                    if (altCardTexture == 0) {
+                        val ids = IntArray(1)
+                        GLES20.glGenTextures(1, ids, 0)
+                        altCardTexture = ids[0]
+                    }
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, altCardTexture)
+                    if (card !== altCardUploaded) {
+                        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                        android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, card, 0)
+                        altCardUploaded = card
+                    }
+                    GLES20.glUseProgram(overlayProgram)
+                    GLES20.glUniform1i(ouTexture, 0)
+                    GLES20.glUniform1f(ouAlpha, 1f)
+                    GLES20.glUniformMatrix4fv(ouSTMatrix, 1, false, IDENTITY_ST, 0)
+                    GLES20.glEnable(GLES20.GL_BLEND)
+                    GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                    val positions =
+                        altQuad(rect[0].toFloat(), rect[1].toFloat(), rect[2].toFloat(), rect[3].toFloat(), w, h)
+                    val coords = vertexBuffer(texBuf, 0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f)
+                    GLES20.glVertexAttribPointer(oaPos, 2, GLES20.GL_FLOAT, false, 0, positions)
+                    GLES20.glEnableVertexAttribArray(oaPos)
+                    GLES20.glVertexAttribPointer(oaTexCoord, 2, GLES20.GL_FLOAT, false, 0, coords)
+                    GLES20.glEnableVertexAttribArray(oaTexCoord)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                    GLES20.glDisable(GLES20.GL_BLEND)
+                }
+                EGL14.eglSwapBuffers(display, altSurface)
+            } finally {
+                EGL14.eglMakeCurrent(display, outputSurface, outputSurface, context)
+                GLES20.glViewport(0, 0, outWidth, outHeight)
+                GLES20.glUseProgram(program)
+                GLES20.glUniform1i(uTexture, 0)
+            }
+        }
+
         fun composeFrame(fullRedraw: Boolean) {
             // Pending app-display switch: switch once the target produces a frame (frame counter advances / 600ms
             // fallback if it has content / 2s timeout fallback)
@@ -1081,6 +1225,9 @@ class DualDisplayComposer(
             syncOverlayTexture(overlaySlot, overlayCard)?.let { card ->
                 drawOverlay(overlaySlot, card.left, card.top, card.right, card.bottom, card.alpha)
             }
+            syncOverlayTexture(focusRingSlot, focusRing)?.let { ring ->
+                drawOverlay(focusRingSlot, ring.left, ring.top, ring.right, ring.bottom, ring.alpha)
+            }
             syncOverlayTexture(assistiveDotSlot, assistiveDot)?.let { dot ->
                 drawOverlay(assistiveDotSlot, dot.left, dot.top, dot.right, dot.bottom, dot.alpha)
             }
@@ -1105,6 +1252,7 @@ class DualDisplayComposer(
                 EGL14.eglSwapBuffers(display, outputSurface)
             }
             overlayDirty = false
+            runCatching { renderAlt(map) }
         }
 
         // Initial black frame (clear only, do not touch empty textures) + hand over the input Surfaces + release start()
@@ -1112,6 +1260,7 @@ class DualDisplayComposer(
         GLES20.glClearColor(0.04f, 0.07f, 0.09f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         EGL14.eglSwapBuffers(display, outputSurface)
+        AltScreenOutput.wake = { wake() }
         onSurfacesReady?.invoke(dock.surface, app.surface, hi?.surface, map?.surface, media.surface)
         startLatch?.countDown()
 
@@ -1126,7 +1275,32 @@ class DualDisplayComposer(
         try {
             var lastComposeAt = System.currentTimeMillis()
             var lastChangeAt = lastComposeAt
+            var statsAt = lastComposeAt
+            var statsComposed = 0L
+            var statsBase = longArrayOf(0, 0, 0, 0, 0)
+
+            fun inputCounts() =
+                longArrayOf(
+                    dock.frameCount.toLong(),
+                    app.frameCount.toLong(),
+                    (hi?.frameCount ?: 0).toLong(),
+                    (map?.frameCount ?: 0).toLong(),
+                    media.frameCount.toLong(),
+                )
             while (running.get()) {
+                val statsNow = System.currentTimeMillis()
+                if (statsNow - statsAt >= 30_000L) {
+                    val counts = inputCounts()
+                    val seconds = (statsNow - statsAt) / 1000f
+                    val rates = counts.indices.map { "%.1f".format(java.util.Locale.ROOT, (counts[it] - statsBase[it]) / seconds) }
+                    statsLog?.invoke(
+                        "COMPOSER: input fps dock=${rates[0]} app=${rates[1]} appHi=${rates[2]} map=${rates[3]} media=${rates[4]}" +
+                            " composed=${"%.1f".format(java.util.Locale.ROOT, statsComposed / seconds)}",
+                    )
+                    statsAt = statsNow
+                    statsBase = counts
+                    statsComposed = 0
+                }
                 // The fast lane (60fps throttle) is driven only by inputs that "will be drawn into the output picture":
                 // dock + the current active app display (app/hi, one of the two) + the map display while the tile is visible.
                 // Amap runs on the map display and portrait apps on the supersampled display; looking only at dock/native would miss them,
@@ -1142,12 +1316,15 @@ class DualDisplayComposer(
                         dock.hasNewFrame ||
                         (if (activeAppHi) appHi else app)?.hasNewFrame == true ||
                         (tileLayout != TileLayout.HIDDEN && mapInput?.hasNewFrame == true) ||
+                        // The alt (cluster) screen shows the map even while the dashboard hides it
+                        (AltScreenOutput.target != null && mapInput?.hasNewFrame == true) ||
                         (showMediaPane && tileLayout == TileLayout.SPLIT && mediaInput?.hasNewFrame == true)
                 val now = System.currentTimeMillis()
                 if (hasNew) lastChangeAt = now
                 val intervalMs = composeIntervalMs(hasNew, now - lastChangeAt, targetFps)
                 val waitMs = intervalMs - (now - lastComposeAt)
                 if (waitMs <= 0) {
+                    statsComposed++
                     composeFrame(fullRedraw = false)
                     lastComposeAt = now
                 } else {
@@ -1158,7 +1335,7 @@ class DualDisplayComposer(
             }
         } catch (_: InterruptedException) {
         } finally {
-            for (slot in arrayOf(overlaySlot, pageDotsSlot, assistiveDotSlot)) {
+            for (slot in arrayOf(overlaySlot, pageDotsSlot, assistiveDotSlot, focusRingSlot)) {
                 if (slot.texture != 0) {
                     runCatching { GLES20.glDeleteTextures(1, intArrayOf(slot.texture), 0) }
                     slot.texture = 0
@@ -1191,6 +1368,8 @@ class DualDisplayComposer(
                     EGL14.EGL_NO_CONTEXT,
                 )
             }
+            AltScreenOutput.wake = null
+            if (altSurface != EGL14.EGL_NO_SURFACE) runCatching { EGL14.eglDestroySurface(display, altSurface) }
             runCatching { EGL14.eglDestroySurface(display, outputSurface) }
             runCatching { EGL14.eglDestroyContext(display, context) }
             runCatching { EGL14.eglTerminate(display) }

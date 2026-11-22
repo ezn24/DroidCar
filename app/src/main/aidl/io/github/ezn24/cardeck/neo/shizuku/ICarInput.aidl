@@ -90,4 +90,18 @@ interface ICarInput {
     // any call notification while its screen is up (2026-11-22), so its ringtone is the only sign of the call. Shell
     // holds MODIFY_AUDIO_ROUTING, so AudioService reports real client uids to it.
     String ringingApps();
+
+    // Multi-touch (appended, earlier transaction numbers unchanged): one touch stream per display, pointers keyed by
+    // the head unit's contact slot. The first finger is a plain single-pointer stream (the proven path); a second finger
+    // on the same display turns it into one multi-pointer stream (POINTER_DOWN / MOVE with all pointers / POINTER_UP),
+    // which is what pinch-zoom recognizers need. x = y = 0 on touchUp keeps the pointer's last position.
+    boolean touchDown(int slot, int displayId, int x, int y);
+    boolean touchMove(int slot, int displayId, int x, int y);
+    boolean touchUp(int slot, int displayId, int x, int y);
+
+    // Lock-screen streaming (VirtualDeviceManager): the car's Bluetooth address, set before each session's displays
+    // are created; empty = legacy displays only. closeVirtualDevice ends the session's virtual device (deferred while
+    // a parked display is still on it).
+    void setCompanionDevice(String btMac);
+    boolean closeVirtualDevice();
 }

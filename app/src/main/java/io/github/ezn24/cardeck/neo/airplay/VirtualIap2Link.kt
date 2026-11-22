@@ -436,6 +436,15 @@ class VirtualIap2Link(
         val identity = mfiIdentity ?: return
         if (mfiFinished || mfiCurrentLength == 0) return
         if (nowMillis() - mfiChallengeSentAtMs < mfiWindowMillis) return
+        // A window that ran out because the AirPlay session went away is not evidence about the length: recording
+        // it as silent let a dropped round demote every length to the short retry window (upstream
+        // shaonialife/cardeck 21192ad). Drop this round's timing instead.
+        if (closed) {
+            log("IAPLINK: tunnel MFi ${mfiCurrentLength}B window ended with the session closed - not recorded as silent")
+            mfiCurrentLength = 0
+            mfiFinished = true
+            return
+        }
         val failed = mfiCurrentLength
         MfiLengthMemory.recordSilent(mfiContext, identity, failed)
         log("IAPLINK: tunnel MFi ${failed}B silent for ${mfiWindowMillis}ms - recorded in memory, retrying with the next length")

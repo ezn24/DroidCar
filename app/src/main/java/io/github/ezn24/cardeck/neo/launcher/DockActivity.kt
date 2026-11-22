@@ -131,8 +131,17 @@ class DockActivity : AppCompatActivity() {
             ) = updateBattery(intent)
         }
 
+    /** Choosable items for the knob, in screen order: home / dashboard button, then the running apps. */
+    fun focusViews(): List<android.view.View> {
+        val items = ArrayList<android.view.View>()
+        findViewById<android.view.View>(R.id.dockHome)?.let { items += it }
+        appsContainer?.let { container -> for (i in 0 until container.childCount) items += container.getChildAt(i) }
+        return items
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        current = this
         val dm = resources.displayMetrics
         barForm = dm.widthPixels > dm.heightPixels
         setContentView(if (barForm) R.layout.activity_dock_bar else R.layout.activity_dock_sidebar)
@@ -183,7 +192,14 @@ class DockActivity : AppCompatActivity() {
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
     }
 
+    companion object {
+        /** The dock on the car (knob focus reads its items). */
+        @Volatile
+        var current: DockActivity? = null
+    }
+
     override fun onDestroy() {
+        if (current === this) current = null
         VirtualLauncher.removeRunningAppsListener(refreshListener)
         pollHandler.removeCallbacksAndMessages(null)
         clockHandler.removeCallbacks(clockTicker)
@@ -382,7 +398,10 @@ class DockActivity : AppCompatActivity() {
                     setPadding(pad, pad, pad, pad)
                     contentDescription = component.shortClassName
                     setOnClickListener {
-                        Bg.run("launch-app") { VirtualLauncher.launchApp(component) }
+                        Bg.run("launch-app") {
+                            VirtualLauncher.launchApp(component)
+                            VirtualLauncher.returnToDashboardOnExit = true
+                        }
                     }
                 },
                 LinearLayout.LayoutParams(iconPx + pad * 2, iconPx + pad * 2),

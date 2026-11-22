@@ -44,10 +44,16 @@ class GridActivity : AppCompatActivity() {
         /** Background-apps entry (moved from the dock to the desktop 2026-11-17, freeing the dock for running apps). */
         object Recents : Cell
 
+        /** The car's own home button (/info oemIcons): shows the car UI, the session keeps running. */
+        object Oem : Cell
+
         data class App(
             val entry: VirtualLauncher.AppEntry,
         ) : Cell
     }
+
+    /** /info arrives after the launcher's first frame: rebuild the grid when the car's home button appears or goes. */
+    private val oemListener: () -> Unit = { runOnUiThread { if (!isFinishing && !isDestroyed) reload() } }
 
     private var pages: List<List<Cell>> = emptyList()
     private var pager: ViewPager2? = null
@@ -602,6 +608,7 @@ class GridActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        current = this
         setContentView(R.layout.activity_grid)
 
         // Cell size / row count computed dynamically from the screen (layout relations in XML, size measurement in code)
@@ -663,6 +670,7 @@ class GridActivity : AppCompatActivity() {
                 .addCanvasReadyListener(canvasReadyListener)
             VirtualLauncher.addDashboardListener(dashboardListener)
             VirtualLauncher.addMapLayoutListener(mapLayoutListener)
+            VirtualLauncher.addOemListener(oemListener)
             applyDashboardMode(VirtualLauncher.dashboardMode)
         }
 
@@ -758,8 +766,83 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
+    /** Whether the desktop grid (not an app, not the dashboard page) is what the car shows. */
+    fun isDesktopOnCar(): Boolean =
+        resumedOnCar && !VirtualLauncher.dashboardMode && VirtualLauncher.activeAppDisplayId() == VirtualLauncher.gridDisplayId
+
+    @Volatile
+    private var resumedOnCar = false
+
+    fun currentPage(): Int = pager?.currentItem ?: 0
+
+    /** Cells of the desktop page on screen (knob focus). */
+    fun desktopFocusViews(): List<View> {
+        val recycler = pager?.getChildAt(0) as? RecyclerView ?: return emptyList()
+        val holder = recycler.findViewHolderForAdapterPosition(currentPage()) as? PageHolder ?: return emptyList()
+        return holder.cells()
+    }
+
+    /** Knob: slide from the dashboard to the first desktop page with the same pager animation as a left swipe. */
+    fun animateDashboardToDesktop() {
+        val p = pager ?: return
+        if (!VirtualLauncher.beginDashboardDragOut()) return
+        val total = p.width.toFloat() * 0.6f
+        val animator =
+            android.animation.ValueAnimator
+                .ofFloat(0f, total)
+                .setDuration(260)
+        var done = 0f
+        animator.addUpdateListener {
+            val value = it.animatedValue as Float
+            VirtualLauncher.dashboardDragBy(-(value - done))
+            done = value
+        }
+        animator.addListener(
+            object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    VirtualLauncher.endDashboardDrag()
+                }
+            },
+        )
+        // The drag sink posts to the same main thread: start after its beginFakeDrag
+        tickHandler.post { animator.start() }
+    }
+
+    /** Knob: the next / previous desktop page (page 0 is the dashboard and is reached from the dock or Home). */
+    fun turnDesktopPage(forward: Boolean): Boolean {
+        val p = pager ?: return false
+        val target = p.currentItem + if (forward) 1 else -1
+        if (target < 1 || target >= pages.size) return false
+        p.setCurrentItem(target, true)
+        return true
+    }
+
+    /** Dashboard media card first, then its previous / play / next buttons (knob focus); empty off the dashboard. */
+    fun dashboardFocusViews(): List<View> {
+        val panel = dashboardView ?: return emptyList()
+        return listOfNotNull(
+            panel,
+            panel.findViewById(R.id.dashPrev),
+            panel.findViewById(R.id.dashPlayPause),
+            panel.findViewById(R.id.dashNext),
+        )
+    }
+
+    override fun onPause() {
+        super.onPause()
+        resumedOnCar = false
+    }
+
     override fun onResume() {
         super.onResume()
+        resumedOnCar = true
+        // Backed out of an app the dock opened: the dashboard, not the desktop, is where it came from
+        if (VirtualLauncher.returnToDashboardOnExit && !VirtualLauncher.dashboardMode) {
+            VirtualLauncher.returnToDashboardOnExit = false
+            Bg.run("back-to-dashboard") { VirtualLauncher.showDashboard() }
+        }
+        io.github.ezn24.cardeck.neo.input.KnobFocus
+            .onCarDeckResumed()
         // Also covers returning from the settings page: checkbox changes are reflected immediately
         reload()
         refreshWallpaperIfChanged()
@@ -833,6 +916,7 @@ class GridActivity : AppCompatActivity() {
             buildList {
                 add(Cell.Pinned) // First desktop cell: head-unit settings (fixed, cannot be removed)
                 add(Cell.Recents) // Second cell: background apps (fixed)
+                if (VirtualLauncher.oemBlock != null) add(Cell.Oem)
                 apps.filter { it.component.flattenToString() in selected }.forEach { add(Cell.App(it)) }
             }
         // Page 0 = dashboard, then the desktop grid pages: swiping left/right switches between them
@@ -1007,6 +1091,8 @@ class GridActivity : AppCompatActivity() {
     private inner class PageHolder(
         private val grid: GridLayout,
     ) : RecyclerView.ViewHolder(grid) {
+        fun cells(): List<View> = (0 until grid.childCount).map { grid.getChildAt(it) }
+
         fun bind(page: Int) {
             grid.removeAllViews()
             pages[page].forEach { cell ->
@@ -1028,6 +1114,22 @@ class GridActivity : AppCompatActivity() {
                         icon.setImageResource(R.drawable.ic_app_recents)
                         label.text = getString(R.string.recent_apps)
                         view.setOnClickListener { VirtualLauncher.showRecentApps(this@GridActivity) }
+                    }
+
+                    is Cell.Oem -> {
+                        val block = VirtualLauncher.oemBlock
+                        val bitmap = block?.icon
+                        if (bitmap != null) {
+                            icon.setImageBitmap(AppIcons.plated(bitmap, iconSizePx))
+                        } else {
+                            icon.setImageResource(R.drawable.ic_app_recents)
+                        }
+                        label.text = block?.label.orEmpty()
+                        view.contentDescription = block?.label
+                        view.setOnClickListener {
+                            io.github.ezn24.cardeck.neo.SessionController
+                                .requestCarUi()
+                        }
                     }
 
                     is Cell.App -> {
@@ -1194,12 +1296,14 @@ class GridActivity : AppCompatActivity() {
         }
 
     override fun onDestroy() {
+        if (current === this) current = null
         if (VirtualLauncher.dashboardDragSink === dashboardDragSink) VirtualLauncher.dashboardDragSink = null
         tickHandler.removeCallbacks(mediaTick)
         WallpaperStore
             .removeListener(wallpaperListener)
         VirtualLauncher.removeDashboardListener(dashboardListener)
         VirtualLauncher.removeMapLayoutListener(mapLayoutListener)
+        VirtualLauncher.removeOemListener(oemListener)
         VirtualLauncher.setPageDots(null, 0f, 0f)
         MediaSessionsState
             .removeListener(mediaStateListener)
@@ -1212,7 +1316,11 @@ class GridActivity : AppCompatActivity() {
 
     override fun onBackPressed() = Unit // The desktop does not exit
 
-    private companion object {
+    companion object {
+        /** The desktop on the car (knob focus reads its cells and the dashboard card). */
+        @Volatile
+        var current: GridActivity? = null
+
         const val COLUMNS = 4 // CarPlay spec: forced 4 columns
 
         /** How long the page dots linger after paging stops before fading out. */

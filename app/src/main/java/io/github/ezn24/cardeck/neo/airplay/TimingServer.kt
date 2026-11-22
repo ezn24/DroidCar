@@ -32,6 +32,7 @@ class TimingServer(
 
     val port: Int get() = socket?.localPort ?: 0
 
+    @Synchronized
     fun start(): Boolean {
         if (port != 0 && running) return true
         return try {
@@ -50,6 +51,7 @@ class TimingServer(
         }
     }
 
+    @Synchronized
     fun stop() {
         running = false
         socket?.close()

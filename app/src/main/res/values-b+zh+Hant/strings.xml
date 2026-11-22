@@ -31,8 +31,8 @@
     <string name="ui_025" formatted="false">需要「投屏」許可權，可選 · 關閉時車機無聲音</string>
     <string name="ui_026" formatted="false">授權</string>
     <string name="ui_028" formatted="false">常亮</string>
-    <string name="ui_029" formatted="false">常亮 + 暗幕</string>
-    <string name="ui_030" formatted="false">手機不鎖屏，無操作時真息屏（斷電） · 車機不受影響</string>
+    <string name="ui_029" formatted="false">假鎖屏（常亮 + 暗幕）</string>
+    <string name="ui_030" formatted="false">開：手機不鎖屏，閒置時蓋上暗幕並關閉面板。關：手機照常鎖屏（電源鍵也行），車機畫面不受影響（Android 14+）</string>
     <string name="ui_031" formatted="false">假息屏</string>
     <string name="ui_032" formatted="false">立即假息屏</string>
     <string name="ui_033" formatted="false">點選手機螢幕任意處恢復</string>

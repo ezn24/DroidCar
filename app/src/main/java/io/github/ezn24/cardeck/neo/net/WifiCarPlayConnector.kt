@@ -319,8 +319,10 @@ class WifiCarPlayConnector(
         return try {
             val builder = WifiNetworkSpecifier.Builder().setSsid(ssid)
             when (securityType) {
-                // Open hotspot: no password
-                0 -> Unit
+                // Open hotspot. Some head units report type 0 together with a real password (upstream
+                // shaonialife/cardeck 0.1.29 field report); joining as open then never associates, so a
+                // password wins over the declared type and is tried as WPA2.
+                0 -> if (passphrase.isNotEmpty()) builder.setWpa2Passphrase(passphrase)
                 // WEP: WifiNetworkSpecifier has no matching API (modern head units no longer use it)
                 1 -> return null
                 // WPA/WPA2 and WPA3 transition mode: a transition-mode AP also accepts WPA2-PSK

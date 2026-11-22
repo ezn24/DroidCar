@@ -51,6 +51,12 @@ class RecentAppsActivity : AppCompatActivity() {
             setColor(color)
         }
 
+    override fun onPause() {
+        io.github.ezn24.cardeck.neo.input.KnobFocus
+            .onOwnScreenPaused(this)
+        super.onPause()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val root = FrameLayout(this).apply { setBackgroundColor(0xFF090B12.toInt()) }
@@ -160,6 +166,8 @@ class RecentAppsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        io.github.ezn24.cardeck.neo.input.KnobFocus
+            .onOwnScreenResumed(this)
         load()
     }
 

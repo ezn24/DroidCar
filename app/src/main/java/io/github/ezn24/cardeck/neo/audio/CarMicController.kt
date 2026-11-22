@@ -172,6 +172,14 @@ object CarMicController {
         if (!started) log("CARMIC: car microphone unavailable - summoning the assistant anyway (using the phone microphone)")
         val shown = Shell.exec("cmd voiceinteraction show", timeoutMs = 3_000L)
         log("CARMIC: assistant summoned ok=${shown.ok}${if (shown.ok) "" else " (${shown.output.take(80)})"}")
+        if (!shown.ok) {
+            // Android 17 on the S24 refuses `cmd voiceinteraction show` to shell (SecurityException, 2026-11-23).
+            // The assist key goes through the system's own assist path, the same as a long press on Home.
+            val key = Shell.exec("input keyevent KEYCODE_ASSIST", timeoutMs = 3_000L)
+            log("CARMIC: assistant via assist key ok=${key.ok}")
+        }
+        io.github.ezn24.cardeck.neo.assist.AssistOverlayController
+            .onAssistRequested()
     }
 
     private fun foreignRecorders(bound: Binding): List<String> {

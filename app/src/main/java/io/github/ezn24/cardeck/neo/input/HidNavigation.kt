@@ -35,6 +35,156 @@ object HidNavigation {
 
     private val lastButtonMask = HashMap<String, Int>()
     private val lastHat = HashMap<String, Int>()
+    private val lastDirection = HashMap<String, Int>()
+
+    private const val PAGE_CONSUMER = 0x0C
+    private const val USAGE_X = 0x30
+    private const val USAGE_Y = 0x31
+    private const val USAGE_AC_HOME = 0x223
+    private const val USAGE_AC_BACK = 0x224
+
+    /** One Input field of a report: usage, bit position and width, signed when Logical Minimum < 0. */
+    internal data class Field(
+        val page: Int,
+        val usage: Int,
+        val bitOffset: Int,
+        val bitSize: Int,
+        val signed: Boolean,
+    )
+
+    /**
+     * Input fields of a descriptor (no report IDs: these head-unit devices send one report each). Variable items get
+     * one field per usage; array and constant items only advance the bit position.
+     */
+    internal fun fieldsOf(descriptor: ByteArray): List<Field> {
+        val fields = ArrayList<Field>()
+        var page = 0
+        var reportSize = 0
+        var reportCount = 0
+        var logicalMin = 0
+        val usages = ArrayList<Int>()
+        var bit = 0
+        var index = 0
+        while (index < descriptor.size) {
+            val prefix = descriptor[index].toInt() and 0xFF
+            val size =
+                when (prefix and 0x03) {
+                    0 -> 0
+                    1 -> 1
+                    2 -> 2
+                    else -> 4
+                }
+            if (index + 1 + size > descriptor.size) break
+            var value = 0
+            for (offset in 0 until size) value = value or ((descriptor[index + 1 + offset].toInt() and 0xFF) shl (8 * offset))
+            val signedValue =
+                when (size) {
+                    1 -> value.toByte().toInt()
+                    2 -> value.toShort().toInt()
+                    else -> value
+                }
+            val type = (prefix shr 2) and 0x03
+            val tag = (prefix shr 4) and 0x0F
+            index += 1 + size
+            when (type) {
+                1 ->
+                    when (tag) {
+                        0x0 -> page = value
+                        0x1 -> logicalMin = signedValue
+                        0x7 -> reportSize = value
+                        0x9 -> reportCount = value
+                    }
+                2 -> if (tag == 0x0) usages += if (size == 4) value and 0xFFFF else value
+                0 -> {
+                    if (tag == 0x8) {
+                        val constant = (value and 0x01) != 0
+                        val variable = (value and 0x02) != 0
+                        if (!constant && variable) {
+                            for (i in 0 until reportCount) {
+                                val usage = usages.getOrNull(i) ?: usages.lastOrNull() ?: 0
+                                fields += Field(page, usage, bit + i * reportSize, reportSize, logicalMin < 0)
+                            }
+                        }
+                        bit += reportSize * reportCount
+                    }
+                    usages.clear()
+                }
+            }
+        }
+        return fields
+    }
+
+    internal fun valueOf(
+        report: ByteArray,
+        field: Field,
+    ): Int {
+        var raw = 0L
+        for (i in 0 until field.bitSize) {
+            val bitIndex = field.bitOffset + i
+            val byte = bitIndex / 8
+            if (byte >= report.size) return 0
+            if ((report[byte].toInt() shr (bitIndex % 8)) and 1 == 1) raw = raw or (1L shl i)
+        }
+        if (field.signed && field.bitSize in 1..31 && (raw and (1L shl (field.bitSize - 1))) != 0L) {
+            raw -= 1L shl field.bitSize
+        }
+        return raw.toInt()
+    }
+
+    /**
+     * Knob devices that describe a 4-way stick as Generic Desktop X/Y and Home/Back as Consumer AC usages (ChairPlay /
+     * xcertplay knob: `[select|home|back bits][X s8][Y s8][wheel s8]`). The older bitmap layout below stays for
+     * descriptors without them (BMW iD8.5 calibration).
+     */
+    private fun usesFieldLayout(fields: List<Field>): Boolean =
+        fields.any {
+            (it.page == PAGE_GENERIC_DESKTOP && (it.usage == USAGE_X || it.usage == USAGE_Y)) ||
+                (it.page == PAGE_CONSUMER && (it.usage == USAGE_AC_HOME || it.usage == USAGE_AC_BACK))
+        }
+
+    private fun parseFields(
+        uuid: String,
+        fields: List<Field>,
+        report: ByteArray,
+    ): List<Int> {
+        val keys = ArrayList<Int>(3)
+        var mask = 0
+        var x = 0
+        var y = 0
+        var wheel = 0
+        for (field in fields) {
+            val value = valueOf(report, field)
+            when {
+                field.page == PAGE_BUTTON && field.usage == 1 -> if (value != 0) mask = mask or 0x01
+                field.page == PAGE_CONSUMER && field.usage == USAGE_AC_HOME -> if (value != 0) mask = mask or 0x02
+                field.page == PAGE_CONSUMER && field.usage == USAGE_AC_BACK -> if (value != 0) mask = mask or 0x04
+                field.page == PAGE_GENERIC_DESKTOP && field.usage == USAGE_X -> x = value
+                field.page == PAGE_GENERIC_DESKTOP && field.usage == USAGE_Y -> y = value
+                field.page == PAGE_GENERIC_DESKTOP && field.usage == USAGE_WHEEL -> wheel = value
+            }
+        }
+        val pressed = mask and lastButtonMask[uuid].orZero().inv()
+        lastButtonMask[uuid] = mask
+        if ((pressed and 0x01) != 0) keys += KeyEvent.KEYCODE_DPAD_CENTER
+        if ((pressed and 0x02) != 0) keys += KeyEvent.KEYCODE_HOME
+        if ((pressed and 0x04) != 0) keys += KeyEvent.KEYCODE_BACK
+        // The stick reports a held direction: one key when it leaves the centre or changes direction
+        val direction =
+            when {
+                x > 0 -> KeyEvent.KEYCODE_DPAD_RIGHT
+                x < 0 -> KeyEvent.KEYCODE_DPAD_LEFT
+                y < 0 -> KeyEvent.KEYCODE_DPAD_UP
+                y > 0 -> KeyEvent.KEYCODE_DPAD_DOWN
+                else -> 0
+            }
+        if (direction != 0 && direction != lastDirection[uuid]) keys += direction
+        lastDirection[uuid] = direction
+        if (wheel != 0) {
+            val key = if (wheel > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP
+            repeat(kotlin.math.abs(wheel).coerceAtMost(MAX_STEPS)) { keys += key }
+        }
+        return keys
+    }
 
     /** Whether the report's device is a navigation device (has Wheel/Hat and is not a touch screen). */
     fun isNavigationDevice(descriptor: ByteArray?): Boolean {
@@ -64,10 +214,12 @@ object HidNavigation {
                     " nav=${isNavigationDevice(descriptor)}",
             )
         }
-        return if (descriptor != null && hasUsage(descriptor, USAGE_HAT_SWITCH) && report.size == 1) {
-            parseHat(uuid, report[0].toInt() and 0xFF)
-        } else {
-            parseWheelAndButtons(uuid, report)
+        val fields = descriptor?.let(::fieldsOf).orEmpty()
+        return when {
+            usesFieldLayout(fields) -> parseFields(uuid, fields, report)
+            descriptor != null && hasUsage(descriptor, USAGE_HAT_SWITCH) && report.size == 1 ->
+                parseHat(uuid, report[0].toInt() and 0xFF)
+            else -> parseWheelAndButtons(uuid, report)
         }
     }
 
@@ -195,6 +347,7 @@ object HidNavigation {
             KeyEvent.KEYCODE_DPAD_RIGHT -> "right"
             KeyEvent.KEYCODE_DPAD_CENTER -> "confirm"
             KeyEvent.KEYCODE_BACK -> "back"
+            KeyEvent.KEYCODE_HOME -> "home"
             else -> "$keyCode"
         }
 }

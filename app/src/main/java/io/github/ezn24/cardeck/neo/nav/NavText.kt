@@ -59,7 +59,9 @@ object NavText {
                 "yd", "yard", "yards" -> value * 0.9144 to RouteGuidanceUpdate.UNIT_YARDS
                 else -> value to RouteGuidanceUpdate.UNIT_METERS
             }
-        return Distance(meters.toLong(), match.value.trim(), unit)
+        // The display string is the number only, as an iPhone sends it: receivers append the unit field themselves
+        // (ChairPlay's HUD showed "809 m m" while the unit was part of the string).
+        return Distance(meters.toLong(), match.groupValues[1], unit)
     }
 
     /** True when [text] is essentially only a distance (the big "60 m" / "200米" label of a maneuver card). */
@@ -372,11 +374,11 @@ object NavText {
                 if (meters >= 1000) {
                     RouteGuidanceUpdate.Distance(
                         meters,
-                        "%.1f km".format(java.util.Locale.ROOT, meters / 1000.0),
+                        "%.1f".format(java.util.Locale.ROOT, meters / 1000.0),
                         RouteGuidanceUpdate.UNIT_KM,
                     )
                 } else {
-                    RouteGuidanceUpdate.Distance(meters, "$meters m", RouteGuidanceUpdate.UNIT_METERS)
+                    RouteGuidanceUpdate.Distance(meters, "$meters", RouteGuidanceUpdate.UNIT_METERS)
                 }
             }
         return info.copy(

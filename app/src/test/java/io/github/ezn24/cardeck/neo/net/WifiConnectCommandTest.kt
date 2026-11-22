@@ -37,6 +37,15 @@ class WifiConnectCommandTest {
     }
 
     @Test
+    fun declaredOpenWithPassphraseJoinsAsWpa2() {
+        // Some head units declare security NONE but still send a real password
+        assertEquals(
+            "cmd wifi connect-network 'DIRECT-BMW' wpa2 'secret123' -d",
+            WifiConnectCommand.build("DIRECT-BMW", "secret123", 0),
+        )
+    }
+
+    @Test
     fun emptyPassphraseFallsBackToOpen() {
         // Contradictory arguments (WPA2 given but no password): do not generate a half command, try as an open hotspot
         assertEquals(

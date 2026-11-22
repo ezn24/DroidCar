@@ -95,7 +95,9 @@ class AirPlayClient(
 
     /**
      * Timing service (advertised in the initial SETUP; the head unit NTP-pings it to sync its media clock).
-     * Started lazily and kept across retries (close() does not stop it, since the UDP socket has no session state).
+     * Started lazily and kept across retries (close() does not stop it, since the UDP socket has no session state);
+     * [release] stops it when the client is discarded. Every round builds a new client, so without that each
+     * reconnect leaked one blocked receive thread + UDP socket (upstream shaonialife/cardeck 1d3afc8).
      */
     private val timingServer = TimingServer(log)
 
@@ -494,6 +496,12 @@ class AirPlayClient(
         }
     }
 
+    /** [close] plus the per-client timing service: for a client that will not be reconnected again. */
+    fun release() {
+        close()
+        timingServer.stop()
+    }
+
     fun close() {
         sessionSetUp = false
         runCatching { socket?.close() }
@@ -652,6 +660,26 @@ class AirPlayClient(
     }
 
     fun assertModes(): Boolean {
+        if (screenHandedToCar) {
+            log("AIRPLAY: modesChanged re-assertion skipped - the screen is handed to the car (home button)")
+            return true
+        }
+        val ok = postModes(screenEntity = 1L, screenPermanent = 1L, audioEntity = 1L, audioPermanent = 1L)
+        log("AIRPLAY: modesChanged (declaring ownership of main screen/main audio resources) ok=$ok")
+        if (ok) modesAsserted = true
+        return ok
+    }
+
+    /**
+     * modesChanged on the control channel. Entities: 1 = phone (controller), 2 = car (accessory).
+     * appStates stay "none" (phone call / navigation 0, speech -1).
+     */
+    private fun postModes(
+        screenEntity: Long,
+        screenPermanent: Long,
+        audioEntity: Long,
+        audioPermanent: Long,
+    ): Boolean {
         val body =
             BinaryPlist.encode(
                 linkedMapOf(
@@ -666,26 +694,110 @@ class AirPlayClient(
                                 ),
                             "resources" to
                                 listOf(
-                                    linkedMapOf<String, Any?>("resourceID" to 1L, "entity" to 1L, "permanentEntity" to 1L),
-                                    linkedMapOf<String, Any?>("resourceID" to 2L, "entity" to 1L, "permanentEntity" to 1L),
+                                    linkedMapOf<String, Any?>(
+                                        "resourceID" to 1L,
+                                        "entity" to screenEntity,
+                                        "permanentEntity" to screenPermanent,
+                                    ),
+                                    linkedMapOf<String, Any?>(
+                                        "resourceID" to 2L,
+                                        "entity" to audioEntity,
+                                        "permanentEntity" to audioPermanent,
+                                    ),
                                 ),
                         ),
                 ),
             )
         return try {
             val (statusLine, _) =
-                request(
-                    "POST",
-                    "/command",
-                    body,
-                    contentType = "application/x-apple-binary-plist",
-                )
-            log("AIRPLAY: modesChanged (declaring ownership of main screen/main audio resources) [$statusLine]")
+                request("POST", "/command", body, contentType = "application/x-apple-binary-plist")
+            if (!statusLine.contains("200")) log("AIRPLAY: modesChanged answered [$statusLine]")
             statusLine.contains("200")
         } catch (error: IOException) {
             log("AIRPLAY: modesChanged failed - ${error.message}")
             false
         }
+    }
+
+    /** Set once a modesChanged claiming the screen was accepted in this session. */
+    @Volatile
+    private var modesAsserted = false
+
+    /** The home button gave the screen back to the car; modesChanged re-assertions hold off until it is taken back. */
+    @Volatile
+    var screenHandedToCar = false
+        private set
+
+    /**
+     * Home button on our launcher: show the car's own UI and keep the session (ported from upstream
+     * shaonialife/cardeck 9686391 + f1e762d, verified there on an Audi: to MMI and back). `requestUI` always goes out;
+     * when the screen was declared ours, modesChanged also hands it over: screen car/car, main audio car with the
+     * phone as permanent owner (the car's own mode dump after an iPhone did the same: "screen Car (permanent: Car),
+     * mainAudio Car (permanent: iOS)"). The video stream keeps running. Without the handover our periodic
+     * re-assertions would take the screen straight back.
+     */
+    fun handScreenToCar(): Boolean {
+        val ui =
+            try {
+                val (statusLine, _) =
+                    request(
+                        "POST",
+                        "/command",
+                        BinaryPlist.encode(linkedMapOf("type" to "requestUI")),
+                        contentType = "application/x-apple-binary-plist",
+                    )
+                statusLine.contains("200")
+            } catch (error: IOException) {
+                log("AIRPLAY: requestUI failed - ${error.message}")
+                false
+            }
+        if (!modesAsserted) {
+            log("OEM: requestUI ok=$ui (screen never declared ours, no modesChanged handover)")
+            return ui
+        }
+        val handed = postModes(screenEntity = 2L, screenPermanent = 2L, audioEntity = 2L, audioPermanent = 1L)
+        if (handed) screenHandedToCar = true
+        log("OEM: requestUI ok=$ui + modesChanged screen -> car ok=$handed")
+        return ui
+    }
+
+    /** The car gives the screen back (its CarPlay button sends requestUI, or it asks with changeModes). */
+    fun takeScreenBack(reason: String): Boolean {
+        val wasHanded = screenHandedToCar
+        screenHandedToCar = false
+        val ok = assertModes()
+        if (wasHanded) log("OEM: screen taken back ($reason) ok=$ok")
+        return ok
+    }
+
+    /**
+     * /info `oemIcons` -> the launcher's "back to the car" cell. The car sends several sizes (Audi 104/156/256 px):
+     * take the largest, the smallest looks blurred when scaled up (upstream 27973dc).
+     */
+    private fun publishOemBlock(info: Map<*, *>?) {
+        val visible = info?.get("oemIconVisible") == true
+        val label =
+            (info?.get("oemIconLabel") as? String).orEmpty().ifBlank { (info?.get("name") as? String).orEmpty() }
+        if (!visible || label.isBlank()) {
+            io.github.ezn24.cardeck.neo.launcher.VirtualLauncher
+                .setOemBlock(null)
+            return
+        }
+        val best =
+            (info["oemIcons"] as? List<*>)
+                .orEmpty()
+                .mapNotNull { it as? Map<*, *> }
+                .maxByOrNull { (it["widthPixels"] as? Number)?.toLong() ?: 0L }
+        val bytes = best?.get("imageData") as? ByteArray
+        val icon =
+            bytes?.let { data ->
+                runCatching { android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size) }.getOrNull()
+            }
+        log("OEM: car home button \"$label\" icon=${icon?.let { "${it.width}x${it.height}" } ?: "none"}")
+        io.github.ezn24.cardeck.neo.launcher.VirtualLauncher.setOemBlock(
+            io.github.ezn24.cardeck.neo.launcher.VirtualLauncher
+                .OemBlock(label, icon),
+        )
     }
 
     /**
@@ -777,6 +889,7 @@ class AirPlayClient(
         var infoRoot: Map<*, *>? = null
         val infoMap = loadInfoWithDiagnostics()
         infoRoot = infoMap
+        publishOemBlock(infoMap)
         val display = (infoMap?.get("displays") as? List<*>)?.firstOrNull() as? Map<*, *>
         if (display == null) {
             log(
@@ -875,6 +988,31 @@ class AirPlayClient(
                 hevc =
                     infoRoot?.containsKey("hevcInfo") == true &&
                         (root["enabledFeatures"] as? List<*>)?.any { it.toString() == "hevc" } == true,
+                altDisplay =
+                    if ((root["enabledFeatures"] as? List<*>)?.any { it.toString() == "altScreen" } == true) {
+                        (infoRoot?.get("displays") as? List<*>)
+                            ?.mapNotNull { it as? Map<*, *> }
+                            ?.firstOrNull { (it["type"] as? Number)?.toInt() == ALT_SCREEN_STREAM_TYPE.toInt() }
+                            ?.let { alt ->
+                                val uuid = uuidText(alt["uuid"] ?: alt["UUID"]) ?: return@let null
+                                AltDisplay(
+                                    uuid,
+                                    ((alt["widthPixels"] as? Number)?.toInt() ?: 0),
+                                    ((alt["heightPixels"] as? Number)?.toInt() ?: 0),
+                                    ((alt["maxFPS"] as? Number)?.toInt() ?: 30),
+                                    (alt["viewAreas"] as? List<*>).orEmpty().mapNotNull { area ->
+                                        val m = area as? Map<*, *> ?: return@mapNotNull null
+
+                                        fun n(key: String) = (m[key] as? Number)?.toInt() ?: 0
+                                        intArrayOf(n("originXPixels"), n("originYPixels"), n("widthPixels"), n("heightPixels"))
+                                            .takeIf { it[2] > 0 && it[3] > 0 }
+                                    },
+                                    ((alt["initialViewArea"] as? Number)?.toInt() ?: 0),
+                                ).takeIf { it.width > 0 && it.height > 0 }
+                            }
+                    } else {
+                        null
+                    },
             )
         sessionEnabledFeatures = info.enabledFeatures
         log(
@@ -1078,6 +1216,21 @@ class AirPlayClient(
         val keepAliveSendStatsAsBody: Boolean = false,
         /** The receiver declares and accepts HEVC (see where [hevc] is assigned). */
         val hevc: Boolean = false,
+        /**
+         * Second display (/info displays[] with type 111, e.g. an instrument cluster), offered only when the session
+         * SETUP reply enables "altScreen". null = none.
+         */
+        val altDisplay: AltDisplay? = null,
+    )
+
+    class AltDisplay(
+        val uuid: String,
+        val width: Int,
+        val height: Int,
+        val maxFps: Int,
+        /** /info viewAreas as (x, y, w, h); the receiver picks one with updateViewArea. */
+        val viewAreas: List<IntArray> = emptyList(),
+        val initialViewArea: Int = 0,
     )
 
     /** Screen-stream negotiation result. */
@@ -1788,6 +1941,9 @@ class AirPlayClient(
         /** Main screen video stream type (see receiver STREAM_TYPE_MAIN_SCREEN; 100 is audio, 130 is the data/iAP tunnel). */
         const val SCREEN_STREAM_TYPE = 110L
 
+        /** Alternate screen (instrument cluster / HUD display), /info displays[] type 111. */
+        const val ALT_SCREEN_STREAM_TYPE = 111L
+
         /** Main audio stream type (DiPlay STREAM_TYPE_MAIN_AUDIO; PCM path). */
         const val AUDIO_STREAM_TYPE = 100L
 
@@ -2405,10 +2561,21 @@ class AirPlayClient(
      * [sessionKey]: shared secret derived by pair-verify; null = unpaired session (`et=NONE`),
      * which follows catplay: AES-128-CTR + all-zero session key.
      */
+
+    /** Stream SETUP for the alternate (cluster) display, type 111. */
+    fun runAltScreenStream(
+        sessionKey: ByteArray?,
+        displayUuid: String,
+    ): ScreenStreamInfo? = runScreenStream(sessionKey, displayUuid, ALT_SCREEN_STREAM_TYPE)
+
     fun runScreenStream(
         sessionKey: ByteArray?,
         displayUuid: String? = null,
+        /** 110 = main screen, 111 = the alternate (cluster) screen; same SETUP and frame format. */
+        streamType: Long = SCREEN_STREAM_TYPE,
     ): ScreenStreamInfo? {
+        val alt = streamType == ALT_SCREEN_STREAM_TYPE
+        val label = if (alt) "alt screen" else "main screen"
         // Follows catplay (real-car verified): streamConnectionID = random u64 (+1 to guarantee non-zero)
         val connectionId = java.security.SecureRandom().nextLong() and Long.MAX_VALUE or 1L
         val streamUuid =
@@ -2416,7 +2583,7 @@ class AirPlayClient(
                 .randomUUID()
                 .toString()
         log(
-            "AIRPLAY: main screen stream SETUP uuid=$streamUuid " +
+            "AIRPLAY: $label stream SETUP uuid=$streamUuid " +
                 if (displayUuid == null) {
                     " (WARNING: /info provided no displayUuid, so a random value is used; the head unit may accept the stream but not bind it to any screen)"
                 } else {
@@ -2429,7 +2596,8 @@ class AirPlayClient(
                     "streams" to
                         listOf(
                             linkedMapOf<String, Any?>(
-                                "type" to SCREEN_STREAM_TYPE, // 110 = main screen (100 is audio, for which DiPlay opens a UDP port)
+                                // 110 = main screen, 111 = alt screen (100 is audio, for which DiPlay opens a UDP port)
+                                "type" to streamType,
                                 "streamConnectionID" to connectionId,
                                 // Real iPhone / catplay sender: uuid and latencyMs must both be present.
                                 // uuid must be the display UUID declared in the receiver /info displays[] (real cars validate it;
@@ -2478,7 +2646,7 @@ class AirPlayClient(
         val screen = streams.firstOrNull() as? Map<*, *>
         val dataPort = portOf(screen?.get("dataPort"))
         if (screen == null || dataPort == 0) {
-            log("AIRPLAY: main screen stream rejected (streams=$streams)")
+            log("AIRPLAY: $label stream rejected (streams=$streams)")
             return null
         }
         val cipher =
@@ -2489,12 +2657,12 @@ class AirPlayClient(
                 StreamFrameCipher.AesCtr(key, iv)
             }
         log(
-            "AIRPLAY: ✓ main screen stream negotiated dataPort=$dataPort connId=$connectionId " +
+            "AIRPLAY: ✓ $label stream negotiated dataPort=$dataPort connId=$connectionId " +
                 "encryption=${if (cipher is StreamFrameCipher.ChaCha) "ChaCha20" else "AES-128-CTR (unpaired session)"}",
         )
         // MIB3: after the screen-stream SETUP 200 gives the dataPort, a real device sends detect on the control channel (Frida
         // timing: screen SETUP -> phone detect on control -> HU SYN on control). See armMib3VirtualLink.
-        armMib3VirtualLink()
+        if (!alt) armMib3VirtualLink()
         return ScreenStreamInfo(connectionId, dataPort, cipher)
     }
 
@@ -2651,7 +2819,12 @@ class AirPlayClient(
                                 continue
                             }
                             try {
-                                if (AdapterMode.active && command["type"] == "requestUI") onAdapterRequestUI()
+                                if (AdapterMode.active && command["type"] == "requestUI") {
+                                    onAdapterRequestUI()
+                                } else if (command["type"] == "requestUI" && screenHandedToCar) {
+                                    // The car's CarPlay button: take the screen back off the event reader thread
+                                    adapterUiTx.execute { takeScreenBack("car requestUI") }
+                                }
                                 onCommand(command)
                             } catch (error: Exception) {
                                 log("EVENT: command handling exception - ${error.message}")

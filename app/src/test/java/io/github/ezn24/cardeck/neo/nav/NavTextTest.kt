@@ -18,6 +18,8 @@ class NavTextTest {
         assertEquals(60L, NavText.distance("60 m")!!.meters)
         assertEquals(RouteGuidanceUpdate.UNIT_METERS, NavText.distance("60 m")!!.unit)
         assertEquals(1200L, NavText.distance("1.2 km")!!.meters)
+        // Number only: the unit travels in its own field and receivers append it
+        assertEquals("1.2", NavText.distance("1.2 km")!!.text)
         assertEquals(RouteGuidanceUpdate.UNIT_KM, NavText.distance("1,2 km")!!.unit)
         assertEquals(200L, NavText.distance("200米后")!!.meters)
         assertEquals(1500L, NavText.distance("剩余1.5公里")!!.meters)
@@ -89,7 +91,7 @@ class NavTextTest {
 
     @Test
     fun routeAndManeuverFramesCarryTheFields() {
-        val distance = RouteGuidanceUpdate.Distance(60, "60 m", RouteGuidanceUpdate.UNIT_METERS)
+        val distance = RouteGuidanceUpdate.Distance(60, "60", RouteGuidanceUpdate.UNIT_METERS)
         val maneuver =
             RouteGuidanceUpdate.maneuverFrame(
                 RouteGuidanceUpdate.Maneuver(
@@ -132,7 +134,7 @@ class NavTextTest {
         assertNull("no components when the accessory named none", r[0])
         assertEquals(RouteGuidanceUpdate.ROUTE_SET, r[1]!!.value.single().toInt())
         assertEquals(8, r[5]!!.value.size)
-        assertEquals("60 m", r[11]!!.asString())
+        assertEquals("60", r[11]!!.asString())
         assertEquals(listOf(7), r[13]!!.asU16List())
 
         val none = RouteGuidanceUpdate.routeFrame(RouteGuidanceUpdate.Route(RouteGuidanceUpdate.ROUTE_NO_ROUTE), emptyList())
@@ -265,7 +267,7 @@ class NavTextTest {
         assertEquals(3700L, live.toManeuver!!.meters)
         assertEquals("Lonsdale St", live.afterRoad)
         assertEquals(14_914L, live.remaining!!.meters)
-        assertEquals("14.9 km", live.remaining!!.text)
+        assertEquals("14.9", live.remaining!!.text)
         // Without a road in the title, Samsung's secondary info is used
         val bare = NavText.withLiveUpdate(parsed.copy(afterRoad = ""), null, "E4 號出口 Toorak Rd", null)
         assertEquals("E4 號出口 Toorak Rd", bare.afterRoad)

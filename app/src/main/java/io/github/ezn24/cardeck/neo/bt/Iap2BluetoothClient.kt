@@ -263,6 +263,7 @@ class Iap2BluetoothClient(
                 val socket = tryConnect(device)
                 if (socket != null) {
                     log("BT-C: connected to the wireless iAP2 service of $name (RFCOMM established)")
+                    BtSessionGate.lastPeerAddress = device.address
                     connected = socket
                     break
                 } else {
@@ -414,6 +415,13 @@ class Iap2BluetoothClient(
  * Reason: a head unit usually has a single wireless iAP2 context, and links opened in both directions interfere with each other.
  */
 object BtSessionGate {
+    /**
+     * Bluetooth address of the last iAP2 peer (the car), outbound or inbound. The lock-screen virtual device is
+     * associated with it; with target "Auto" the actual peer is the only reliable source.
+     */
+    @Volatile
+    var lastPeerAddress: String? = null
+
     /** An inbound (head unit initiated) iAP2 session is active: outbound pauses so two RFCOMM links do not step on each other. */
     @Volatile
     var inboundActive: Boolean = false

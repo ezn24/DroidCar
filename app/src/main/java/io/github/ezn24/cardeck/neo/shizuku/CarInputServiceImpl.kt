@@ -897,6 +897,160 @@ class CarInputServiceImpl(
         return inject(up, displayId)
     }
 
+    // ---- Multi-touch: one stream, pointers keyed by contact slot (upstream shaonialife/cardeck 3a83dc6) ----
+
+    private class SlotTouch(
+        val pointerId: Int,
+        val displayId: Int,
+        var x: Float,
+        var y: Float,
+    )
+
+    private val slotTouches = java.util.TreeMap<Int, SlotTouch>()
+    private var touchDownTime = 0L
+
+    /** The stream has carried two or more pointers: from then on every event lists all pointers (multi form). */
+    private var multiStream = false
+
+    @Synchronized
+    override fun touchDown(
+        slot: Int,
+        displayId: Int,
+        x: Int,
+        y: Int,
+    ): Boolean {
+        if (slotTouches.containsKey(slot)) return true
+        val now = SystemClock.uptimeMillis()
+        if (slotTouches.isEmpty()) {
+            val down = build(now, now, MotionEvent.ACTION_DOWN, x.toFloat(), y.toFloat()) ?: return false
+            val ok = inject(down, displayId)
+            if (ok) {
+                touchDownTime = now
+                multiStream = false
+                // The single-pointer obtain always uses pointer id 0
+                slotTouches[slot] = SlotTouch(0, displayId, x.toFloat(), y.toFloat())
+            }
+            return ok
+        }
+        // Both fingers of a pinch are on one display; another display cannot join this stream
+        if (slotTouches.values.first().displayId != displayId) return false
+        val used = slotTouches.values.map { it.pointerId }.toSet()
+        val id = (0..31).first { it !in used }
+        slotTouches[slot] = SlotTouch(id, displayId, x.toFloat(), y.toFloat())
+        multiStream = true
+        val event = buildMulti(now, MotionEvent.ACTION_POINTER_DOWN, slot)
+        val ok = event != null && inject(event, displayId)
+        if (!ok) slotTouches.remove(slot)
+        return ok
+    }
+
+    @Synchronized
+    override fun touchMove(
+        slot: Int,
+        displayId: Int,
+        x: Int,
+        y: Int,
+    ): Boolean {
+        val touch = slotTouches[slot] ?: return true // stale MOVE after its stream ended
+        if (touch.displayId != displayId) return true
+        touch.x = x.toFloat()
+        touch.y = y.toFloat()
+        val now = SystemClock.uptimeMillis()
+        val event =
+            if (multiStream) {
+                buildMulti(now, MotionEvent.ACTION_MOVE, slot)
+            } else {
+                build(touchDownTime, now, MotionEvent.ACTION_MOVE, touch.x, touch.y)
+            } ?: return false
+        return inject(event, displayId)
+    }
+
+    @Synchronized
+    override fun touchUp(
+        slot: Int,
+        displayId: Int,
+        x: Int,
+        y: Int,
+    ): Boolean {
+        val touch = slotTouches[slot] ?: return true
+        if (touch.displayId != displayId) return true
+        if (x != 0 || y != 0) {
+            touch.x = x.toFloat()
+            touch.y = y.toFloat()
+        }
+        val now = SystemClock.uptimeMillis()
+        val remaining = slotTouches.size - 1
+        // The lifting pointer must still be in the event, so it is removed only afterwards. In a multi stream a
+        // single-pointer UP would carry only id 0 and leave the other pointer stuck down (upstream device finding).
+        val event =
+            if (multiStream) {
+                buildMulti(now, if (remaining > 0) MotionEvent.ACTION_POINTER_UP else MotionEvent.ACTION_UP, slot)
+            } else {
+                build(touchDownTime, now, MotionEvent.ACTION_UP, touch.x, touch.y)
+            }
+        val ok = event != null && inject(event, displayId)
+        slotTouches.remove(slot)
+        if (slotTouches.isEmpty()) multiStream = false
+        return ok
+    }
+
+    /**
+     * All active pointers of the stream, sorted by slot. toolType must be FINGER (the default UNKNOWN made apps ignore
+     * the injected pinch upstream) and the contact size fields non-zero. Uses the public 14-argument obtain; the target
+     * display is set in [inject].
+     */
+    private fun buildMulti(
+        now: Long,
+        action: Int,
+        actionSlot: Int,
+    ): MotionEvent? =
+        try {
+            val entries = slotTouches.entries.toList()
+            val count = entries.size
+            val properties = Array(count) { MotionEvent.PointerProperties() }
+            val coords = Array(count) { MotionEvent.PointerCoords() }
+            var actionIndex = 0
+            entries.forEachIndexed { index, (slot, touch) ->
+                properties[index].id = touch.pointerId
+                properties[index].toolType = MotionEvent.TOOL_TYPE_FINGER
+                coords[index].x = touch.x
+                coords[index].y = touch.y
+                coords[index].pressure = 1f
+                coords[index].size = 1f
+                coords[index].touchMajor = 40f
+                coords[index].touchMinor = 40f
+                coords[index].toolMajor = 40f
+                coords[index].toolMinor = 40f
+                if (slot == actionSlot) actionIndex = index
+            }
+            val fullAction =
+                if (action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP) {
+                    action or (actionIndex shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+                } else {
+                    action
+                }
+            MotionEvent
+                .obtain(
+                    touchDownTime,
+                    now,
+                    fullAction,
+                    count,
+                    properties,
+                    coords,
+                    0, // metaState
+                    0, // buttonState
+                    1f, // xPrecision
+                    1f, // yPrecision
+                    0, // deviceId
+                    0, // edgeFlags
+                    InputDevice.SOURCE_TOUCHSCREEN,
+                    0, // flags
+                ).apply { setSource(InputDevice.SOURCE_TOUCHSCREEN) }
+        } catch (t: Throwable) {
+            Log.d(TAG, "build multi-pointer MotionEvent exception", t)
+            null
+        }
+
     // ---- Trusted virtual display ----
 
     // VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 << 30 (@hide/@SystemApi, not referable at compile time, so the raw value is written)
@@ -990,6 +1144,100 @@ class CarInputServiceImpl(
         }
     }
 
+    // ---- Lock-screen streaming: displays on a VirtualDeviceManager device (see VirtualDeviceSession) ----
+
+    @Volatile
+    private var companionMac: String? = null
+
+    @Volatile
+    private var vdmFailedThisSession = false
+
+    private val vdmLock = Any()
+    private var vdmSession: VirtualDeviceSession? = null
+
+    override fun setCompanionDevice(btMac: String?) {
+        val mac = btMac?.trim()?.takeIf { it.isNotEmpty() }
+        synchronized(vdmLock) {
+            if (!mac.equals(companionMac, ignoreCase = true)) {
+                // Another car: the old device and its displays (a parked map of that car) go
+                vdmSession?.let { old -> runCatching { old.close() } }
+                vdmSession = null
+            }
+            vdmSession?.closeWhenEmpty = false
+            companionMac = mac
+            vdmFailedThisSession = false
+        }
+        fileLog("VDM: companion device " + (mac ?: "none, legacy displays"))
+    }
+
+    override fun closeVirtualDevice(): Boolean {
+        synchronized(vdmLock) {
+            val session = vdmSession ?: return true
+            if (session.displayCount() > 0) {
+                // A display stays parked (navigation map kept across a disconnect): close when it is released
+                session.closeWhenEmpty = true
+                fileLog("VDM: close deferred, ${session.displayCount()} display(s) still on the device")
+                return true
+            }
+            vdmSession = null
+            return runCatching { session.close() }.isSuccess
+        }
+    }
+
+    private fun obtainVdmSession(): VirtualDeviceSession? {
+        if (!VirtualDeviceRoute.shouldAttempt(Build.VERSION.SDK_INT, companionMac, vdmFailedThisSession)) return null
+        synchronized(vdmLock) {
+            if (vdmFailedThisSession) return null
+            val mac = companionMac ?: return null
+            vdmSession?.let { if (it.mac.equals(mac, ignoreCase = true)) return it }
+            return try {
+                VirtualDeviceSession(shellContext(), mac, ::fileLog).also {
+                    it.ensure()
+                    vdmSession = it
+                    fileLog("VDM: ready ${it.describe()}")
+                }
+            } catch (t: Throwable) {
+                vdmFailedThisSession = true
+                fileLog("VDM: unavailable this session, legacy displays (${rootCause(t)})")
+                null
+            }
+        }
+    }
+
+    private fun rootCause(t: Throwable): String {
+        var cause = t
+        var depth = 0
+        while (cause.cause != null && cause.cause !== cause && depth++ < 5) cause = cause.cause!!
+        return "${cause.javaClass.name}: ${cause.message}"
+    }
+
+    /** Display on the virtual device, or null to fall back to the legacy path. */
+    private fun createVdmDisplay(
+        name: String,
+        width: Int,
+        height: Int,
+        dpi: Int,
+        surface: Surface,
+        trusted: Boolean,
+    ): Int? {
+        val session = obtainVdmSession() ?: return null
+        val candidates = if (trusted) VirtualDeviceRoute.trustedFlagCandidates else VirtualDeviceRoute.dockFlagCandidates
+        for (flags in candidates) {
+            val display =
+                runCatching { session.createDisplay(name, width, height, dpi, surface, flags) }
+                    .onFailure { fileLog("VDM: $name flags=0x${flags.toString(16)} failed: ${rootCause(it)}") }
+                    .getOrNull() ?: continue
+            val id = display.display.displayId
+            synchronized(virtualDisplays) { virtualDisplays[id] = display }
+            if (trusted) applyImePolicyLocal(id)
+            fileLog("VDM: $name id=$id flags=0x${flags.toString(16)} on the virtual device")
+            return id
+        }
+        vdmFailedThisSession = true
+        fileLog("VDM: $name could not be created on the virtual device - legacy displays this session")
+        return null
+    }
+
     // WrongConstant: TRUSTED/ALWAYS_UNLOCKED/OWN_DISPLAY_GROUP in flags are @hide constants
     // (runtime viability confirmed on a real device); lint's IntDef model only knows the public API.
     @android.annotation.SuppressLint("WrongConstant")
@@ -1003,6 +1251,8 @@ class CarInputServiceImpl(
     ): Int {
         return try {
             fileLog("createDisplay $name ${width}x$height@$dpi start")
+            // Virtual device first (keeps streaming while the phone is locked or asleep); any failure -> legacy below
+            createVdmDisplay(name, width, height, dpi, surface, trusted)?.let { return it }
             // Key point: the "shell package Context" must be used: the system checks that packageName matches the calling uid (2000),
             // and the app's own Context throws SecurityException('packageName must match the owner uid')
             val shellContext =
@@ -1218,6 +1468,13 @@ class CarInputServiceImpl(
         return try {
             vd.release()
             Log.i(TAG, "releaseDisplay id=$displayId")
+            synchronized(vdmLock) {
+                val session = vdmSession
+                if (session != null && session.discard(displayId)) {
+                    vdmSession = null
+                    runCatching { session.close() }
+                }
+            }
             true
         } catch (t: Throwable) {
             Log.w(TAG, "releaseDisplay $displayId failed: $t")

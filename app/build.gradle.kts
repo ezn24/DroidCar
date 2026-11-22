@@ -18,16 +18,28 @@ plugins {
  * Local builds must pass the same value, so that the same commit gets the same version number on both sides
  * (for a **release-signed** package, see [buildNumber] below); no commit needs to be written to the repository.
  */
-val appVersionName = "0.1.43"
+val appVersionName = "1.43"
+
+/**
+ * `major.minor` (from 1.43 on; shown as v1.43.<build>). 1.43 maps to the same 143 the old three-part 0.1.43 did, so
+ * installed builds update in place; each minor step adds 1 (minor < 100), each major step 100.
+ */
 val appVersionCode =
     appVersionName
         .split(".")
-        .let { (major, minor, patch) -> major.toInt() * 10_000 + minor.toInt() * 100 + patch.toInt() }
+        .map { it.toInt() }
+        .let { parts ->
+            when (parts.size) {
+                2 -> parts[0] * 100 + parts[1].also { check(it in 0..99) { "minor version must be 0..99" } }
+                3 -> parts[0] * 10_000 + parts[1] * 100 + parts[2]
+                else -> error("appVersionName must be major.minor (got \"$appVersionName\")")
+            }
+        }
 
 /**
  * Pre-release build number (both CI and local builds pass `-Pcardeck.buildNumber=$(git rev-list --count HEAD)`).
  *
- *  - `versionName` gets `.N` appended: `0.1.13` -> `0.1.13.42`;
+ *  - `versionName` gets `.N` appended: `1.43` -> `1.43.236`;
  *  - `versionCode` reserves the low 4 digits for the build number: `113` -> `1_130_042`.
  *
  * Effect: under the same base every push is **monotonically increasing** and can directly install over the previous one; when the base

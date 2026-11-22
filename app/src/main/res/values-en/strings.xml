@@ -31,8 +31,8 @@
     <string name="ui_025" formatted="false">Optional screen capture permission is required for car audio.</string>
     <string name="ui_026" formatted="false">Allow</string>
     <string name="ui_028" formatted="false">Keep awake</string>
-    <string name="ui_029" formatted="false">Keep awake + dim</string>
-    <string name="ui_030" formatted="false">Keep the phone unlocked; turn its panel off when idle. Car display stays on.</string>
+    <string name="ui_029" formatted="false">Fake lock (keep awake + dim)</string>
+    <string name="ui_030" formatted="false">On: the phone never locks; when idle a dark cover goes on and the panel turns off. Off: the phone locks as usual (power key too) and the car display keeps running (Android 14+).</string>
     <string name="ui_031" formatted="false">Dim phone</string>
     <string name="ui_032" formatted="false">Dim now</string>
     <string name="ui_033" formatted="false">Tap anywhere on your phone to restore</string>

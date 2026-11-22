@@ -165,6 +165,7 @@ object SessionController {
         Shell.violationSink = ::appendLog
         // HID raw log switch (key-map calibration): the static flag is initialized from preferences and must also take effect on a cold process start
         HidNavigation.rawLogEnabled = DisplayPrefs.hidRawLog(appContext!!)
+        io.github.ezn24.cardeck.neo.input.KnobFocus.log = ::appendLog
     }
 
     /** Append one log line: logcat + file + process-wide buffer + attached rendering (incremental line pushed directly). Callable from any thread. */
@@ -213,6 +214,23 @@ object SessionController {
      * docs/HID-KNOB.md.
      */
     private fun injectNavigationKey(keyCode: Int) {
+        // Knob focus first: it frames dock / desktop / dashboard targets and enters apps on Confirm
+        if (io.github.ezn24.cardeck.neo.input.KnobFocus
+                .onKey(keyCode)
+        ) {
+            return
+        }
+        // Knob "Home" = our launcher's home, like the dock button (an Android HOME would land on the phone)
+        if (keyCode == android.view.KeyEvent.KEYCODE_HOME) {
+            Bg.run("knob-home") { VirtualLauncher.onHomePressed() }
+            return
+        }
+        // Back follows the assistive dot's routing (fullscreen map / last touched dashboard pane / active app)
+        if (keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+            io.github.ezn24.cardeck.neo.launcher.AssistiveDot
+                .back()
+            return
+        }
         // Inject into the "currently visible app screen" first (desktop grid / an open app screen), otherwise fall back to the main app screen
         val displayId =
             VirtualLauncher.activeAppDisplayId().takeIf { it > 0 }
@@ -348,10 +366,96 @@ object SessionController {
     @Volatile
     var phaseHint: String? = null
 
+    /**
+     * Car-entry auto-connect is held off until this uptime after the user disconnects or cancels by hand:
+     * closing RFCOMM makes the car's ACL drop and reconnect, and each ACL_CONNECTED used to start a new
+     * session about a second after the user tapped "Disconnect" (upstream shaonialife/cardeck 1d3afc8).
+     * Leaving the car (AUTO_STOP) does not arm it, so the next entry still connects by itself.
+     */
+    @Volatile
+    private var autoConnectSuppressedUntil = 0L
+
+    private const val AUTO_CONNECT_COOLDOWN_MS = 10 * 60_000L
+
+    /** Set by a user disconnect so the stream-end path does not attribute the teardown to the audio tier. */
+    @Volatile
+    private var userEndedSession = false
+
+    /** Remaining auto-connect hold-off in ms after a manual disconnect (0 = auto-connect allowed). */
+    fun autoConnectSuppressedForMillis(): Long = (autoConnectSuppressedUntil - SystemClock.uptimeMillis()).coerceAtLeast(0L)
+
+    /**
+     * Armed when a round writes the landscape overrides; the first terminal state (user disconnect or the head unit
+     * ending the stream) restores them and later ones skip. A manual disconnect reaches both, which logged
+     * "restored display settings" twice (upstream shaonialife/cardeck 1d3afc8).
+     */
+    private val orientationRestorePending =
+        java.util.concurrent.atomic
+            .AtomicBoolean(false)
+
+    private fun restoreOrientationOnce() {
+        if (!orientationRestorePending.compareAndSet(true, false)) return
+        appContext?.let { ctx -> AppOrientationCompat.resetAllAsync(ctx, ::appendLog) }
+    }
+
+    private fun suppressAutoConnect(reason: String) {
+        autoConnectSuppressedUntil = SystemClock.uptimeMillis() + AUTO_CONNECT_COOLDOWN_MS
+        appendLog("SESSION: $reason - car-entry auto-connect paused for ${AUTO_CONNECT_COOLDOWN_MS / 60_000} min")
+    }
+
+    /**
+     * Head-unit phone keys (HID Telephony page). Hook Switch answers a ringing call, Drop declines it or ends the
+     * active one, Phone Mute toggles the mic. Logs carry the key and call phase only.
+     */
+    private fun onPhoneKey(
+        context: Context,
+        usage: Int,
+    ) {
+        val call = io.github.ezn24.cardeck.neo.call.CallState.current
+        val phase = call?.phase
+        appendLog("EVENT: head-unit phone key usage=0x%02x call=%s".format(usage, phase ?: "none"))
+        if (call == null) return
+        val app = context.applicationContext
+        val ringing = phase == io.github.ezn24.cardeck.neo.call.CallState.Phase.RINGING
+        Bg.run("car-phone-key") {
+            when (usage) {
+                ConsumerKeys.PHONE_HOOK_SWITCH ->
+                    if (ringing) {
+                        io.github.ezn24.cardeck.neo.call.CallControl
+                            .answer(app)
+                    }
+                ConsumerKeys.PHONE_DROP ->
+                    if (ringing) {
+                        io.github.ezn24.cardeck.neo.call.CallControl
+                            .decline(app)
+                    } else {
+                        io.github.ezn24.cardeck.neo.call.CallControl
+                            .hangUp(app)
+                    }
+                ConsumerKeys.PHONE_MUTE ->
+                    if (!ringing) {
+                        io.github.ezn24.cardeck.neo.call.CallControl
+                            .toggleMute(app)
+                    }
+            }
+        }
+    }
+
+    /** Launcher "back to the car" cell: show the car's own UI, keeping the session (see [AirPlayClient.handScreenToCar]). */
+    fun requestCarUi() {
+        val client =
+            currentClient ?: run {
+                appendLog("OEM: no active session - home button ignored")
+                return
+            }
+        Bg.run("request-car-ui") { client.handScreenToCar() }
+    }
+
     /** Cancel "connecting": stop the links + set the cancel flag, so the user can bail out when stuck on a wrong network or waiting for a reconnect. */
     fun cancelConnecting(context: Context) {
         connectCancelled = true
         appendLog("SESSION: user cancelled the connection - stopping Bluetooth/WiFi links")
+        suppressAutoConnect("user cancelled")
         disconnect(context)
         // Force-release the mutex: the pairing thread may be blocked in an uninterruptible connect/mDNS wait (e.g. connecting to the hotspot IP
         // while the phone is not on the hotspot subnet) and its finally is nowhere in sight - an explicit user cancel force-unlocks,
@@ -621,6 +725,9 @@ object SessionController {
      */
     fun startConnection(context: Context) {
         connectCancelled = false
+        // Connecting again (by hand, or auto-connect after the hold-off) ends a manual-disconnect hold-off.
+        autoConnectSuppressedUntil = 0L
+        userEndedSession = false
         phaseHint = UiStrings.text(R.string.phase_03)
         when (
             ShizukuGate
@@ -690,6 +797,10 @@ object SessionController {
         byUser: Boolean = false,
     ) {
         val hadProjection = CarPlayService.mediaProjection != null
+        if (byUser) {
+            userEndedSession = true
+            suppressAutoConnect("user disconnected")
+        }
         io.github.ezn24.cardeck.neo.util.SessionHooks
             .onDisconnected(context)
         pendingEndpointUpdate = null
@@ -711,7 +822,8 @@ object SessionController {
         boundCarSsid = null
         // Terminal-state restore of the "force app landscape" overrides (it used to be in retireSession - which also runs at
         // the start of every pairing round and would kill the apps the new round just launched; moved to the real terminal states 2026-10-23).
-        appContext?.let { ctx -> AppOrientationCompat.resetAllAsync(ctx, ::appendLog) }
+        restoreOrientationOnce()
+        VirtualLauncher.setOemBlock(null)
         // Auto-forget of system networks saved by the shell fallback (connect-network): a hotspot without internet
         // is taken by the system as the default network and displaces mobile data. Failures are only logged (the user can delete it manually in WLAN).
         cleanupShellFallbackNetwork()
@@ -873,10 +985,78 @@ object SessionController {
         runCatching { client.close() }
     }
 
+    /** Encoder + data port of the alternate (cluster) screen stream; null = none this session. */
+    @Volatile
+    private var altVideoSender: VideoSender? = null
+
+    /**
+     * Second screen stream for a receiver's alternate display (type 111; ChairPlay AltScreen "Map" modes). It carries the
+     * map display, centre-cropped to the alt aspect, at the alt display's frame rate (`AltScreenOutput`). H.264 always.
+     * A failure only loses the cluster picture.
+     */
+    private fun startAltScreen(
+        client: AirPlayClient,
+        sessionKey: ByteArray?,
+        setup: AirPlayClient.SetupInfo,
+        host: String,
+    ): Boolean {
+        val alt = setup.altDisplay ?: return false
+        val stream = client.runAltScreenStream(sessionKey, alt.uuid) ?: return false
+        val width = (alt.width / 2) * 2
+        val height = (alt.height / 2) * 2
+        val fps = alt.maxFps.coerceIn(10, 30)
+        val sender =
+            VideoSender(
+                host = host,
+                dataPort = stream.dataPort,
+                frameCipher = stream.cipher,
+                width = width,
+                height = height,
+                targetFps = fps,
+                log = { line -> appendLog("ALT $line") },
+                keepAliveWithStats = setup.keepAliveSendStatsAsBody,
+            )
+        if (!sender.openDataPort()) {
+            appendLog("ALT: alt screen data port unreachable - no cluster picture this session")
+            return false
+        }
+        altVideoSender = sender
+        val output = io.github.ezn24.cardeck.neo.render.AltScreenOutput
+        output.log = { line -> appendLog(line) }
+        output.setViewAreas(alt.viewAreas, alt.initialViewArea)
+        altScreenUuid = alt.uuid
+        io.github.ezn24.cardeck.neo.nav.CarRouteGuidance.onInfo = { info -> output.onNav(info) }
+        sender.start { surface ->
+            io.github.ezn24.cardeck.neo.render.AltScreenOutput
+                .set(
+                    io.github.ezn24.cardeck.neo.render.AltScreenOutput
+                        .Target(surface, width, height, fps),
+                )
+        }
+        appendLog("ALT: alt screen ${width}x$height@$fps shows the map display")
+        return true
+    }
+
+    /** uuid of the alt display, to route its showUI / updateViewArea commands. */
+    @Volatile
+    private var altScreenUuid: String? = null
+
+    private fun stopAltScreen() {
+        io.github.ezn24.cardeck.neo.input.KnobFocus
+            .reset()
+        altScreenUuid = null
+        io.github.ezn24.cardeck.neo.nav.CarRouteGuidance.onInfo = null
+        io.github.ezn24.cardeck.neo.render.AltScreenOutput
+            .set(null)
+        altVideoSender?.stop()
+        altVideoSender = null
+    }
+
     /** Fully retire the previous session before it ends / a new cycle starts (a leaked old pipeline accumulates encoders/virtual displays and eventually fails dequeueBuffer -19). */
     fun retireSession() {
         io.github.ezn24.cardeck.neo.audio.CarMicController
             .detach("session retired")
+        stopAltScreen()
         videoSender?.stop()
         videoSender = null
         // Dim cover / keep-awake are dropped with the session (this method also runs at the start of every pairing round; they are set again once the new round streams)
@@ -900,11 +1080,11 @@ object SessionController {
             if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
                 Bg.run("airplay-teardown") {
                     old.teardownSession()
-                    old.close()
+                    old.release()
                 }
             } else {
                 old.teardownSession()
-                old.close()
+                old.release()
             }
         }
         currentClient = null
@@ -1191,6 +1371,11 @@ object SessionController {
                     appendLog("WIFI: app-specific network already in place - skipping duplicate join")
                     WifiCarPlayConnector.JoinResult.Joined(existing)
                 } else {
+                    // Probe first (upstream shaonialife/cardeck 9d31800): when the system is already on the car hotspot
+                    // (saved network, manual join) the specifier sits pending for its whole 5 s first window on some
+                    // ROMs, out of a ~9-14 s join budget. Without Shizuku or when the SSID differs this returns null at
+                    // once and the specifier path runs as before.
+                    specifierQuickFallback(wifi)?.let { bound -> return@synchronized WifiCarPlayConnector.JoinResult.Joined(bound) }
                     connector.joinCarPlayNetwork(
                         ssid = wifi.ssid,
                         passphrase = wifi.passphrase,
@@ -2000,13 +2185,23 @@ object SessionController {
         val profile = activeAudioProfile ?: return
         val startedAt = activeAudioStartedAt
         val identity = activeAudioReceiverKey
+        // The user ended it: says nothing about the audio tier (and is not the head unit's watchdog)
+        if (userEndedSession) {
+            activeAudioProfile = null
+            activeAudioStartedAt = 0L
+            return
+        }
         // Link-watchdog guard (Audi owner's 0.1.17 log, 2026-10-23): MIB3 armed but the control session
         // did not complete before the link was torn down = the head unit's ~10s link watchdog (10.18s after RECORD, same as
         // 0.1.9's 10.17s), unrelated to the audio tier. Without the guard the t102/media tier would be wrongly recorded as "incompatible", the next round
         // would switch to the compatibility tier - a path the head unit never accepts (see the three hard audio constraints in AGENTS),
         // and there would be no sound ever after.
+        // Only a teardown inside the audio probe window can be that watchdog: receivers that never run the tunnel
+        // control session (WinPlay) also leave it incomplete, and after minutes of streaming the end is a normal
+        // disconnect that should count as "tier works", not be logged as the watchdog.
+        val livedSoFar = if (startedAt > 0) android.os.SystemClock.uptimeMillis() - startedAt else -1L
         currentClient?.let { client ->
-            if (client.mib3LinkArmed && !client.mib3ControlSessionDone) {
+            if (client.mib3LinkArmed && !client.mib3ControlSessionDone && livedSoFar in 0 until AUDIO_PROFILE_PROBE_MS) {
                 appendLog(
                     "AUDIO: session torn down by the head unit before link negotiation completed (~10s watchdog pattern) - not recording an audio tier",
                 )
@@ -2015,7 +2210,7 @@ object SessionController {
                 return
             }
         }
-        val lived = if (startedAt > 0) android.os.SystemClock.uptimeMillis() - startedAt else -1L
+        val lived = livedSoFar
         // This round's memory goes stale quickly: the next connection picks a tier from the latest memory again
         activeAudioProfile = null
         activeAudioStartedAt = 0L
@@ -2080,6 +2275,7 @@ object SessionController {
                     Thread.sleep(minOf(remain, 200L))
                 }
                 if (epoch != modesReclaimEpoch || client.cancelled || connectCancelled) return@run
+                if (client.screenHandedToCar) continue
                 if (!client.assertModes()) return@run
                 appendLog("AIRPLAY: modesChanged resource re-assertion (+${atMs / 1000}s after the burst, AADisplay r17 timing)")
             }
@@ -2622,6 +2818,7 @@ object SessionController {
                     // of idle time in which the writes drain naturally, and attach only has to drain (~0ms) - running it synchronously in attach
                     // (1.6s, 3.2s when serialized) used to eat into the ~10s teardown budget of "RECORD -> screen-port keepAlive"
                     // (the keepAlive frame starts only after attach returns; finding of 2026-10-23).
+                    orientationRestorePending.set(true)
                     appContext?.let { ctx -> AppOrientationCompat.applyAllAsync(ctx, ::appendLog) }
                     retireSession()
                     // Session quiet mode (2026-10-10): from the handoff point on, pause outbound connection probes toward other receivers
@@ -2675,6 +2872,7 @@ object SessionController {
                         // when the endpoint is unresolved (no IP) / the port is closed, dropping BT is never worthwhile (hit on 2026-10-11:
                         // an mDNS failure also triggered detach and needlessly tore down the head-unit window).
                         detachActiveBtSessions()
+                        client.release()
                         client = newClient()
                         currentClient = client
                         drainPendingEndpoint(client)
@@ -2787,6 +2985,21 @@ object SessionController {
                                                 report != null && report.size == 1 -> rawValue?.takeIf { it != 0 }
                                                 else -> null
                                             }
+                                        // Telephony device (page 0x0B, Array like the media keys): answer / end / mute.
+                                        // Its 1-byte reports overlap media-key lengths, so it is told apart by descriptor only.
+                                        val phoneKeys =
+                                            if (consumerUsage == null) {
+                                                descriptor?.let {
+                                                    ConsumerKeys.parseDescriptor(it, ConsumerKeys.USAGE_PAGE_TELEPHONY)
+                                                }
+                                            } else {
+                                                null
+                                            }
+                                        if (phoneKeys != null) {
+                                            val usage = rawValue?.let(phoneKeys::usageFor)
+                                            if (usage != null) onPhoneKey(context, usage)
+                                            return@connectEventChannel
+                                        }
                                         // Knob / four-way stick (Generic Desktop page Wheel/Hat):
                                         // only non-Consumer devices come here; outputs DPAD_* injected into the virtual display.
                                         val navKeys =
@@ -2863,6 +3076,22 @@ object SessionController {
                                         }
                                     }
 
+                                    "showUI", "updateViewArea" -> {
+                                        // The receiver chooses what its alternate (cluster) screen shows (ChairPlay AltScreen)
+                                        val params = command["params"] as? Map<*, *>
+                                        val uuid = params?.get("uuid")?.toString()
+                                        if (uuid != null && uuid == altScreenUuid) {
+                                            val output = io.github.ezn24.cardeck.neo.render.AltScreenOutput
+                                            if (command["type"] == "showUI") {
+                                                output.showUi(params["url"]?.toString().orEmpty())
+                                            } else {
+                                                (params["viewAreaIndex"] as? Number)?.toInt()?.let(output::updateViewArea)
+                                            }
+                                        } else {
+                                            appendLog("EVENT: command type=${command["type"]} params=$params")
+                                        }
+                                    }
+
                                     "requestSiri" -> {
                                         // Head-unit voice key (steering wheel / on-screen mic key): siriAction 2 = press, 3 = release
                                         // (DiPlay's head-unit side sends 2+3 back to back). Only the press counts: open the head-unit microphone -> wake the assistant.
@@ -2906,7 +3135,7 @@ object SessionController {
                                         appendLog(
                                             "EVENT: head unit requested changeModes -> replying modesChanged to take over the resources",
                                         )
-                                        client.assertModes()
+                                        client.takeScreenBack("car changeModes")
                                     }
 
                                     else ->
@@ -3037,6 +3266,7 @@ object SessionController {
                                             onEnded = { byPeer ->
                                                 // The session has truly ended: lift the session quiet mode (the client resumes probing/reconnecting)
                                                 appendLog(">>> CarPlay session ended (streaming stopped) - resuming Bluetooth probing")
+                                                stopAltScreen()
                                                 BtSessionGate.sessionActive = false
                                                 appContext?.let {
                                                     io.github.ezn24.cardeck.neo.util.SessionHooks
@@ -3055,9 +3285,8 @@ object SessionController {
                                                 restorePhoneScreen(sleepIfCarSide = true)
                                                 // Restore the landscape overrides the same way. This runs on the streaming wrap-up thread, not on the connect
                                                 // critical path, but goes through the async entry anyway to keep the "serial, non-reentrant" semantics.
-                                                appContext?.let { ctx ->
-                                                    AppOrientationCompat.resetAllAsync(ctx, ::appendLog)
-                                                }
+                                                restoreOrientationOnce()
+                                                VirtualLauncher.setOemBlock(null)
                                                 // The system network saved by the shell fallback must be restored here too: the head unit tearing down the link is the
                                                 // most common way of leaving (ignition off) and the user may not tap "Disconnect" - hooking only
                                                 // the disconnect end would always leave it behind (reviewed 2026-10-23). If the next round
@@ -3134,13 +3363,17 @@ object SessionController {
                                     // Audio channel (optional): SETUP type=100 -> UDP RTP push.
                                     // Negotiated after the session is activated (RECORD done); a failure does not affect the main video link.
                                     val audioStarted = startAudioChannel(context, client, sessionKey, host)
-                                    if (audioStarted) {
+                                    // Alternate (cluster) screen: only when /info lists a type-111 display and the SETUP
+                                    // reply enabled "altScreen" (ChairPlay AltScreen). Its RECORD rides on the audio one below.
+                                    val altStarted = host != null && startAltScreen(client, sessionKey, setup, host)
+                                    if (audioStarted || altStarted) {
                                         // The stream joins after RECORD: AirPlay semantics require another RECORD
                                         // to bring the new stream into the already-activated session. Without this step the head unit answers the SETUP with 200
                                         // and gives a dataPort but never actually plays (Audi measured 2026-10-17:
                                         // audio packets keep flowing and the capture is non-zero, yet the head unit is silent).
                                         appendLog(
-                                            "AUDIO: audio stream joined - resending RECORD to activate it (stream joined after the session)",
+                                            "AIRPLAY: stream(s) joined after RECORD (audio=$audioStarted alt=$altStarted) - " +
+                                                "resending RECORD to activate them",
                                         )
                                         client.record()
                                     }

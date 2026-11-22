@@ -21,14 +21,15 @@ object WifiConnectCommand {
     fun quote(raw: String): String = "'" + raw.replace("'", "'\\''") + "'"
 
     /**
-     * Full command line. An empty `passphrase` (or [securityType] 0=NONE) is treated as an open hotspot.
+     * Full command line. Only an empty `passphrase` means an open hotspot: some head units declare
+     * [securityType] 0=NONE while still sending a real password, which is then joined as WPA2.
      */
     fun build(
         ssid: String,
         passphrase: String,
         securityType: Int,
     ): String {
-        val open = passphrase.isEmpty() || securityType == 0
+        val open = passphrase.isEmpty()
         val security =
             when {
                 open -> "open"

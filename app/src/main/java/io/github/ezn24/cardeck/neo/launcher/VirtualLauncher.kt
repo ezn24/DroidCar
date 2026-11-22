@@ -663,6 +663,34 @@ object VirtualLauncher {
     }
 
     /** Map tile layout change listener (hidden / split / fullscreen). */
+
+    /** The car's own home button from /info `oemIcons` (label + icon); null = the car offers none. */
+    data class OemBlock(
+        val label: String,
+        val icon: android.graphics.Bitmap?,
+    )
+
+    @Volatile
+    var oemBlock: OemBlock? = null
+        private set
+
+    private val oemListeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+
+    fun addOemListener(listener: () -> Unit) {
+        oemListeners.add(listener)
+    }
+
+    fun removeOemListener(listener: () -> Unit) {
+        oemListeners.remove(listener)
+    }
+
+    /** Published when /info arrives (after the launcher's first frame) and cleared when the session ends. */
+    fun setOemBlock(block: OemBlock?) {
+        if (block == oemBlock) return
+        oemBlock = block
+        oemListeners.forEach { runCatching { it() } }
+    }
+
     private val mapLayoutListeners = java.util.concurrent.CopyOnWriteArrayList<(Boolean) -> Unit>()
 
     fun addMapLayoutListener(listener: (Boolean) -> Unit) {
@@ -813,6 +841,11 @@ object VirtualLauncher {
     fun setNotificationOverlay(card: OverlayCard?) {
         notificationOverlay = card
         refreshOverlayCard()
+    }
+
+    /** Knob focus frame (stream coordinates); null hides it. */
+    fun setFocusRing(card: OverlayCard?) {
+        composer?.focusRing = card
     }
 
     fun setAssistiveDot(card: OverlayCard?) {
@@ -1121,6 +1154,7 @@ object VirtualLauncher {
             DisplayPrefs
                 .fps(context)
         this.composer = composer
+        composer.statsLog = { line -> log(line) }
         val displaysCreated = arrayOf(false)
         composer.onSurfacesReady = { dockSurface, appSurface, appHiSurface, mapSurface, mediaSurface ->
             // Preferred: create a trusted virtual display via Shizuku shell (VIRTUAL_DISPLAY_FLAG_TRUSTED) -
@@ -1148,6 +1182,13 @@ object VirtualLauncher {
                                 .onSuccess { log("LAUNCHER: released leftover virtual display ${stale.name}#${stale.displayId}") }
                         }
                     Thread.sleep(150) // Wait for the system to finish unregistering
+                    // Lock-screen streaming: displays go on a virtual device associated with this car (empty = legacy)
+                    runCatching {
+                        svc!!.setCompanionDevice(
+                            io.github.ezn24.cardeck.neo.bt.BtSessionGate.lastPeerAddress
+                                .orEmpty(),
+                        )
+                    }
                     // The dock display is not declared trusted: it hosts only our own DockActivity, preventing third-party tasks from
                     // escaping onto it
                     val dockId =
@@ -1238,6 +1279,7 @@ object VirtualLauncher {
                         if (appId >= 0) runCatching { svc!!.releaseDisplay(appId) }
                         if (appHiId >= 0) runCatching { svc!!.releaseDisplay(appHiId) }
                         if (mapId >= 0) runCatching { svc!!.releaseDisplay(mapId) }
+                        runCatching { svc!!.closeVirtualDevice() }
                     }
                 }.onFailure { log("LAUNCHER: trusted display creation error ${it.message}") }
             }
@@ -1575,6 +1617,8 @@ object VirtualLauncher {
                                 runCatching { localDisplays[id]?.release() ?: service?.releaseDisplay(id) }
                             }
                             synchronized(displayReleaseLock) { detachingDisplays = detachingDisplays - releaseIds }
+                            // Virtual device of this session; deferred by the service while a parked map remains on it
+                            runCatching { service?.closeVirtualDevice() }
                         }
                         ownCtx?.let { purgeRememberedTasks(it) }
                     }
@@ -1787,6 +1831,7 @@ object VirtualLauncher {
      * switches to the split layout.
      */
     fun showDashboard() {
+        returnToDashboardOnExit = false
         syncDashboard(true)
         goGrid()
         composer?.requestActiveApp(appHiDisplayId >= 0 && gridDisplayId == appHiDisplayId)
@@ -1835,6 +1880,7 @@ object VirtualLauncher {
      * Back to the plain desktop: hide the map layer and leave the dashboard; the desktop restores the full-width icon grid (map task kept).
      */
     fun showDesktop() {
+        returnToDashboardOnExit = false
         syncDashboard(false)
         goGrid()
         logSink?.invoke("LAUNCHER: desktop mode (icon grid)")
@@ -2153,17 +2199,27 @@ object VirtualLauncher {
      * background,
      * and bringing them forward is a hot resume that loses no state.
      */
-    fun restorePaneAfterBack(displayId: Int) {
-        if (displayId < 0 || (displayId != mapDisplayId && displayId != mediaDisplayId)) return
+
+    /** Returns true when Back had left the pane empty (the app was at its root) and it was brought back. */
+    fun restorePaneAfterBack(displayId: Int): Boolean {
+        if (displayId < 0 || (displayId != mapDisplayId && displayId != mediaDisplayId)) return false
         Thread.sleep(600)
-        if (displayHasVisibleTask(displayId)) return
+        if (displayHasVisibleTask(displayId)) return false
         logSink?.invoke("LAUNCHER: display $displayId has no visible task after back - bringing it to the foreground")
         if (displayId == mapDisplayId) {
             activeMapComponent?.let { switchMap(it) } ?: ensureMapTask()
         } else {
             activeMediaComponent?.let { startMapApp(it, displayId, forceNewTask = false, extraArgs = "--windowingMode 1") }
         }
+        return true
     }
+
+    /**
+     * An app opened from the dock returns to the dashboard when it is backed out of (one opened from the desktop returns
+     * to the desktop by itself). Cleared by any explicit mode change.
+     */
+    @Volatile
+    var returnToDashboardOnExit = false
 
     /**
      * Whether the display has a visible task (parses the Task lines of dumpsys for visible=true). Treated as yes when unreadable, to avoid

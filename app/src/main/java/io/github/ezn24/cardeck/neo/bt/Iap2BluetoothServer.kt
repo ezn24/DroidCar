@@ -191,6 +191,7 @@ class Iap2BluetoothServer(
                 log("ADAPTER: incoming device \"$peerName\" is a wireless CarPlay adapter box; this connection uses the adapter flow")
             }
             log("BT: receiver connected name=$peerName, starting iAP2 sender session")
+            BtSessionGate.lastPeerAddress = peerAddress
             Thread({ runSession(socket) }, "iap2-bt-session").apply {
                 isDaemon = true
                 start()
