@@ -3,6 +3,7 @@ package io.github.ezn24.droidcar.replay
 import io.github.ezn24.droidcar.iap2.Iap2Csm
 import io.github.ezn24.droidcar.iap2.Iap2LinkEngine
 import io.github.ezn24.droidcar.transport.DuplexStream
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -139,10 +140,22 @@ class SmartBoxStream : DuplexStream {
     private val csmParser = Iap2Csm.Parser()
 
     /** Everything we wrote, one entry per write() call, with its arrival time. */
-    val writes = ArrayList<Pair<Long, ByteArray>>()
+    val writes = CopyOnWriteArrayList<Pair<Long, ByteArray>>()
 
     /** Phone → box CSM messages in arrival order, with arrival time. */
-    val phoneMessages = ArrayList<Pair<Long, Iap2Csm.Frame>>()
+    val phoneMessages = CopyOnWriteArrayList<Pair<Long, Iap2Csm.Frame>>()
+
+    /**
+     * Waits until the phone has sent [messageId]. The post-0x5703 burst is only queued when run() returns and goes out
+     * one packet per box ACK, so on a slow machine (CI) the last messages were not on the wire yet when the test read them.
+     */
+    fun awaitPhoneMessage(
+        messageId: Int,
+        timeoutMillis: Long = 10_000L,
+    ) {
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
+        while (phoneMessages.none { it.second.messageId == messageId } && System.nanoTime() < deadline) Thread.sleep(10)
+    }
 
     @Volatile
     var boxAckOfSynAckAt: Long? = null

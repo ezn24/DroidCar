@@ -53,6 +53,7 @@ class SmartBoxBootstrapTest {
                 onWifiCredentials = { credentials += it },
                 adapterIdentificationDelayMillis = delayMillis,
             ).run(timeoutMillis = 1L) // adapter mode ignores the timeout
+        box.awaitPhoneMessage(0x4300)
         logs.forEach { println("PHONE $it") }
 
         // ---- link layer ----
@@ -129,6 +130,7 @@ class SmartBoxBootstrapTest {
                 adapterIdentificationDelayMillis = 0,
             )
         session.run()
+        box.awaitPhoneMessage(0x4300)
         val pump = Thread({ session.pumpIncomingForever() }, "pump").apply { isDaemon = true }
         pump.start()
         // The box's second 0x5703 (sent after 0x4E0E) reaches the keep-alive pump
