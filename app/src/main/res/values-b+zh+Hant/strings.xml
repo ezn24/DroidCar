@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" formatted="false">CarDeck Neo</string>
+    <string name="app_name" formatted="false">DroidCar</string>
     <string name="app_subtitle" formatted="false">非官方實驗性 CarPlay 相容傳送端</string>
     <string name="car_settings" formatted="false">車機設定</string>
     <string name="accessibility_description" formatted="false">映象模式：把車機觸控手勢注入手機螢幕，不讀取螢幕內容</string>
@@ -179,7 +179,7 @@
     <string name="screen_035" formatted="false">暫無熱點密碼——藍芽連上後自動獲取</string>
     <string name="screen_036" formatted="false">暗幕未就緒（連線成功後自動啟用）</string>
     <string name="screen_039" formatted="false">日誌為空</string>
-    <string name="screen_040" formatted="false">CarDeck 日誌</string>
+    <string name="screen_040" formatted="false">DroidCar 日誌</string>
     <string name="screen_041" formatted="false">「常亮+暗幕」已開啟。</string>
     <string name="screen_042" formatted="false">檢查中</string>
     <string name="screen_043" formatted="false">正在檢查殘留屏…</string>
@@ -221,11 +221,11 @@
     <string name="screen_079" formatted="false">僅含本次 App 啟動之後的日誌。需要更早的歷史，請長按匯出按鈕。</string>
     <string name="screen_080" formatted="false">包含歷史日誌（檔案上限 2MB，超出時只保留最近一段）。</string>
     <string name="screen_081" formatted="false">日誌已匯出</string>
-    <string name="screen_082" formatted="false">可在「檔案管理 → 下載 → CarDeck」中找到，也可直接分享給開發者排查問題。</string>
+    <string name="screen_082" formatted="false">可在「檔案管理 → 下載 → DroidCar」中找到，也可直接分享給開發者排查問題。</string>
     <string name="screen_083" formatted="false">開啟檔案</string>
     <string name="screen_084" formatted="false">開啟資料夾</string>
     <string name="screen_085" formatted="false">分享檔案</string>
-    <string name="screen_086" formatted="false">請到「檔案管理 → 下載 → CarDeck」檢視</string>
+    <string name="screen_086" formatted="false">請到「檔案管理 → 下載 → DroidCar」檢視</string>
     <string name="screen_087" formatted="false">沒有可開啟檔案的應用——請到檔案管理器中按上述路徑查詢</string>
     <string name="screen_088" formatted="false">分享日誌檔案</string>
     <string name="screen_089" formatted="false">沒有可分享的應用</string>
@@ -323,8 +323,8 @@
     <string name="phase_35">等待手機加入車機熱點 %1$s…</string>
     <string name="phase_36">手機不在車機熱點——請到 WLAN 設定加入 %1$s</string>
     <string name="phase_37">車機未開放影像通道，本輪結束（等待車機重新邀請）</string>
-    <string name="hint_vpn_blocks_car">VPN 正在攔截車機連線——請在 VPN App 中排除 CarDeck（分應用代理）或允許繞過區域網路</string>
-    <string name="nav_accessibility_label">CarDeck 導航資訊</string>
+    <string name="hint_vpn_blocks_car">VPN 正在攔截車機連線——請在 VPN App 中排除 DroidCar（分應用代理）或允許繞過區域網路</string>
+    <string name="nav_accessibility_label">DroidCar 導航資訊</string>
     <string name="nav_accessibility_description">讓車機儀表板/抬頭顯示顯示 Waze、高德地圖的轉彎提示：只在連接車機時讀取這兩個 App 導航畫面上的距離、轉彎與到達時間文字，不讀取其他 App，也不會記錄或上傳。</string>
     <string name="ui_nav_cluster_title">儀表板導航資訊</string>
     <string name="ui_nav_cluster_note">在支援的儀表板顯示轉彎提示。讀取高德和 Waze 需要無障礙權限。</string>
@@ -379,7 +379,7 @@
     <string name="wp_preset_meadow">草原</string>
     <!-- 免责声明（2026-11-17 多语言化；改正文须同步 Disclaimer.CURRENT_VERSION +1） -->
     <string name="disclaimer_s1_title">這是什麼</string>
-    <string name="disclaimer_s1_body">CarDeck Neo 是一個非官方的實驗性專案：讓一台未 root 的 Android 手機扮演 CarPlay 發送端（iPhone 角色），把手機上的車機桌面與第三方應用程式投到支援的接收端上顯示，並把接收端的觸控回注到手機端的虛擬螢幕。\n\n本專案與 Apple Inc.、任何汽車製造商均無關聯，未獲得任何授權或認證，也不是 MFi 認證產品。「CarPlay」「AirPlay」是 Apple Inc. 的商標，此處僅用於說明相容目標，不代表任何關聯或背書。</string>
+    <string name="disclaimer_s1_body">DroidCar 是一個非官方的實驗性專案：讓一台未 root 的 Android 手機扮演 CarPlay 發送端（iPhone 角色），把手機上的車機桌面與第三方應用程式投到支援的接收端上顯示，並把接收端的觸控回注到手機端的虛擬螢幕。\n\n本專案與 Apple Inc.、任何汽車製造商均無關聯，未獲得任何授權或認證，也不是 MFi 認證產品。「CarPlay」「AirPlay」是 Apple Inc. 的商標，此處僅用於說明相容目標，不代表任何關聯或背書。</string>
     <string name="disclaimer_s2_title">開發中，可能隨時出問題</string>
     <string name="disclaimer_s2_body">目前為開發測試版本，功能、介面與協定實作都可能隨時變更，可能存在尚未發現的缺陷。不保證任何穩定性、相容性或可用性。\n\n已經測試過的組合只有：\n· 發送端：榮耀 Magic7 Pro（Android 17）\n· 接收端：奧迪 MIB3 車機（實車）\n· 接收端：Redmi K40 上的 DiPlay 測試台（Android 13）\n\n其他手機、其他 Android 版本、其他車款均未驗證，可能完全無法運作，也可能出現畫面異常、觸控錯位或反覆斷線。\n\n「應用橫屏」功能需要 Android 14 以上系統；Android 13 及更早的機型無法使用此功能（設定面板會提示不支援）。</string>
     <string name="disclaimer_s3_title">駕駛安全（請務必閱讀）</string>
@@ -389,7 +389,7 @@
     <string name="disclaimer_s5_title">免責條款</string>
     <string name="disclaimer_s5_body">本應用程式依「現狀」提供，不附帶任何明示或默示的擔保，包括但不限於適售性、特定用途適用性與不侵權擔保。\n\n在適用法律允許的最大範圍內，作者與貢獻者不對因使用或無法使用本應用程式而產生的任何直接或間接損失負責，包括但不限於：連線中斷、導航或通話中斷、資料遺失、裝置異常、車輛系統異常，以及因駕駛中操作或分心所導致的事故與損失。\n\n是否使用本應用程式、如何設定與操作、以及在何種情境下使用，完全由你自行判斷並自行承擔風險。若你不同意上述任何一條，請點選「放棄使用」並解除安裝本應用程式。</string>
     <string name="disclaimer_s6_title">開源與回饋</string>
-    <string name="disclaimer_s6_body">本專案為個人實驗性作品，以 MIT 授權條款開源，歡迎回報問題，但不保證修復時程。由於涉及協定實作與第三方 ROM 差異，部分問題可能無法解決。\n\n完整條款（非官方聲明、商標歸屬、安全警告、已測試範圍）請見儲存庫根目錄的 DISCLAIMER.md，與本頁內容同源。</string>
+    <string name="disclaimer_s6_body">本專案為個人實驗性作品，以 GPL-3.0 授權條款開源，歡迎回報問題，但不保證修復時程。由於涉及協定實作與第三方 ROM 差異，部分問題可能無法解決。\n\n完整條款（非官方聲明、商標歸屬、安全警告、已測試範圍）請見儲存庫根目錄的 DISCLAIMER.md，與本頁內容同源。</string>
     <string name="disclaimer_subtitle_first">首次使用前請完整閱讀。接受後可在主畫面隨時重新查看。</string>
     <string name="disclaimer_subtitle_view">你可以隨時回來查看本聲明（目前版本 v%1$d）。</string>
     <string name="disclaimer_accept">接受</string>
@@ -399,7 +399,7 @@
     <string name="disclaimer_hint_wait">請等待 %1$d 秒後接受</string>
     <string name="disclaimer_hint_scroll">請捲動閱讀至底部</string>
     <string name="md_car_screenshot">截取車機畫面</string>
-    <string name="md_car_screenshot_desc">把目前的車機畫面存成 PNG 到「下載/CarDeck」（需已連線）</string>
+    <string name="md_car_screenshot_desc">把目前的車機畫面存成 PNG 到「下載/DroidCar」（需已連線）</string>
     <string name="md_car_screenshot_failed">截圖失敗：請先連線車機</string>
     <!-- 车机通知（2026-11-17：CarPlay 式横幅 + 独立 App 名单） -->
     <string name="notif_apps">通知 App</string>
@@ -420,7 +420,7 @@
     <string name="md_hooks_disconnected">斷開連線時</string>
     <string name="md_hooks_test">測試</string>
 
-    <string name="md_hooks_intro">連上 / 斷開車機時依次發出下面的 Intent（類似 MacroDroid「傳送 Intent」，可搭配 Tasker 等）。每個都會附帶 extra cardeck_event = connected / disconnected。</string>
+    <string name="md_hooks_intro">連上 / 斷開車機時依次發出下面的 Intent（類似 MacroDroid「傳送 Intent」，可搭配 Tasker 等）。每個都會附帶 extra droidcar_event = connected / disconnected。</string>
     <string name="md_hooks_empty">還沒有 Intent</string>
     <string name="md_hooks_add">新增 Intent</string>
     <string name="md_hooks_edit">編輯 Intent</string>

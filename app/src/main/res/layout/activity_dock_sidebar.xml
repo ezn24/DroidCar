@@ -49,14 +49,14 @@
         android:includeFontPadding="false" />
 
     <!-- CarPlay 风格状态行：信号圆点 + Wi-Fi，其下电池（高度由 DockActivity 按 designScale 设定） -->
-    <io.github.ezn24.cardeck.neo.ui.StatusGlyphsView
+    <io.github.ezn24.droidcar.ui.StatusGlyphsView
         android:id="@+id/dockStatus"
         android:layout_width="wrap_content"
         android:layout_height="10dp"
         android:layout_marginTop="5dp"
         android:layout_gravity="center_horizontal" />
 
-    <io.github.ezn24.cardeck.neo.ui.BatteryGlyphView
+    <io.github.ezn24.droidcar.ui.BatteryGlyphView
         android:id="@+id/dockBattery"
         android:layout_width="wrap_content"
         android:layout_height="12dp"

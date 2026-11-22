@@ -72,7 +72,7 @@
    ctrl 服务端都是 `Socket()` / `DatagramSocket()`，依赖进程默认网络。
 3. **只影响本进程**：`bindProcessToNetwork` 作用于调用进程的 socket（同 UID），不是系统级
    设置。车机上虚拟屏里的导航/音乐是**独立进程**，照常走默认网络（蜂窝），不会断网。
-   真正的代价只有「CarDeck 自己」的互联网请求（媒体封面 URL）在会话期间也走车机 Wi-Fi——
+   真正的代价只有「DroidCar 自己」的互联网请求（媒体封面 URL）在会话期间也走车机 Wi-Fi——
    这与 specifier 时代的行为完全一致，不是本次改动引入的。
 
 ## 5. `cmd wifi set-wifi-watchdog-enabled false` 不存在

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" formatted="false">CarDeck Neo</string>
+    <string name="app_name" formatted="false">DroidCar</string>
     <string name="app_subtitle" formatted="false">非官方实验性 CarPlay 兼容发送端</string>
     <string name="car_settings" formatted="false">车机设置</string>
     <string name="accessibility_description" formatted="false">镜像模式：把车机触摸手势注入手机屏幕，不读取屏幕内容</string>
@@ -179,7 +179,7 @@
     <string name="screen_035" formatted="false">暂无热点密码——蓝牙连上后自动获取</string>
     <string name="screen_036" formatted="false">暗幕未就绪（连接成功后自动启用）</string>
     <string name="screen_039" formatted="false">日志为空</string>
-    <string name="screen_040" formatted="false">CarDeck 日志</string>
+    <string name="screen_040" formatted="false">DroidCar 日志</string>
     <string name="screen_041" formatted="false">「常亮+暗幕」已开启。</string>
     <string name="screen_042" formatted="false">检查中</string>
     <string name="screen_043" formatted="false">正在检查残留屏…</string>
@@ -221,11 +221,11 @@
     <string name="screen_079" formatted="false">仅含本次 App 启动之后的日志。需要更早的历史，请长按导出按钮。</string>
     <string name="screen_080" formatted="false">包含历史日志（文件上限 2MB，超出时只保留最近一段）。</string>
     <string name="screen_081" formatted="false">日志已导出</string>
-    <string name="screen_082" formatted="false">可在「文件管理 → 下载 → CarDeck」中找到，也可直接分享给开发者排查问题。</string>
+    <string name="screen_082" formatted="false">可在「文件管理 → 下载 → DroidCar」中找到，也可直接分享给开发者排查问题。</string>
     <string name="screen_083" formatted="false">打开文件</string>
     <string name="screen_084" formatted="false">打开文件夹</string>
     <string name="screen_085" formatted="false">分享文件</string>
-    <string name="screen_086" formatted="false">请到「文件管理 → 下载 → CarDeck」查看</string>
+    <string name="screen_086" formatted="false">请到「文件管理 → 下载 → DroidCar」查看</string>
     <string name="screen_087" formatted="false">没有可打开文件的应用——请到文件管理器中按上述路径查找</string>
     <string name="screen_088" formatted="false">分享日志文件</string>
     <string name="screen_089" formatted="false">没有可分享的应用</string>
@@ -323,8 +323,8 @@
     <string name="phase_35">等待手机加入车机热点 %1$s…</string>
     <string name="phase_36">手机不在车机热点——请到 WLAN 设置加入 %1$s</string>
     <string name="phase_37">车机未开放影像通道，本轮结束（等待车机重新邀请）</string>
-    <string name="hint_vpn_blocks_car">VPN 正在拦截车机连线——请在 VPN App 中排除 CarDeck（分应用代理）或允许绕过局域网</string>
-    <string name="nav_accessibility_label">CarDeck 导航资讯</string>
+    <string name="hint_vpn_blocks_car">VPN 正在拦截车机连线——请在 VPN App 中排除 DroidCar（分应用代理）或允许绕过局域网</string>
+    <string name="nav_accessibility_label">DroidCar 导航资讯</string>
     <string name="nav_accessibility_description">让车机仪表盘/抬头显示显示 Waze、高德地图的转弯提示：只在连接车机时读取这两个 App 导航画面上的距离、转弯与到达时间文字，不读取其他 App，也不会记录或上传。</string>
     <string name="ui_nav_cluster_title">仪表盘导航资讯</string>
     <string name="ui_nav_cluster_note">在支持的仪表盘显示转弯提示。读取高德和 Waze 需要无障碍权限。</string>
@@ -379,7 +379,7 @@
     <string name="wp_preset_meadow">草原</string>
     <!-- 免责声明（2026-11-17 多语言化；改正文须同步 Disclaimer.CURRENT_VERSION +1） -->
     <string name="disclaimer_s1_title">这是什么</string>
-    <string name="disclaimer_s1_body">CarDeck Neo 是一个非官方的实验性项目：让一台未 root 的 Android 手机扮演 CarPlay 发送端（iPhone 角色），把手机上的车机桌面与第三方应用投到支持的接收端上显示，并把接收端触摸回注到手机侧的虚拟屏。\n\n本项目与 Apple Inc.、任何汽车厂商均无关联，未获得任何授权或认证，也不是 MFi 认证产品。「CarPlay」「AirPlay」是 Apple Inc. 的商标，此处仅用于说明兼容目标，不表示任何关联或背书。</string>
+    <string name="disclaimer_s1_body">DroidCar 是一个非官方的实验性项目：让一台未 root 的 Android 手机扮演 CarPlay 发送端（iPhone 角色），把手机上的车机桌面与第三方应用投到支持的接收端上显示，并把接收端触摸回注到手机侧的虚拟屏。\n\n本项目与 Apple Inc.、任何汽车厂商均无关联，未获得任何授权或认证，也不是 MFi 认证产品。「CarPlay」「AirPlay」是 Apple Inc. 的商标，此处仅用于说明兼容目标，不表示任何关联或背书。</string>
     <string name="disclaimer_s2_title">开发中，可能随时出问题</string>
     <string name="disclaimer_s2_body">当前为开发测试版本，功能、界面与协议实现都可能随时变更，可能存在未发现的缺陷。不承诺任何稳定性、兼容性或可用性。\n\n已经测试过的组合只有：\n· 发送端：荣耀 Magic7 Pro（Android 17）\n· 接收端：奥迪 MIB3 车机（真车）\n· 接收端：Redmi K40 上的 DiPlay 测试台（Android 13）\n\n其他手机、其他 Android 版本、其他车型均未验证，可能完全无法工作，也可能出现画面异常、触摸错位或反复断连。\n\n「应用横屏」功能需要 Android 14 及以上系统；Android 13 及更早机型该功能不可用（设置面板会提示不支持）。</string>
     <string name="disclaimer_s3_title">驾驶安全（请务必阅读）</string>
@@ -389,7 +389,7 @@
     <string name="disclaimer_s5_title">免责条款</string>
     <string name="disclaimer_s5_body">本应用按「现状」提供，不附带任何明示或默示的担保，包括但不限于适销性、特定用途适用性与不侵权担保。\n\n在适用法律允许的最大范围内，作者与贡献者不对因使用或无法使用本应用而产生的任何直接或间接损失承担责任，包括但不限于：连接中断、导航或通话中断、数据丢失、设备异常、车辆系统异常，以及因驾驶中操作或分心导致的事故与损失。\n\n你是否使用本应用、如何配置与操作、以及在何种场景下使用，完全由你自行判断并自行承担风险。若你不同意上述任何一条，请点击「放弃使用」并卸载本应用。</string>
     <string name="disclaimer_s6_title">开源与反馈</string>
-    <string name="disclaimer_s6_body">本项目为个人实验性作品，以 MIT 许可证开源，欢迎反馈问题，但不承诺修复时限。由于涉及协议实现与第三方 ROM 差异，部分问题可能无法解决。\n\n完整条款（非官方声明、商标归属、安全警告、已测试范围）见仓库根目录的 DISCLAIMER.md，与本页内容同源。</string>
+    <string name="disclaimer_s6_body">本项目为个人实验性作品，以 GPL-3.0 许可证开源，欢迎反馈问题，但不承诺修复时限。由于涉及协议实现与第三方 ROM 差异，部分问题可能无法解决。\n\n完整条款（非官方声明、商标归属、安全警告、已测试范围）见仓库根目录的 DISCLAIMER.md，与本页内容同源。</string>
     <string name="disclaimer_subtitle_first">首次使用前请完整阅读。接受后可在主界面随时重看。</string>
     <string name="disclaimer_subtitle_view">你可以随时回来查看本声明（当前版本 v%1$d）。</string>
     <string name="disclaimer_accept">接受</string>
@@ -399,7 +399,7 @@
     <string name="disclaimer_hint_wait">请等待 %1$d 秒后接受</string>
     <string name="disclaimer_hint_scroll">请滑动阅读至底部</string>
     <string name="md_car_screenshot">截取车机画面</string>
-    <string name="md_car_screenshot_desc">把当前车机画面存成 PNG 到「下载/CarDeck」（需已连接）</string>
+    <string name="md_car_screenshot_desc">把当前车机画面存成 PNG 到「下载/DroidCar」（需已连接）</string>
     <string name="md_car_screenshot_failed">截图失败：请先连接车机</string>
     <!-- 车机通知（2026-11-17：CarPlay 式横幅 + 独立 App 名单） -->
     <string name="notif_apps">通知 App</string>
@@ -420,7 +420,7 @@
     <string name="md_hooks_disconnected">断开连接时</string>
     <string name="md_hooks_test">测试</string>
 
-    <string name="md_hooks_intro">连上 / 断开车机时依次发出下面的 Intent（类似 MacroDroid「发送 Intent」，可搭配 Tasker 等）。每个都会附带 extra cardeck_event = connected / disconnected。</string>
+    <string name="md_hooks_intro">连上 / 断开车机时依次发出下面的 Intent（类似 MacroDroid「发送 Intent」，可搭配 Tasker 等）。每个都会附带 extra droidcar_event = connected / disconnected。</string>
     <string name="md_hooks_empty">还没有 Intent</string>
     <string name="md_hooks_add">新增 Intent</string>
     <string name="md_hooks_edit">编辑 Intent</string>

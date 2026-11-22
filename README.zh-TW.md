@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/images/icon.svg" width="120" alt="CarDeck Neo 圖示">
+  <img src="docs/images/icon.svg" width="120" alt="DroidCar 圖示">
 </p>
 
-<h1 align="center">CarDeck Neo</h1>
+<h1 align="center">DroidCar</h1>
 
 <p align="center">
   讓 Android 手機以無線 CarPlay 連上車機，顯示地圖、音樂與 App 的車機桌面<br>
@@ -11,7 +11,7 @@
 
 ---
 
-CarDeck Neo 是 [CarDeck](https://github.com/shaonialife/cardeck) 的介面改版。手機（不需 root）扮演 CarPlay 發送端，把自繪的車機桌面與手機上的 App 投到支援無線 CarPlay 的車機上，車機觸控再回傳到手機操作。
+DroidCar 是基於 [CarDeck](https://github.com/shaonialife/cardeck) 的改版。手機（不需 root）扮演 CarPlay 發送端，把自繪的車機桌面與手機上的 App 投到支援無線 CarPlay 的車機上，車機觸控再回傳到手機操作。
 
 > **非官方專案**：與 Apple Inc. 及任何汽車製造商無關，未獲授權或認證，**不是 MFi 產品**。CarPlay / AirPlay 是 Apple Inc. 的商標，僅用於說明相容目標。
 >
@@ -60,10 +60,15 @@ CarDeck Neo 是 [CarDeck](https://github.com/shaonialife/cardeck) 的介面改�
 - **車機桌布**：內建多款桌布，深色與淺色模式可分別設定，跟隨手機自動切換；也能從相簿選圖。
 - **手機介面**：Material Design 3，底部分為「連線 / 車機 / 診斷」三頁；深淺色跟隨手機，主色跟隨系統。
 - **多語言**：繁體中文、簡體中文、英文，可在 **車機設定 → 顯示 → 語言** 切換。
-- **車機畫面截圖**：在「診斷」頁一鍵把目前車機畫面存成 PNG（存到「下載/CarDeck」）。
+- **車機畫面截圖**：在「診斷」頁一鍵把目前車機畫面存成 PNG（存到「下載/DroidCar」）。
 - **車機麥克風**：任何 App 開始錄音（語音搜尋、語音訊息、Gemini、WhatsApp / Telegram / 微信通話等）時，自動改用車機麥克風收音，結束後還原手機麥克風（已在 WinPlay 驗證，真車待測）。
 - **車機接聽電話**：手機來電與通話中（一般電話、WhatsApp、Telegram、微信）會在儀表板的音樂卡位置顯示來電者名稱、頭像，以及接聽 / 拒接或靜音 / 掛斷按鈕；WhatsApp、Telegram、微信主動撥出也會顯示。沒有通話按鈕的 App（微信）會在車機上開啟它自己的通話畫面。網路通話時對方的聲音從車機播出，並改用車機麥克風（已在 WinPlay 驗證，尚未實車測試）。
 - **車輛儀表與 HUD**：把 Google 地圖、Waze、高德地圖的轉彎導航（轉彎方向、距離、道路名稱、預計到達時間與車道指示）以及正在播放的歌曲與專輯封面，送到支援在儀表或抬頭顯示器顯示 CarPlay 資訊的車上。在 **快速設定 → 儀表板導航資訊** 開啟；Waze 與高德需要的無障礙服務由本應用透過 Shizuku 開啟（已在 WinPlay 驗證，尚未實車測試）。
+- **儀表副螢幕**：有第二塊儀表螢幕（alternate screen）的車機會收到獨立的畫面串流，依車機要求顯示地圖、轉向卡片或兩者並排（已用 ChairPlay 驗證，尚未實車測試）。
+- **旋鈕與實體按鍵**：旋鈕、搖桿與 Home / 返回鍵會在 Dock、主畫面、儀表板、車機設定和後台管理上移動外框，按下即開啟；在儀表板上按一次確定才操作地圖或音樂 App 本身。實體返回鍵的邏輯與輔助小白點相同（已用 ChairPlay 驗證，尚未實車測試）。
+- **多指觸控**：車機回報多指時，可雙指縮放地圖與相片。
+- **鎖屏繼續投放**：手機鎖屏時畫面照常投到車機；可在主頁選擇真鎖屏或假鎖屏（螢幕常亮 + 暗幕）。
+- **回到車機原廠選單**：桌面上帶車廠標誌的圖示可把畫面交還車機，按車機的 CarPlay 鍵即回到 DroidCar。
 - **輔助小白點**：車機畫面最上層的小圓點，可拖動，點開有返回 / 主頁 / 後台三鍵；在儀表板時「返回」會發給最後操作的地圖或音樂 App。大小可在 **車機設定 → 顯示** 調整，深淺色跟隨手機。
 - **手機快速設定**：在手機主頁的 **快速設定** 可開關輔助小白點、儀表板導航資訊及車機通知橫幅。
 - **車機通知**：CarPlay 風格橫幅，顯示 App 圖示，從上方滑入，可點 × 或往上滑關閉；可另外指定只顯示哪些 App 的通知。
@@ -79,8 +84,8 @@ CarDeck Neo 是 [CarDeck](https://github.com/shaonialife/cardeck) 的介面改�
 
 ## 使用方式
 
-1. 安裝 CarDeck Neo，首次開啟時閱讀並接受免責聲明。
-2. 啟動 Shizuku，並在 CarDeck Neo 主頁授權。
+1. 安裝 DroidCar，首次開啟時閱讀並接受免責聲明。
+2. 啟動 Shizuku，並在 DroidCar 主頁授權。
 3. 在車機上打開無線 CarPlay（配對模式），回到手機點 **啟動連線**。
 4. 連線後車機會顯示儀表板。車機相關設定可在手機「車機」頁或車機上的設定 App 調整。
 
@@ -99,7 +104,7 @@ CarDeck Neo 是 [CarDeck](https://github.com/shaonialife/cardeck) 的介面改�
 偵錯版 APK 位於 `app/build/outputs/apk/standard/debug/`。安裝前請先停止正在執行的 App（連線中直接安裝，系統確認視窗可能會跑到車機畫面上）：
 
 ```bash
-adb shell am force-stop io.github.ezn24.cardeck.neo
+adb shell am force-stop io.github.ezn24.droidcar
 ```
 
 ```bash
@@ -116,7 +121,7 @@ adb install -r app/build/outputs/apk/standard/debug/app-standard-debug.apk
 
 ### 協定參考
 
-CarDeck 為獨立實作。以下專案僅用於對照協定事實與時序；GPL 授權或未聲明授權的專案，均未複製其程式碼。
+DroidCar 為獨立實作。以下專案僅用於對照協定事實與時序；GPL 授權或未聲明授權的專案，均未複製其程式碼。
 
 | 專案 | 角色 | 參考內容 |
 | --- | --- | --- |
@@ -136,4 +141,4 @@ CarDeck 為獨立實作。以下專案僅用於對照協定事實與時序；GPL
 
 ## 授權
 
-[MIT License](LICENSE)。使用前請閱讀 [DISCLAIMER.md](DISCLAIMER.md)。
+[GNU General Public License v3.0](LICENSE)。DroidCar 源自 CarDeck 作者以 MIT 授權釋出的程式碼，其授權聲明保留於 [NOTICE](NOTICE)。使用前請閱讀 [DISCLAIMER.md](DISCLAIMER.md)。

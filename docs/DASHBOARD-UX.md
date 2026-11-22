@@ -26,7 +26,7 @@
 ## 0.1.36 背景應用管理
 
 - 應用頁固定「背景應用」入口；長按 Dock Home 也可開啟。點 App 切換、單獨關閉或全部關閉；返回應用頁。
-- 以實際車機 Task 清單為來源，解析 Samsung `Display #N` 與 Honor `Display: mDisplayId=N`；排除手機主屏、Dock、CarDeck 自身所有 affinity。
+- 以實際車機 Task 清單為來源，解析 Samsung `Display #N` 與 Honor `Display: mDisplayId=N`；排除手機主屏、Dock、DroidCar 自身所有 affinity。
 - 關閉僅移除車機視窗，不 force-stop 套件；音樂服務可能繼續播放。執行前重新取 task ID，完成後重讀驗證；失敗顯示可重試訊息。
 - shell 查詢、關閉命令、APK 圖示和名稱讀取都在背景；不以記憶體 runningApps 當真實程序狀態。
 

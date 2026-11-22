@@ -136,7 +136,7 @@
                     android:layout_width="210dp"
                     android:layout_height="176dp">
 
-                    <io.github.ezn24.cardeck.neo.ui.SignalWavesView
+                    <io.github.ezn24.droidcar.ui.SignalWavesView
                         android:id="@+id/signalWaves"
                         android:layout_width="210dp"
                         android:layout_height="176dp" />
@@ -166,7 +166,7 @@
                         android:layout_gravity="center_horizontal|bottom"
                         android:layout_marginBottom="10dp"
                         android:letterSpacing="0.22"
-                        android:text="CARDECK"
+                        android:text="DROIDCAR"
                         android:textColor="@color/m3_hub_caption"
                         android:textSize="10sp"
                         android:textStyle="bold" />
@@ -1901,7 +1901,7 @@
                 android:gravity="center"
                 android:textColor="@color/m3_outline"
                 android:textSize="10.5sp"
-                tools:text="CarDeck v0.0.0" />
+                tools:text="DroidCar v0.0.0" />
             </LinearLayout>
             </ScrollView>
             </FrameLayout>

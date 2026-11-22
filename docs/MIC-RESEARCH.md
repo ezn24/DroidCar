@@ -163,7 +163,7 @@ DEFAULT/UNPROCESSED 各 `addRule(attrs, RULE_MATCH_ATTRIBUTE_CAPTURE_PRESET=2)`�
 沿途踩的坑（每一個都會讓「看起來都對、但錄到的是空的」）：
 
 1. **UserService 建注入軌道被拒**（`Cannot create AudioTrack`）：`AudioPolicy.createAudioTrackSource` 用進程的
-   opPackageName（CarDeck 包名）+ uid 2000，身分不符。改為照 AOSP 自建 `AudioTrack.Builder().setContext(shell)`
+   opPackageName（DroidCar 包名）+ uid 2000，身分不符。改為照 AOSP 自建 `AudioTrack.Builder().setContext(shell)`
    （API 34+；12/13 退回系統方法）。
 2. **軌道 tags 必須以 `addr=` 開頭**：APM 只認開頭；多加 `fixedVolume;` 會讓軌道進不了 mix，錄音拿到靜音。
 3. **只收不發 → WinPlay 不開麥**：它收到該串流第一個下行包才 `openMicUplink`，所以要持續送靜音下行。

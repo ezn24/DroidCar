@@ -84,16 +84,16 @@ jobs:
           done
 
           umask 077
-          signing_dir=$(mktemp -d "$RUNNER_TEMP/cardeck-signing.XXXXXX")
+          signing_dir=$(mktemp -d "$RUNNER_TEMP/droidcar-signing.XXXXXX")
           trap 'rm -f -- keystore.properties "$signing_dir/release.jks"; rmdir -- "$signing_dir"' EXIT
-          export CARDECK_SIGNING_DIR="$signing_dir"
+          export DROIDCAR_SIGNING_DIR="$signing_dir"
 
           python3 - <<'PYTHON'
           import base64
           import os
           from pathlib import Path
 
-          keystore = Path(os.environ["CARDECK_SIGNING_DIR"]) / "release.jks"
+          keystore = Path(os.environ["DROIDCAR_SIGNING_DIR"]) / "release.jks"
           encoded = "".join(os.environ["KEYSTORE_BASE64"].split())
           keystore.write_bytes(base64.b64decode(encoded, validate=True))
 
@@ -115,7 +115,7 @@ jobs:
           PYTHON
 
           unset KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD
-          bash ./gradlew :app:assembleStandardRelease "-Pcardeck.buildNumber=$BUILD_NUMBER" --stacktrace
+          bash ./gradlew :app:assembleStandardRelease "-Pdroidcar.buildNumber=$BUILD_NUMBER" --stacktrace
 
       - name: Verify signature and package
         id: package
@@ -150,7 +150,7 @@ jobs:
             echo "signing certificate matches EXPECTED_CERT_SHA256"
           fi
 
-          NAME="CarDeck-Neo-${VERSION}-release.apk"
+          NAME="DroidCar-v${VERSION}-release.apk"
           cp "$APK" "$NAME"
           SHA=$(sha256sum "$NAME" | cut -d' ' -f1)
           SIZE=$(du -h "$NAME" | cut -f1)
@@ -181,7 +181,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "### CarDeck Neo ${VERSION} (release signed)"
+            echo "### DroidCar ${VERSION} (release signed)"
             echo
             echo "| Item | Value |"
             echo "|---|---|"
@@ -283,4 +283,4 @@ jobs:
           } > "$NOTES"
           cat "$NOTES"
           gh release create "$TAG" "$APK" --target "$GITHUB_SHA" \
-            --title "CarDeck Neo $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+            --title "DroidCar $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"

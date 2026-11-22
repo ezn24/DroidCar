@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/images/icon.svg" width="120" alt="CarDeck Neo icon">
+  <img src="docs/images/icon.svg" width="120" alt="DroidCar icon">
 </p>
 
-<h1 align="center">CarDeck Neo</h1>
+<h1 align="center">DroidCar</h1>
 
 <p align="center">
   Connect an Android phone to your car over wireless CarPlay and get a car launcher with maps, music and apps<br>
@@ -11,7 +11,7 @@
 
 ---
 
-CarDeck Neo is a UI fork of [CarDeck](https://github.com/shaonialife/cardeck). The phone (no root needed) acts as a CarPlay sender: it streams its own car launcher and the apps on your phone to a head unit that supports wireless CarPlay, and touches on the head unit are sent back to the phone.
+DroidCar is a modified version based on [CarDeck](https://github.com/shaonialife/cardeck). The phone (no root needed) acts as a CarPlay sender: it streams its own car launcher and the apps on your phone to a head unit that supports wireless CarPlay, and touches on the head unit are sent back to the phone.
 
 > **Unofficial project**: not affiliated with Apple Inc. or any car manufacturer, not authorized or certified, and **not an MFi product**. CarPlay and AirPlay are trademarks of Apple Inc., mentioned only to describe compatibility.
 >
@@ -60,10 +60,15 @@ The layout adapts to the head unit's resolution: wide screens split side by side
 - **Car wallpapers**: built-in wallpapers, set separately for dark and light mode and switched automatically with the phone; you can also pick your own photo.
 - **Phone UI**: Material Design 3 with three tabs at the bottom — Connect / Car / Diagnostics; follows the phone's dark/light mode and system accent color.
 - **Languages**: Traditional Chinese, Simplified Chinese and English, switchable under **Car settings → Display → Language**.
-- **Car screen capture**: one tap on the Diagnostics tab saves the current head-unit screen as a PNG (in Download/CarDeck).
+- **Car screen capture**: one tap on the Diagnostics tab saves the current head-unit screen as a PNG (in Download/DroidCar).
 - **Car microphone**: when any app starts recording (voice search, voice messages, Gemini, WhatsApp / Telegram / WeChat calls…), audio comes from the car's microphone instead, and the phone mic is restored afterwards (verified with WinPlay; not yet tested in a real car).
 - **Calls on the car**: incoming and ongoing calls (phone, WhatsApp, Telegram, WeChat) replace the dashboard music card with the caller's name and photo and answer / decline or mute / hang-up buttons. Outgoing calls in WhatsApp, Telegram and WeChat show up too; apps without call buttons (WeChat) open their own call screen on the car. During internet calls the other party's voice plays through the car and the car microphone is used (verified with WinPlay; not yet tested in a real car).
 - **Instrument cluster and HUD**: turn-by-turn guidance from Google Maps, Waze and Amap (maneuver, distance, road name, arrival time and lane guidance) and the current track with album art are sent to cars that show CarPlay info on the cluster or head-up display. Turn it on with **Quick settings → Cluster navigation info**; Waze and Amap need the accessibility service the app grants through Shizuku (verified with WinPlay; not yet tested in a real car).
+- **Cluster screen**: receivers with a second cluster display (alternate screen) get their own stream of the map, a turn card, or both side by side, as the car asks for it (tested with ChairPlay; not yet tested in a real car).
+- **Knob and buttons**: rotary knobs, joysticks and Home / Back buttons move a highlight frame over the Dock, home grid, dashboard, car settings and recent apps; press to open. On the dashboard, press once to control the map or music app itself. Physical Back follows the same rules as the assistive dot (tested with ChairPlay; not yet tested in a real car).
+- **Multi-touch**: pinch to zoom maps and photos on head units that report more than one finger.
+- **Locked phone**: streaming keeps going while the phone is locked. On the home page you choose between a real lock and a fake lock (screen stays on under a dark overlay).
+- **Back to the car's own menu**: a launcher icon with the car's logo hands the screen back to the head unit; the car's CarPlay button returns to DroidCar.
 - **Assistive dot**: a small draggable dot on top of the car screen with Back / Home / Recents. On the dashboard, Back goes to the map or music app you touched last. Size is adjustable in **Car settings → Display**; follows the phone's dark/light mode.
 - **Phone quick settings**: On the phone home screen, use **Quick settings** to toggle Assistive Dot, cluster navigation info and car notification banners.
 - **Car notifications**: CarPlay-style banners with the app icon that slide in from the top; dismiss with × or by swiping up. You can limit notifications to selected apps.
@@ -79,8 +84,8 @@ The layout adapts to the head unit's resolution: wide screens split side by side
 
 ## How to use
 
-1. Install CarDeck Neo, then read and accept the disclaimer on first launch.
-2. Start Shizuku and grant access from the CarDeck Neo home screen.
+1. Install DroidCar, then read and accept the disclaimer on first launch.
+2. Start Shizuku and grant access from the DroidCar home screen.
 3. Turn on wireless CarPlay (pairing mode) on the head unit, then tap **Start connection** on the phone.
 4. Once connected the head unit shows the dashboard. Car-side settings are on the phone's Car tab or in the settings app on the head unit.
 
@@ -99,7 +104,7 @@ Requires JDK 17 and the Android SDK. From the project root:
 The debug APK is in `app/build/outputs/apk/standard/debug/`. Stop the running app before installing (if you install mid-session, the system confirmation dialog can end up on the car screen):
 
 ```bash
-adb shell am force-stop io.github.ezn24.cardeck.neo
+adb shell am force-stop io.github.ezn24.droidcar
 ```
 
 ```bash
@@ -116,12 +121,12 @@ See the [dashboard guide](docs/DASHBOARD-UX.md) for detailed usage and testing; 
 
 ### Protocol references
 
-CarDeck is an independent implementation. The projects below were studied for protocol facts and timing only; no code from the GPL-licensed or unlicensed ones is copied.
+DroidCar is an independent implementation. The projects below were studied for protocol facts and timing only; no code from the GPL-licensed or unlicensed ones is copied.
 
 | Project | Role | Used for |
 | --- | --- | --- |
 | [shilapi/xcertplay](https://github.com/shilapi/xcertplay) (GPL-3.0) | CarPlay receiver on Android | iAP2 link layer, Bonjour, AirPlay pairing |
-| [shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay) (GPL-3.0) | Receiver, derived from xcertplay | The test bench CarDeck is developed against |
+| [shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay) (GPL-3.0) | Receiver, derived from xcertplay | The test bench DroidCar is developed against |
 | [catplay-labs/catplay](https://github.com/catplay-labs/catplay) | Rust CarPlay implementation | Sender-side session order, screen/audio stream formats |
 | [HaToan/carplay-wifi-extractor](https://github.com/HaToan/carplay-wifi-extractor) | Wireless CarPlay tooling | Wireless control timing |
 | [Nitsuya/AADisplay](https://github.com/Nitsuya/AADisplay) (GPL-3.0) | Virtual-display launcher | Audi MIB3 Wi-Fi iAP2 tunnel timing |
@@ -136,4 +141,4 @@ CarDeck is an independent implementation. The projects below were studied for pr
 
 ## License
 
-[MIT License](LICENSE). Please read [DISCLAIMER.md](DISCLAIMER.md) before use.
+[GNU General Public License v3.0](LICENSE). DroidCar started from MIT-licensed code by the CarDeck authors; their notices are kept in [NOTICE](NOTICE). Please read [DISCLAIMER.md](DISCLAIMER.md) before use.

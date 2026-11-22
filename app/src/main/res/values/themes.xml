@@ -115,7 +115,7 @@
         <item name="android:navigationBarColor">#000000</item>
     </style>
     <!-- 设置里的选择弹窗：MD3 令牌（深浅色跟随宿主 Activity，主色跟随系统） -->
-    <style name="CarDeckAppPicker" parent="ThemeOverlay.AppCompat.Dialog.Alert">
+    <style name="DroidCarAppPicker" parent="ThemeOverlay.AppCompat.Dialog.Alert">
         <item name="android:windowBackground">@drawable/bg_picker_dialog</item>
         <item name="android:colorBackground">@color/m3_surface_high</item>
         <item name="android:textColorPrimary">@color/m3_on_surface</item>

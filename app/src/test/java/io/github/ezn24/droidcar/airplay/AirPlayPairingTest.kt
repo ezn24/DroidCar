@@ -1,0 +1,276 @@
+package io.github.ezn24.droidcar.airplay
+
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.math.BigInteger
+import java.security.SecureRandom
+
+/**
+ * End-to-end pairing stack loopback: MockReceiver implements the server strictly per the reference receiver (xcertplay PairSetup/PairVerify/Srp6a)
+ * algorithm, verifying that our client completes pair-setup + pair-verify,
+ * and that both sides derive control keys with consistent directions.
+ */
+class AirPlayPairingTest {
+    private val random = SecureRandom()
+
+    @Test
+    fun pairSetupThenPairVerifyAgainstMockReceiver() {
+        val receiver = MockReceiver()
+        val transport = TlvTransport { path, body -> receiver.handle(path, body) }
+        val keyPair = AirPlayCrypto.ed25519Generate()
+        val identity = ControllerIdentity("test-controller-id", keyPair.privateKey, keyPair.publicKey)
+
+        val receiverIdentity = PairSetupClient(identity, transport) { }.run()
+        assertNotNull(receiverIdentity)
+        assertEquals(receiver.pairingId, receiverIdentity!!.pairingId)
+        assertArrayEquals(receiver.staticKey.publicKey, receiverIdentity.publicKey)
+        assertTrue("Receiver should store the controller public key", receiver.pairings.containsKey(identity.pairingId))
+
+        val keys = PairVerifyClient(identity, transport) { }.run(receiver.staticKey.publicKey)
+        assertEquals(32, keys.phoneWriteKey.size)
+        assertEquals(32, keys.phoneReadKey.size)
+
+        // Direction cross-check: receiver readKey decrypts the direction we send, writeKey is the direction it sends to us
+        assertNotNull("Receiver should complete pair-verify", receiver.lastReadKey)
+        assertArrayEquals(receiver.lastReadKey, keys.phoneWriteKey)
+        assertArrayEquals(receiver.lastWriteKey, keys.phoneReadKey)
+    }
+
+    @Test
+    fun tlv8FragmentationRoundTrip() {
+        val big = ByteArray(600) { (it % 251).toByte() }
+        val encoded =
+            Tlv8.encode(
+                listOf(
+                    Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(1)),
+                    Tlv8.Item(Tlv8.TYPE_PUBLIC_KEY, big),
+                ),
+            )
+        val decoded = Tlv8.decode(encoded)
+        assertEquals(1, decoded[Tlv8.TYPE_STATE]?.firstOrNull()?.toInt())
+        assertArrayEquals(big, decoded[Tlv8.TYPE_PUBLIC_KEY])
+    }
+
+    /** Server implemented per the reference receiver algorithm. */
+    private class MockReceiver {
+        val staticKey = AirPlayCrypto.ed25519Generate()
+        val pairingId = "3e6f5739-b2bf-4ebf-bb87-5b6b57cc42e5"
+        val pairings = HashMap<String, ByteArray>()
+        var lastReadKey: ByteArray? = null
+            private set
+        var lastWriteKey: ByteArray? = null
+            private set
+
+        private val random = SecureRandom()
+
+        // SRP server state
+        private var salt = ByteArray(0)
+        private var publicKeyB = BigInteger.ZERO
+        private var verifier = BigInteger.ZERO
+        private var privateB = BigInteger.ZERO
+        private var sessionKey = ByteArray(0)
+
+        // pair-verify state
+        private var pvEphemeralPublic = ByteArray(0)
+        private var pvShared = ByteArray(0)
+        private var pvEncryptionKey = ByteArray(0)
+
+        fun handle(
+            path: String,
+            body: ByteArray,
+        ): ByteArray {
+            val tlv = Tlv8.decode(body)
+            val state = tlv[Tlv8.TYPE_STATE]?.firstOrNull()?.toInt()?.and(0xFF) ?: 0
+            return when (path) {
+                "/pair-setup" ->
+                    when (state) {
+                        1 -> setupM2()
+                        3 -> setupM4(tlv)
+                        5 -> setupM6(tlv)
+                        else -> error(state)
+                    }
+
+                "/pair-verify" ->
+                    when (state) {
+                        1 -> verifyM2(tlv)
+                        3 -> verifyM4(tlv)
+                        else -> error(state)
+                    }
+
+                else -> error(state)
+            }
+        }
+
+        private fun setupM2(): ByteArray {
+            salt = ByteArray(16).also(random::nextBytes)
+            val identifier = Srp6aClient.USERNAME.toByteArray()
+            val x =
+                Srp6aClient.toBigInt(
+                    AirPlayCrypto.sha512(
+                        salt,
+                        AirPlayCrypto.sha512(identifier, byteArrayOf(':'.code.toByte()), Srp6aClient.SETUP_CODE.toByteArray()),
+                    ),
+                )
+            verifier = Srp6aClient.generator().modPow(x, Srp6aClient.modulus())
+            privateB = Srp6aClient.toBigInt(ByteArray(32).also(random::nextBytes))
+            publicKeyB =
+                (
+                    Srp6aClient.multiplier() * verifier +
+                        Srp6aClient.generator().modPow(
+                            privateB,
+                            Srp6aClient.modulus(),
+                        )
+                ).mod(Srp6aClient.modulus())
+            return Tlv8.encode(
+                listOf(
+                    Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(2)),
+                    Tlv8.Item(Tlv8.TYPE_SALT, salt),
+                    Tlv8.Item(Tlv8.TYPE_PUBLIC_KEY, Srp6aClient.pad(publicKeyB)),
+                ),
+            )
+        }
+
+        private fun setupM4(tlv: Map<Int, ByteArray>): ByteArray {
+            val publicKeyA = tlv[Tlv8.TYPE_PUBLIC_KEY] ?: return error(4)
+            val clientProof = tlv[Tlv8.TYPE_PROOF] ?: return error(4)
+            val a = Srp6aClient.toBigInt(publicKeyA)
+            val u = Srp6aClient.toBigInt(AirPlayCrypto.sha512(Srp6aClient.pad(a), Srp6aClient.pad(publicKeyB)))
+            val s = (a * verifier.modPow(u, Srp6aClient.modulus())).mod(Srp6aClient.modulus()).modPow(privateB, Srp6aClient.modulus())
+            sessionKey = AirPlayCrypto.sha512(Srp6aClient.toBytes(s))
+
+            val hashN = AirPlayCrypto.sha512(Srp6aClient.toBytes(Srp6aClient.modulus()))
+            val hashG = AirPlayCrypto.sha512(Srp6aClient.toBytes(Srp6aClient.generator()))
+            val hashXor = ByteArray(hashN.size)
+            for (index in hashN.indices) {
+                hashXor[index] = (hashN[index].toInt() xor hashG[index].toInt()).toByte()
+            }
+            val identifier = Srp6aClient.USERNAME.toByteArray()
+            val expected =
+                AirPlayCrypto.sha512(
+                    hashXor,
+                    AirPlayCrypto.sha512(identifier),
+                    salt,
+                    Srp6aClient.pad(a),
+                    Srp6aClient.pad(publicKeyB),
+                    sessionKey,
+                )
+            if (!expected.contentEquals(clientProof)) return error(4)
+            val serverProof = AirPlayCrypto.sha512(Srp6aClient.pad(a), clientProof, sessionKey)
+            return Tlv8.encode(
+                listOf(
+                    Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(4)),
+                    Tlv8.Item(Tlv8.TYPE_PROOF, serverProof),
+                ),
+            )
+        }
+
+        private fun setupM6(tlv: Map<Int, ByteArray>): ByteArray {
+            val encrypted = tlv[Tlv8.TYPE_ENCRYPTED_DATA] ?: return error(6)
+            val encryptionKey = hkdf("Pair-Setup-Encrypt-Salt", "Pair-Setup-Encrypt-Info")
+            val sub = Tlv8.decode(AirPlayCrypto.chachaOpen(encryptionKey, AirPlayCrypto.nonceLabel("PS-Msg05"), encrypted))
+            val controllerId = sub[Tlv8.TYPE_IDENTIFIER] ?: return error(6)
+            val controllerLtpk = sub[Tlv8.TYPE_PUBLIC_KEY] ?: return error(6)
+            val controllerSignature = sub[Tlv8.TYPE_SIGNATURE] ?: return error(6)
+
+            val controllerSignKey = hkdf("Pair-Setup-Controller-Sign-Salt", "Pair-Setup-Controller-Sign-Info")
+            if (!AirPlayCrypto.ed25519Verify(controllerLtpk, controllerSignKey + controllerId + controllerLtpk, controllerSignature)) {
+                return error(6)
+            }
+            pairings[controllerId.toString(Charsets.UTF_8)] = controllerLtpk
+
+            val accessoryId = pairingId.toByteArray(Charsets.UTF_8)
+            val accessorySignKey = hkdf("Pair-Setup-Accessory-Sign-Salt", "Pair-Setup-Accessory-Sign-Info")
+            val signature = AirPlayCrypto.ed25519Sign(staticKey.privateKey, accessorySignKey + accessoryId + staticKey.publicKey)
+            val subResponse =
+                Tlv8.encode(
+                    listOf(
+                        Tlv8.Item(Tlv8.TYPE_IDENTIFIER, accessoryId),
+                        Tlv8.Item(Tlv8.TYPE_PUBLIC_KEY, staticKey.publicKey),
+                        Tlv8.Item(Tlv8.TYPE_SIGNATURE, signature),
+                    ),
+                )
+            return Tlv8.encode(
+                listOf(
+                    Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(6)),
+                    Tlv8.Item(
+                        Tlv8.TYPE_ENCRYPTED_DATA,
+                        AirPlayCrypto.chachaSeal(encryptionKey, AirPlayCrypto.nonceLabel("PS-Msg06"), subResponse),
+                    ),
+                ),
+            )
+        }
+
+        private fun verifyM2(tlv: Map<Int, ByteArray>): ByteArray {
+            val clientEphemeral = tlv[Tlv8.TYPE_PUBLIC_KEY] ?: return error(2)
+            pvClientEphemeral = clientEphemeral
+            val pair = AirPlayCrypto.x25519Generate()
+            pvEphemeralPublic = pair.publicKey
+            pvShared = AirPlayCrypto.x25519Shared(pair.privateKey, clientEphemeral)
+            pvEncryptionKey = hkdf("Pair-Verify-Encrypt-Salt", "Pair-Verify-Encrypt-Info")
+
+            val accessoryId = pairingId.toByteArray(Charsets.UTF_8)
+            val signature =
+                AirPlayCrypto.ed25519Sign(
+                    staticKey.privateKey,
+                    pair.publicKey + accessoryId + clientEphemeral,
+                )
+            val sub =
+                Tlv8.encode(
+                    listOf(
+                        Tlv8.Item(Tlv8.TYPE_IDENTIFIER, accessoryId),
+                        Tlv8.Item(Tlv8.TYPE_SIGNATURE, signature),
+                    ),
+                )
+            return Tlv8.encode(
+                listOf(
+                    Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(2)),
+                    Tlv8.Item(Tlv8.TYPE_PUBLIC_KEY, pair.publicKey),
+                    Tlv8.Item(
+                        Tlv8.TYPE_ENCRYPTED_DATA,
+                        AirPlayCrypto.chachaSeal(pvEncryptionKey, AirPlayCrypto.nonceLabel("PV-Msg02"), sub),
+                    ),
+                ),
+            )
+        }
+
+        private fun verifyM4(tlv: Map<Int, ByteArray>): ByteArray {
+            val encrypted = tlv[Tlv8.TYPE_ENCRYPTED_DATA] ?: return error(4)
+            val sub = Tlv8.decode(AirPlayCrypto.chachaOpen(pvEncryptionKey, AirPlayCrypto.nonceLabel("PV-Msg03"), encrypted))
+            val controllerId = sub[Tlv8.TYPE_IDENTIFIER] ?: return error(4)
+            val controllerSignature = sub[Tlv8.TYPE_SIGNATURE] ?: return error(4)
+            val controllerLtpk = pairings[controllerId.toString(Charsets.UTF_8)] ?: return error(4)
+
+            // The client ephemeral public key must be recovered from M1: in this simplified test path the client puts it before the identifier --
+            // per the reference algorithm it should be clientEphemeral || controllerId || serverEphemeral.
+            // Rebuilt here from the pair-verify session (the test saved it).
+            val clientEphemeral = pvClientEphemeral ?: return error(4)
+            if (!AirPlayCrypto.ed25519Verify(controllerLtpk, clientEphemeral + controllerId + pvEphemeralPublic, controllerSignature)) {
+                return error(4)
+            }
+            lastReadKey = hkdf("Control-Salt", "Control-Write-Encryption-Key")
+            lastWriteKey = hkdf("Control-Salt", "Control-Read-Encryption-Key")
+            return Tlv8.encode(listOf(Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(4))))
+        }
+
+        private var pvClientEphemeral: ByteArray? = null
+
+        private fun hkdf(
+            salt: String,
+            info: String,
+        ): ByteArray {
+            val material = if (pvShared.isNotEmpty()) pvShared else sessionKey
+            return AirPlayCrypto.hkdfSha512(material, salt.toByteArray(), info.toByteArray())
+        }
+
+        private fun error(state: Int): ByteArray =
+            Tlv8.encode(
+                listOf(
+                    Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(state.toByte())),
+                    Tlv8.Item(Tlv8.TYPE_ERROR, byteArrayOf(2)),
+                ),
+            )
+    }
+}

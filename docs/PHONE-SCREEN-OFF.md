@@ -12,7 +12,7 @@
 - CPU 降频/挂起，编码器与协议线程被拖死。
 
 scrcpy 的 `-S/--turn-screen-off` 走的是另一条路：**系统逻辑上保持「亮屏且未上锁」**，
-只把**物理面板的电源**在 SurfaceFlinger 层切断。CarDeck 照抄这个做法。
+只把**物理面板的电源**在 SurfaceFlinger 层切断。DroidCar 照抄这个做法。
 
 ## 2. 三个关键点
 

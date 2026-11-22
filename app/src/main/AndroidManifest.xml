@@ -117,9 +117,9 @@
             android:exported="true"
             android:permission="android.permission.DUMP">
             <intent-filter>
-                <action android:name="io.github.ezn24.cardeck.neo.CAPTURE_CAR" />
-                <action android:name="io.github.ezn24.cardeck.neo.EXPORT_LOG" />
-                <action android:name="io.github.ezn24.cardeck.neo.DUMP_NAV_UI" />
+                <action android:name="io.github.ezn24.droidcar.CAPTURE_CAR" />
+                <action android:name="io.github.ezn24.droidcar.EXPORT_LOG" />
+                <action android:name="io.github.ezn24.droidcar.DUMP_NAV_UI" />
             </intent-filter>
         </receiver>
 

@@ -5,7 +5,7 @@
 协议后，其它车型的录制刺激必须得到与录制一致的应答。
 
 ```bash
-python3 tools/extract_car_fixtures.py ~/logs/cardeck -o app/src/test/resources/carplay/fixtures
+python3 tools/extract_car_fixtures.py ~/logs/droidcar -o app/src/test/resources/carplay/fixtures
 ./gradlew testStandardDebugUnitTest --tests '*Replay*'
 ```
 

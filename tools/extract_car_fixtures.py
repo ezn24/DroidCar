@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract "car-model replay fixtures" from CarDeck runtime logs.
+"""Extract "car-model replay fixtures" from DroidCar (or older CarDeck) runtime logs.
 
 Usage:
     python3 tools/extract_car_fixtures.py <log file or directory>... [-o app/src/test/resources/carplay/fixtures]
@@ -203,7 +203,7 @@ def main() -> int:
     written = 0
     for raw_path in args.inputs:
         p = Path(raw_path)
-        files = [p] if p.is_file() else sorted(p.glob("CarDeck-log-*.txt")) if p.is_dir() else []
+        files = [p] if p.is_file() else sorted([*p.glob("DroidCar-log-*.txt"), *p.glob("CarDeck-log-*.txt")]) if p.is_dir() else []
         for f in files:
             data = extract(f)
             if data is None:

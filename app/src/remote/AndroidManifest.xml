@@ -15,12 +15,12 @@
              （2026-10-21 实测 Cleartext HTTP traffic not permitted）。
              只放开调试包；发布包不受影响。 -->
 
-        <!-- 调试版唯一桌面入口「CarDeck 远程调试」：填地址/配对码，页内有「打开主界面」。
+        <!-- 调试版唯一桌面入口「DroidCar 远程调试」：填地址/配对码，页内有「打开主界面」。
              singleTop：安装确认/续接询问带参重入时走 onNewIntent，不叠加实例 -->
         <activity
             android:name=".bridge.BridgeSetupActivity"
             android:exported="true"
-            android:label="CarDeck 远程调试"
+            android:label="DroidCar 远程调试"
             android:launchMode="singleTop"
             android:theme="@style/Theme.CarPlaySender">
             <intent-filter>
@@ -30,9 +30,9 @@
         </activity>
 
         <!-- 摘掉调试版主界面的桌面图标（保留 Activity 本身：设置页/桥命令仍要打开它），
-             否则调试版出现两个入口、桌面三个 CarDeck，用户分不清 -->
+             否则调试版出现两个入口、桌面三个 DroidCar，用户分不清 -->
         <activity
-            android:name="io.github.ezn24.cardeck.neo.MainActivity"
+            android:name="io.github.ezn24.droidcar.MainActivity"
             android:exported="true"
             tools:node="merge">
             <intent-filter tools:node="remove">
@@ -49,7 +49,7 @@
             android:name=".bridge.InstallReceiver"
             android:exported="false">
             <intent-filter>
-                <action android:name="io.github.ezn24.cardeck.neo.BRIDGE_INSTALL_RESULT" />
+                <action android:name="io.github.ezn24.droidcar.BRIDGE_INSTALL_RESULT" />
             </intent-filter>
         </receiver>
     </application>

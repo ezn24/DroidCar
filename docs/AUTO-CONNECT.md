@@ -1,6 +1,6 @@
 # 上车自动连接（车机蓝牙 ACL 广播唤醒）
 
-> 2026-10-23。目标：手机在口袋里，拉开车门 → 车机蓝牙连上 → CarDeck 自动被拉起并开始
+> 2026-10-23。目标：手机在口袋里，拉开车门 → 车机蓝牙连上 → DroidCar 自动被拉起并开始
 > CarPlay 会话。代码：`bt/CarBluetoothReceiver` + `CarPlayService.ACTION_AUTO_START_SESSION`。
 
 ## 1. 广播：为什么清单静态注册能拉起被杀进程
@@ -113,7 +113,7 @@ AudioPlaybackCapture 必须有 MediaProjection 实例，而令牌是**单次**�
    若一直失败，看 `BT-C: 连接失败…` 行。
 4. **下车清理**：`ACL_DISCONNECTED` → `disconnect()`。若此时正在推流，`onEnded` 与
    `disconnect` 会先后跑（`phoneScreenOff` 标志保证只收一次）。
-5. 自动启动不弹任何界面；用户想知道发生了什么，看通知（「CarDeck 运行中」）或日志。
+5. 自动启动不弹任何界面；用户想知道发生了什么，看通知（「DroidCar 运行中」）或日志。
 
 ## 6. 排查
 
@@ -131,7 +131,7 @@ AUTO: 车机蓝牙已断开 …——结束会话
 
 ```bash
 # 接收器是否已注册（清单里的 receiver 会出现在 package dump 中）
-adb shell dumpsys package io.github.ezn24.cardeck.neo | grep -i -A3 CarBluetoothReceiver
+adb shell dumpsys package io.github.ezn24.droidcar | grep -i -A3 CarBluetoothReceiver
 # 开关一次车机蓝牙电源，观察日志里是否出现 AUTO: / SVC: 两行
 ```
 

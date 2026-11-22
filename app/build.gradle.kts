@@ -14,7 +14,7 @@ plugins {
  * 0.x marks the experimental stage; before a release only this one line needs changing.
  *
  * On every push CI (`.github/workflows/android-ci.yml`) passes
- * `-Pcardeck.buildNumber=<commit count>` (`git rev-list --count HEAD`), yielding `0.1.13.<N>` / `versionCode = base*10000+N`.
+ * `-Pdroidcar.buildNumber=<commit count>` (`git rev-list --count HEAD`), yielding `0.1.13.<N>` / `versionCode = base*10000+N`.
  * Local builds must pass the same value, so that the same commit gets the same version number on both sides
  * (for a **release-signed** package, see [buildNumber] below); no commit needs to be written to the repository.
  */
@@ -37,7 +37,7 @@ val appVersionCode =
         }
 
 /**
- * Pre-release build number (both CI and local builds pass `-Pcardeck.buildNumber=$(git rev-list --count HEAD)`).
+ * Pre-release build number (both CI and local builds pass `-Pdroidcar.buildNumber=$(git rev-list --count HEAD)`).
  *
  *  - `versionName` gets `.N` appended: `1.43` -> `1.43.236`;
  *  - `versionCode` reserves the low 4 digits for the build number: `113` -> `1_130_042`.
@@ -51,13 +51,13 @@ val appVersionCode =
  * packages signed with the debug certificate force every user to uninstall and reinstall when a real certificate is adopted later.
  */
 val buildNumberText =
-    providers.gradleProperty("cardeck.buildNumber").orNull?.takeIf { it.isNotBlank() }
+    providers.gradleProperty("droidcar.buildNumber").orNull?.takeIf { it.isNotBlank() }
 val buildNumber = buildNumberText?.toIntOrNull()
 check(buildNumberText == null || buildNumber != null) {
-    "cardeck.buildNumber must be an integer (got \"$buildNumberText\")"
+    "droidcar.buildNumber must be an integer (got \"$buildNumberText\")"
 }
 check(buildNumber == null || buildNumber in 1..9_999) {
-    "cardeck.buildNumber must be within 1..9999 (the low 4 digits of versionCode are reserved for the build number), got $buildNumber"
+    "droidcar.buildNumber must be within 1..9999 (the low 4 digits of versionCode are reserved for the build number), got $buildNumber"
 }
 val effectiveVersionName = if (buildNumber == null) appVersionName else "$appVersionName.$buildNumber"
 val effectiveVersionCode =
@@ -66,7 +66,7 @@ val effectiveVersionCode =
 /**
  * Release signing config: read from `keystore.properties` outside the repository (excluded in .gitignore).
  * When the file is missing, release falls back to **debug signing**, only for forkers/local verification;
- * CI pre-release builds (with `-Pcardeck.buildNumber`) fail outright and never produce a debug-signed "release".
+ * CI pre-release builds (with `-Pdroidcar.buildNumber`) fail outright and never produce a debug-signed "release".
  *
  * A leaked key = anyone can sign your updates, so the keystore and passwords are **never committed**.
  */
@@ -80,16 +80,16 @@ val hasReleaseKeystore = keystoreProps.getProperty("storeFile") != null
 // Pre-release/CI builds (with a build number) must not fall back to debug signing: better to fail the build than to ship a
 // "release" that a real-signed package can never install over later.
 check(buildNumber == null || hasReleaseKeystore) {
-    "-Pcardeck.buildNumber was passed but there is no keystore.properties -- pre-release builds must not use debug signing"
+    "-Pdroidcar.buildNumber was passed but there is no keystore.properties -- pre-release builds must not use debug signing"
 }
 
 android {
-    namespace = "io.github.ezn24.cardeck.neo"
+    namespace = "io.github.ezn24.droidcar"
     compileSdk = 34
 
     defaultConfig {
-        // 2026-11-17 switched to Neo's own package name: coexists with upstream CarDeck; the namespace (source package path) is unchanged
-        applicationId = "io.github.ezn24.cardeck.neo"
+        // DroidCar's own package (hard fork, 2026-11-23): installs next to upstream CarDeck and the earlier CarDeck Neo builds
+        applicationId = "io.github.ezn24.droidcar"
         minSdk = 31
         targetSdk = 34
         versionCode = effectiveVersionCode
@@ -133,7 +133,7 @@ android {
         debug {
             // **Do not add applicationIdSuffix**: the debug build here is the everyday package:
             // Shizuku grants are per package name, so changing it would require re-authorization; the
-            // `run-as io.github.ezn24.cardeck.neo` debug path in AGENTS.md would break as well.
+            // `run-as io.github.ezn24.droidcar` debug path in AGENTS.md would break as well.
             versionNameSuffix = "-debug"
         }
     }

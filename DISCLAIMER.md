@@ -14,7 +14,7 @@
 
 - **CarPlay** 是 Apple Inc. 的商标。
 - **AirPlay** 是 Apple Inc. 的商标。
-- 本应用名称「CarDeck」不含上述任何商标；文中出现 CarPlay / AirPlay 字样，
+- 本应用名称「DroidCar」不含上述任何商标；文中出现 CarPlay / AirPlay 字样，
   **仅用于说明本应用的兼容目标**（即：本应用尝试以发送端身份与支持 CarPlay
   的接收端通信），属描述性引用，不表示任何关联、赞助或认可。
 - 本项目**不使用** Apple、任何汽车厂商的图形标识（logo、图标、认证标等）。
@@ -96,7 +96,7 @@ Android 13 及更早机型该功能不可用。
 
 ## 许可证
 
-本应用源码以 [MIT License](LICENSE) 发布。
+本应用源码以 [GNU General Public License v3.0](LICENSE) 发布。本应用基于以 MIT 许可发布的 CarDeck，其许可声明见 [NOTICE](NOTICE)。
 
 ---
 

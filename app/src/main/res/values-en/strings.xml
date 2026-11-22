@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" formatted="false">CarDeck Neo</string>
+    <string name="app_name" formatted="false">DroidCar</string>
     <string name="app_subtitle" formatted="false">Experimental CarPlay compatible sender</string>
     <string name="car_settings" formatted="false">Car settings</string>
     <string name="accessibility_description" formatted="false">Inject car touch gestures into the phone display without reading its content</string>
@@ -179,7 +179,7 @@
     <string name="screen_035" formatted="false">The hotspot password will be retrieved over Bluetooth</string>
     <string name="screen_036" formatted="false">Dimming will be available after connection</string>
     <string name="screen_039" formatted="false">No logs</string>
-    <string name="screen_040" formatted="false">CarDeck logs</string>
+    <string name="screen_040" formatted="false">DroidCar logs</string>
     <string name="screen_041" formatted="false">Keep awake and dimming enabled.</string>
     <string name="screen_042" formatted="false">Checking</string>
     <string name="screen_043" formatted="false">Checking leftover displays…</string>
@@ -221,11 +221,11 @@
     <string name="screen_079" formatted="false">Includes logs since this launch. Long press Export to include earlier logs.</string>
     <string name="screen_080" formatted="false">Includes earlier logs, up to the most recent 2 MB.</string>
     <string name="screen_081" formatted="false">Logs exported</string>
-    <string name="screen_082" formatted="false">Find the file in Downloads → CarDeck, or share it for troubleshooting.</string>
+    <string name="screen_082" formatted="false">Find the file in Downloads → DroidCar, or share it for troubleshooting.</string>
     <string name="screen_083" formatted="false">Open file</string>
     <string name="screen_084" formatted="false">Open folder</string>
     <string name="screen_085" formatted="false">Share file</string>
-    <string name="screen_086" formatted="false">Open Downloads → CarDeck in your file manager</string>
+    <string name="screen_086" formatted="false">Open Downloads → DroidCar in your file manager</string>
     <string name="screen_087" formatted="false">No app can open this file. Find it using your file manager.</string>
     <string name="screen_088" formatted="false">Share log file</string>
     <string name="screen_089" formatted="false">No app available to share this file</string>
@@ -283,8 +283,8 @@
     <string name="shizuku_install_body">Install Shizuku and start it using wireless debugging, then return and try again. Virtual displays and touch input require this service.</string>
     <string name="shizuku_start">Start the Shizuku service</string>
     <string name="shizuku_start_body">Open Shizuku, start its service, then return and try again. Start the service again after restarting your phone.</string>
-    <string name="shizuku_allow">Allow CarDeck to use Shizuku</string>
-    <string name="shizuku_allow_body">Request permission and allow CarDeck to use Shizuku, or enable CarDeck in the Shizuku app permissions list.</string>
+    <string name="shizuku_allow">Allow DroidCar to use Shizuku</string>
+    <string name="shizuku_allow_body">Request permission and allow DroidCar to use Shizuku, or enable DroidCar in the Shizuku app permissions list.</string>
     <string name="shizuku_ready">Shizuku ready</string>
     <string name="phase_01">Connection cancelled</string>
     <string name="phase_02">Car Wi-Fi disconnected (%1$s)</string>
@@ -323,8 +323,8 @@
     <string name="phase_35">Waiting for the phone to join %1$s…</string>
     <string name="phase_36">Join %1$s in Wi-Fi settings to connect to your car</string>
     <string name="phase_37">The car did not open the video channel; ending this attempt (waiting for the car to invite again)</string>
-    <string name="hint_vpn_blocks_car">A VPN is blocking the connection to the car. Exclude CarDeck in your VPN app (per-app / split tunnel) or let it bypass the local network</string>
-    <string name="nav_accessibility_label">CarDeck navigation info</string>
+    <string name="hint_vpn_blocks_car">A VPN is blocking the connection to the car. Exclude DroidCar in your VPN app (per-app / split tunnel) or let it bypass the local network</string>
+    <string name="nav_accessibility_label">DroidCar navigation info</string>
     <string name="nav_accessibility_description">Shows Waze and Amap turn-by-turn prompts on the car\'s instrument cluster / HUD: only while connected to a car, it reads the distance, turn and arrival text on those two apps\' navigation screens. No other app is read, and nothing is logged or uploaded.</string>
     <string name="ui_nav_cluster_title">Cluster navigation info</string>
     <string name="ui_nav_cluster_note">Show turns on supported instrument clusters. Amap and Waze need accessibility access.</string>
@@ -379,7 +379,7 @@
     <string name="wp_preset_meadow">Meadow</string>
     <!-- 免责声明（2026-11-17 多语言化；改正文须同步 Disclaimer.CURRENT_VERSION +1） -->
     <string name="disclaimer_s1_title">What this is</string>
-    <string name="disclaimer_s1_body">CarDeck Neo is an unofficial, experimental project: it lets a non-rooted Android phone act as a CarPlay sender (the iPhone role), showing a car launcher and third-party apps from the phone on a supported receiver, and feeding the receiver\'s touch input back into virtual displays on the phone.\n\nThis project is not affiliated with Apple Inc. or any car manufacturer, has no authorization or certification of any kind, and is not an MFi-certified product. \"CarPlay\" and \"AirPlay\" are trademarks of Apple Inc., used here only to describe compatibility; this implies no affiliation or endorsement.</string>
+    <string name="disclaimer_s1_body">DroidCar is an unofficial, experimental project: it lets a non-rooted Android phone act as a CarPlay sender (the iPhone role), showing a car launcher and third-party apps from the phone on a supported receiver, and feeding the receiver\'s touch input back into virtual displays on the phone.\n\nThis project is not affiliated with Apple Inc. or any car manufacturer, has no authorization or certification of any kind, and is not an MFi-certified product. \"CarPlay\" and \"AirPlay\" are trademarks of Apple Inc., used here only to describe compatibility; this implies no affiliation or endorsement.</string>
     <string name="disclaimer_s2_title">Work in progress — things may break at any time</string>
     <string name="disclaimer_s2_body">This is a development build. Features, UI and the protocol implementation may change at any time, and there may be undiscovered bugs. No stability, compatibility or availability is promised.\n\nThe only combinations that have been tested are:\n· Sender: Honor Magic7 Pro (Android 17)\n· Receiver: Audi MIB3 head unit (real car)\n· Receiver: DiPlay test bench on a Redmi K40 (Android 13)\n\nOther phones, Android versions and car models have not been verified. They may not work at all, or may show display glitches, misaligned touches or repeated disconnects.\n\n\"Force landscape\" requires Android 14 or later; it is not available on Android 13 and earlier (the settings panel says so).</string>
     <string name="disclaimer_s3_title">Driving safety (please read)</string>
@@ -389,7 +389,7 @@
     <string name="disclaimer_s5_title">Disclaimer of liability</string>
     <string name="disclaimer_s5_body">This app is provided \"as is\", without warranties of any kind, express or implied, including but not limited to merchantability, fitness for a particular purpose and non-infringement.\n\nTo the maximum extent permitted by applicable law, the authors and contributors are not liable for any direct or indirect loss arising from the use of, or inability to use, this app — including but not limited to lost connections, interrupted navigation or calls, data loss, device malfunction, vehicle system malfunction, and accidents or losses caused by operating the phone or being distracted while driving.\n\nWhether you use this app, how you configure and operate it, and in what situations, is entirely your own decision and at your own risk. If you do not agree with any of the above, tap \"Decline\" and uninstall the app.</string>
     <string name="disclaimer_s6_title">Open source and feedback</string>
-    <string name="disclaimer_s6_body">This is a personal experimental project, open-sourced under the MIT License. Bug reports are welcome, but no fix timeline is promised. Because it involves protocol implementation and differences between third-party ROMs, some issues may never be solvable.\n\nThe full terms (unofficial status, trademarks, safety warnings, tested scope) are in DISCLAIMER.md at the root of the repository, from the same source as this page.</string>
+    <string name="disclaimer_s6_body">This is a personal experimental project, open-sourced under the GNU GPL v3.0. Bug reports are welcome, but no fix timeline is promised. Because it involves protocol implementation and differences between third-party ROMs, some issues may never be solvable.\n\nThe full terms (unofficial status, trademarks, safety warnings, tested scope) are in DISCLAIMER.md at the root of the repository, from the same source as this page.</string>
     <string name="disclaimer_subtitle_first">Please read this in full before first use. After accepting you can reopen it from the main screen at any time.</string>
     <string name="disclaimer_subtitle_view">You can come back to this notice at any time (current version v%1$d).</string>
     <string name="disclaimer_accept">Accept</string>
@@ -399,7 +399,7 @@
     <string name="disclaimer_hint_wait">Please wait %1$d s before accepting</string>
     <string name="disclaimer_hint_scroll">Scroll to the bottom to continue</string>
     <string name="md_car_screenshot">Capture car screen</string>
-    <string name="md_car_screenshot_desc">Save the current car screen as a PNG to Download/CarDeck (while connected)</string>
+    <string name="md_car_screenshot_desc">Save the current car screen as a PNG to Download/DroidCar (while connected)</string>
     <string name="md_car_screenshot_failed">Capture failed: connect to a car first</string>
     <!-- 车机通知（2026-11-17：CarPlay 式横幅 + 独立 App 名单） -->
     <string name="notif_apps">Notification apps</string>
@@ -420,7 +420,7 @@
     <string name="md_hooks_disconnected">On disconnect</string>
     <string name="md_hooks_test">Test</string>
 
-    <string name="md_hooks_intro">These Intents are sent in order when the car connects / disconnects (like MacroDroid\'s "Send Intent"; works with Tasker etc.). Each one carries extra cardeck_event = connected / disconnected.</string>
+    <string name="md_hooks_intro">These Intents are sent in order when the car connects / disconnects (like MacroDroid\'s "Send Intent"; works with Tasker etc.). Each one carries extra droidcar_event = connected / disconnected.</string>
     <string name="md_hooks_empty">No Intents yet</string>
     <string name="md_hooks_add">Add Intent</string>
     <string name="md_hooks_edit">Edit Intent</string>
