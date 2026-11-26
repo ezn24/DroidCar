@@ -172,9 +172,13 @@ class CarPlayService : Service() {
             Bg.run("auto-session-start") {
                 SessionController.ensure(app)
                 // Auto-connect has audio by default: silently acquire the projection token first; on failure fall back to video only
+                // Audio always on; with Shizuku the system output is captured directly, so no projection token is taken up
+                // front (the session falls back to one only if that capture fails)
                 SessionController.audioEnabledForSession =
-                    io.github.ezn24.droidcar.launcher.settings.DisplayPrefs
-                        .carAudio(applicationContext) &&
+                    io.github.ezn24.droidcar.shizuku.CarInputClient.service != null ||
+                    io.github.ezn24.droidcar.shizuku.ShizukuGate
+                        .state(applicationContext) ==
+                    io.github.ezn24.droidcar.shizuku.ShizukuGate.State.READY ||
                     acquireProjectionSilently()
                 SessionController.startConnection(app)
             }

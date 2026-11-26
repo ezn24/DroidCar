@@ -91,8 +91,8 @@
     <string name="ui_091" formatted="false">键位校准用：打开后每帧 HID 报文写一行 HID-RAW（uuid + hex 字节），对照按下方向盘/旋钮时打印的字节调整键位映射。平时请关闭，避免日志刷屏。</string>
     <string name="ui_092" formatted="false">流分辨率</string>
     <string name="ui_093" formatted="false">保存后下次连接起效</string>
-    <string name="ui_094" formatted="false">目标帧率</string>
-    <string name="ui_095" formatted="false">连接中切换实时生效；英雄卡实时显示「实际/目标」帧率</string>
+    <string name="ui_094" formatted="false">最高帧率</string>
+    <string name="ui_095" formatted="false">实际帧率取车机支持的上限，最高不超过这里；连接中切换实时生效</string>
     <string name="ui_096" formatted="false">触摸注入节流</string>
     <string name="ui_097" formatted="false">交互滞后但帧率正常（事件派发堆积）时调高试验；拖动即时生效</string>
     <string name="ui_098" formatted="false">调整 dock 栏壁纸的暗幕透明度与高斯模糊程度，拖动即时生效。</string>
@@ -270,7 +270,7 @@
     <string name="dock_scale_saved">Dock 大小 %1$d%% 已保存，下次连接起效</string>
     <string name="resolution_saved">分辨率 %1$d%% 已保存，下次连接起效</string>
     <string name="resolution_active">%1$d%% 运行中</string>
-    <string name="frame_rate_saved">目标帧率已设为 %1$d fps</string>
+    <string name="frame_rate_saved">最高帧率已设为 %1$d fps</string>
     <string name="shizuku_not_ready_hint">Shizuku 未就绪（%1$s）——</string>
     <string name="device_status">%1$s · Shizuku %2$s</string>
     <string name="shizuku_ready_label">就绪</string>
@@ -455,8 +455,8 @@
     <string name="md_wait_reconnect_desc">关闭时，车机主动断开就结束连接、收起蓝牙与热点</string>
     <string name="clarity_first">清晰优先</string>
     <string name="clarity_first_note">画面编码改用 High profile，文字更清晰。少数车机可能因此黑屏，遇到请关闭。下次连接生效。</string>
-    <string name="hevc_video">HEVC 编码（实验）</string>
-    <string name="hevc_video_note">车机支持时改用 H.265，同画质下流量约省三到五成。目前只在测试台验证过，车机黑屏请关闭。下次连接生效。</string>
+    <string name="hevc_video">HEVC 编码（车机支持时自动）</string>
+    <string name="hevc_video_note">车机声明支持 H.265 时自动使用，同画质下流量约省三到五成；关闭则一律用 H.264。只在测试台验证过，车机黑屏请关闭。下次连接生效。</string>
     <string name="call_incoming">来电</string>
     <string name="call_active">通话中</string>
     <string name="call_unknown">未知来电</string>
@@ -465,4 +465,75 @@
     <string name="call_hang_up">挂断</string>
     <string name="call_mute">静音</string>
     <string name="call_unmute">取消静音</string>
+    <string name="setup_next">下一步</string>
+    <string name="setup_back">上一步</string>
+    <string name="setup_skip">跳过</string>
+    <string name="setup_finish">开始使用</string>
+    <string name="setup_grant">授权</string>
+    <string name="setup_open">打开</string>
+    <string name="setup_done_badge">已完成</string>
+    <string name="setup_optional">可选</string>
+    <string name="setup_required">必要</string>
+    <string name="setup_menu_title">设置向导</string>
+    <string name="setup_menu_desc">重新走一遍首次设置流程</string>
+    <string name="setup_welcome_title">欢迎使用 DroidCar</string>
+    <string name="setup_welcome_body">把手机变成无线 CarPlay 发送端，在车机上用地图、音乐和手机里的应用。\n\n接下来几步会带你完成权限和常用设置，大约一分钟。每一步都可以跳过，之后在设置里随时能改。</string>
+    <string name="setup_disclaimer_title">免责声明</string>
+    <string name="setup_disclaimer_body">DroidCar 是非官方的实验项目，与 Apple 及任何车厂无关，也不是 MFi 产品。请只在停车时连接和更改设置。\n\n继续之前需要读完并同意免责声明。</string>
+    <string name="setup_disclaimer_read">阅读并同意</string>
+    <string name="setup_disclaimer_accepted">已同意免责声明</string>
+    <string name="setup_perm_title">权限</string>
+    <string name="setup_perm_body">逐项授权。Shizuku 是必要的，其余没有授权时对应功能不可用。</string>
+    <string name="setup_perm_shizuku">Shizuku</string>
+    <string name="setup_perm_shizuku_desc">创建车机虚拟屏、注入触控、采集系统声音都靠它（免 root，通过无线调试启动）</string>
+    <string name="setup_perm_shizuku_install">安装</string>
+    <string name="setup_perm_shizuku_start">启动</string>
+    <string name="setup_perm_bt">蓝牙</string>
+    <string name="setup_perm_bt_desc">与车机建立 CarPlay 蓝牙会话</string>
+    <string name="setup_perm_wifi">附近的 Wi-Fi</string>
+    <string name="setup_perm_wifi_desc">自动加入车机热点</string>
+    <string name="setup_perm_notify">通知</string>
+    <string name="setup_perm_notify_desc">显示连接状态的常驻通知</string>
+    <string name="setup_perm_overlay">显示在其他应用上层</string>
+    <string name="setup_perm_overlay_desc">上车自动连接、连接时的暗幕都需要它</string>
+    <string name="setup_perm_listener">通知使用权</string>
+    <string name="setup_perm_listener_desc">音乐卡片显示歌名和封面、车机通知横幅、来电卡片</string>
+    <string name="setup_car_title">你的车机</string>
+    <string name="setup_car_body">选择要连接的车机。选“自动”时会连接任何已配对的 CarPlay 车机。</string>
+    <string name="setup_car_auto">自动（任何已配对的车机）</string>
+    <string name="setup_car_none">还没有已配对的设备。请先在手机的蓝牙设置里与车机配对。</string>
+    <string name="setup_car_need_bt">需要先授予蓝牙权限</string>
+    <string name="setup_car_bt_settings">蓝牙设置</string>
+    <string name="setup_conn_title">连接与锁屏</string>
+    <string name="setup_auto_connect">上车自动连接</string>
+    <string name="setup_auto_connect_desc">车机蓝牙连上时自动开始</string>
+    <string name="setup_lock_fake">假锁屏（更流畅）</string>
+    <string name="setup_lock_fake_desc">手机保持亮屏，闲置时盖上暗幕。车机画面维持 60 帧，较耗电。</string>
+    <string name="setup_lock_real">真锁屏（省电）</string>
+    <string name="setup_lock_real_desc">手机照常锁屏，车机画面继续推送，但系统会把画面限制在约 30 帧。</string>
+    <string name="setup_dash_title">仪表板</string>
+    <string name="setup_dash_body">连接后先看到的画面：地图加音乐卡片。</string>
+    <string name="setup_map_left">地图在左，音乐在右</string>
+    <string name="setup_map_right">音乐在左，地图在右</string>
+    <string name="setup_default_map">默认地图</string>
+    <string name="setup_default_map_desc">选择仪表板用哪个地图应用</string>
+    <string name="setup_desktop_apps">桌面应用</string>
+    <string name="setup_desktop_apps_desc">选择车机主画面要显示哪些应用</string>
+    <string name="setup_wallpaper_title">车机壁纸</string>
+    <string name="setup_wallpaper_body">深色和浅色各一张，随手机的深浅色模式切换。自己的照片可以之后在“车机”页设置。</string>
+    <string name="setup_wallpaper_dark">深色模式</string>
+    <string name="setup_wallpaper_light">浅色模式</string>
+    <string name="setup_notif_title">车机通知</string>
+    <string name="setup_notif_body">收到通知时在车机顶部显示横幅。可以只允许部分应用，不选则全部显示。</string>
+    <string name="setup_notif_apps_loading">正在读取应用列表…</string>
+    <string name="setup_extras_title">辅助功能</string>
+    <string name="setup_extras_cluster_desc">把导航转向和音乐信息送到仪表盘或抬头显示器（高德、Waze 需要无障碍服务，会自动开启）</string>
+    <string name="setup_extras_dot_desc">车机画面上的小圆点，提供返回、主页和后台</string>
+    <string name="setup_done_title">准备好了</string>
+    <string name="setup_done_body">打开车机的无线 CarPlay，点首页的“启动连接”；开了自动连接的话，上车后会自动开始。\n\n所有选项都能在“车机”页和设置里修改，也可以随时从“车机”页重新运行设置向导。</string>
+    <string name="setup_shizuku_needed">还没有 Shizuku，DroidCar 无法连接车机。确定要继续吗？</string>
+    <string name="setup_continue_anyway">仍然继续</string>
+    <string name="md_auto_play">连接时自动播放音乐</string>
+    <string name="md_auto_play_desc">连上车机后继续播放上次的音乐</string>
+    <string name="setup_dot_size">小白点大小</string>
 </resources>

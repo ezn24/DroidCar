@@ -114,7 +114,9 @@ object NotificationBannerController {
             val height = bitmap.height
             val left = area.left + (area.width() - width) / 2f
             val top = area.top + 8f * scale
-            val next = OverlayCard(bitmap, left, top, left + width, top + height)
+            // Glass body = the bitmap inset by the shadow margin drawn around it in renderBanner, same corner radius
+            val next =
+                OverlayCard(bitmap, left, top, left + width, top + height, glassRadius = 22f * scale, glassInset = 10f * scale)
             val zone = android.graphics.RectF(closeRect).apply { offset(left, top) }
             val launch = app.packageManager.getLaunchIntentForPackage(sbn.packageName)?.component
             handler.post {
@@ -160,10 +162,17 @@ object NotificationBannerController {
         val paint = TextPaint(Paint.ANTI_ALIAS_FLAG)
         val radius = 22f * scale
         val card = android.graphics.RectF(shadow, shadow, shadow + cardW, shadow + cardH)
-        paint.color = if (night) 0xF22C2C2E.toInt() else 0xF7FFFFFF.toInt()
+        // Frosted glass (the compositor blurs what lies under the body, see OverlayCard.glassRadius): the shadow is drawn with an
+        // opaque shape whose inside is then cleared, so it does not darken the see-through body, and the body itself is a translucent tint
+        paint.color = 0xFF000000.toInt()
         paint.setShadowLayer(shadow * 0.8f, 0f, 2f * scale, 0x59000000)
         canvas.drawRoundRect(card, radius, radius, paint)
         paint.clearShadowLayer()
+        paint.xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.CLEAR)
+        canvas.drawRoundRect(card, radius, radius, paint)
+        paint.xfermode = null
+        paint.color = if (night) 0x9E2C2C2E.toInt() else 0xB8F2F2F7.toInt()
+        canvas.drawRoundRect(card, radius, radius, paint)
 
         val primary = if (night) 0xFFFFFFFF.toInt() else 0xFF000000.toInt()
         val secondary = if (night) 0xFF98989F.toInt() else 0xFF6C6C70.toInt()

@@ -91,8 +91,8 @@
     <string name="ui_091" formatted="false">For button calibration: record raw HID reports while pressing steering wheel buttons or turning the controller. Keep disabled during normal use.</string>
     <string name="ui_092" formatted="false">Video resolution</string>
     <string name="ui_093" formatted="false">Applies next connection</string>
-    <string name="ui_094" formatted="false">Target frame rate</string>
-    <string name="ui_095" formatted="false">Applies immediately. The connection card shows actual and target frame rates.</string>
+    <string name="ui_094" formatted="false">Maximum frame rate</string>
+    <string name="ui_095" formatted="false">The stream runs at the head unit\'s maximum, capped here; changes apply live</string>
     <string name="ui_096" formatted="false">Touch event throttling</string>
     <string name="ui_097" formatted="false">Increase if touch input lags while video is smooth. Applies immediately.</string>
     <string name="ui_098" formatted="false">Adjust wallpaper dimming and blur behind the Dock. Applies immediately.</string>
@@ -270,7 +270,7 @@
     <string name="dock_scale_saved">Dock size %1$d%% saved for next connection</string>
     <string name="resolution_saved">Resolution %1$d%% saved for next connection</string>
     <string name="resolution_active">%1$d%% active</string>
-    <string name="frame_rate_saved">Target frame rate set to %1$d fps</string>
+    <string name="frame_rate_saved">Maximum frame rate set to %1$d fps</string>
     <string name="shizuku_not_ready_hint">Shizuku not ready (%1$s). </string>
     <string name="device_status">%1$s · Shizuku %2$s</string>
     <string name="shizuku_ready_label">ready</string>
@@ -455,8 +455,8 @@
     <string name="md_wait_reconnect_desc">When off, a disconnect from the car ends the session and releases Bluetooth and the hotspot</string>
     <string name="clarity_first">Sharper picture</string>
     <string name="clarity_first_note">Encode with H.264 High profile for crisper text. A few head units may show a black screen; turn this off if that happens. Applies on the next connection.</string>
-    <string name="hevc_video">HEVC video (experimental)</string>
-    <string name="hevc_video_note">Use H.265 when the head unit supports it, for roughly 30–50% less data at the same quality. Only tested on a test bench so far; turn off if the screen goes black. Applies on the next connection.</string>
+    <string name="hevc_video">HEVC video (automatic when supported)</string>
+    <string name="hevc_video_note">Used automatically when the head unit declares H.265, for roughly 30–50% less data at the same quality; off = always H.264. Only tested on a test bench: turn it off if the car screen stays black. Applies from the next connection.</string>
     <string name="call_incoming">Incoming call</string>
     <string name="call_active">On call</string>
     <string name="call_unknown">Unknown caller</string>
@@ -465,4 +465,75 @@
     <string name="call_hang_up">Hang up</string>
     <string name="call_mute">Mute</string>
     <string name="call_unmute">Unmute</string>
+    <string name="setup_next">Next</string>
+    <string name="setup_back">Back</string>
+    <string name="setup_skip">Skip</string>
+    <string name="setup_finish">Get started</string>
+    <string name="setup_grant">Allow</string>
+    <string name="setup_open">Open</string>
+    <string name="setup_done_badge">Done</string>
+    <string name="setup_optional">Optional</string>
+    <string name="setup_required">Required</string>
+    <string name="setup_menu_title">Setup guide</string>
+    <string name="setup_menu_desc">Run the first-time setup again</string>
+    <string name="setup_welcome_title">Welcome to DroidCar</string>
+    <string name="setup_welcome_body">Turn your phone into a wireless CarPlay sender and use maps, music and your phone\'s apps on the car screen.\n\nThe next few steps set up permissions and the common options in about a minute. Every step can be skipped and changed later in settings.</string>
+    <string name="setup_disclaimer_title">Disclaimer</string>
+    <string name="setup_disclaimer_body">DroidCar is an unofficial, experimental project, not affiliated with Apple or any car maker, and not an MFi product. Connect and change settings only while parked.\n\nRead and accept the disclaimer to continue.</string>
+    <string name="setup_disclaimer_read">Read and accept</string>
+    <string name="setup_disclaimer_accepted">Disclaimer accepted</string>
+    <string name="setup_perm_title">Permissions</string>
+    <string name="setup_perm_body">Allow them one by one. Shizuku is required; without the others the matching features are unavailable.</string>
+    <string name="setup_perm_shizuku">Shizuku</string>
+    <string name="setup_perm_shizuku_desc">Creates the car\'s virtual screens, injects touch and captures system sound (no root; started through wireless debugging)</string>
+    <string name="setup_perm_shizuku_install">Install</string>
+    <string name="setup_perm_shizuku_start">Start</string>
+    <string name="setup_perm_bt">Bluetooth</string>
+    <string name="setup_perm_bt_desc">Opens the CarPlay Bluetooth session with the car</string>
+    <string name="setup_perm_wifi">Nearby Wi-Fi</string>
+    <string name="setup_perm_wifi_desc">Joins the car\'s hotspot automatically</string>
+    <string name="setup_perm_notify">Notifications</string>
+    <string name="setup_perm_notify_desc">Shows the connection status notification</string>
+    <string name="setup_perm_overlay">Display over other apps</string>
+    <string name="setup_perm_overlay_desc">Needed to connect automatically in the car and for the dim cover</string>
+    <string name="setup_perm_listener">Notification access</string>
+    <string name="setup_perm_listener_desc">Song title and cover on the music card, car notification banners, the call card</string>
+    <string name="setup_car_title">Your car</string>
+    <string name="setup_car_body">Pick the car to connect to. \"Automatic\" connects to any paired CarPlay car.</string>
+    <string name="setup_car_auto">Automatic (any paired car)</string>
+    <string name="setup_car_none">No paired devices yet. Pair with the car in the phone\'s Bluetooth settings first.</string>
+    <string name="setup_car_need_bt">Allow Bluetooth first</string>
+    <string name="setup_car_bt_settings">Bluetooth settings</string>
+    <string name="setup_conn_title">Connection and lock screen</string>
+    <string name="setup_auto_connect">Connect automatically in the car</string>
+    <string name="setup_auto_connect_desc">Starts when the car\'s Bluetooth connects</string>
+    <string name="setup_lock_fake">Fake lock (smoother)</string>
+    <string name="setup_lock_fake_desc">The phone stays on under a dark cover when idle. The car screen keeps 60 fps; uses more battery.</string>
+    <string name="setup_lock_real">Real lock (saves battery)</string>
+    <string name="setup_lock_real_desc">The phone locks as usual and the car keeps streaming, but the system caps it at about 30 fps.</string>
+    <string name="setup_dash_title">Dashboard</string>
+    <string name="setup_dash_body">The first screen after connecting: the map and the music card.</string>
+    <string name="setup_map_left">Map on the left, music on the right</string>
+    <string name="setup_map_right">Music on the left, map on the right</string>
+    <string name="setup_default_map">Default map</string>
+    <string name="setup_default_map_desc">Which map app the dashboard uses</string>
+    <string name="setup_desktop_apps">Home screen apps</string>
+    <string name="setup_desktop_apps_desc">Which apps the car\'s home screen shows</string>
+    <string name="setup_wallpaper_title">Car wallpaper</string>
+    <string name="setup_wallpaper_body">One for dark and one for light mode, switched with the phone\'s theme. Your own photo can be set later on the Car tab.</string>
+    <string name="setup_wallpaper_dark">Dark mode</string>
+    <string name="setup_wallpaper_light">Light mode</string>
+    <string name="setup_notif_title">Car notifications</string>
+    <string name="setup_notif_body">Show a banner at the top of the car screen for new notifications. Limit it to some apps, or pick none to allow all.</string>
+    <string name="setup_notif_apps_loading">Loading apps…</string>
+    <string name="setup_extras_title">Extras</string>
+    <string name="setup_extras_cluster_desc">Sends turn-by-turn and music info to the instrument cluster or HUD (Amap and Waze need the accessibility service, turned on automatically)</string>
+    <string name="setup_extras_dot_desc">A small dot on the car screen with Back, Home and Recents</string>
+    <string name="setup_done_title">You\'re all set</string>
+    <string name="setup_done_body">Turn on wireless CarPlay on the car and tap Start on the home page; with automatic connection on it starts by itself in the car.\n\nEverything can be changed on the Car tab and in settings, and the setup guide can be run again from the Car tab.</string>
+    <string name="setup_shizuku_needed">Without Shizuku DroidCar cannot connect to the car. Continue anyway?</string>
+    <string name="setup_continue_anyway">Continue anyway</string>
+    <string name="md_auto_play">Play music when connected</string>
+    <string name="md_auto_play_desc">Resumes the last music once the car is connected</string>
+    <string name="setup_dot_size">Dot size</string>
 </resources>

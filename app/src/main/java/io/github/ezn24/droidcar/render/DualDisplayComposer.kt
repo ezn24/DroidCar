@@ -113,8 +113,46 @@ class DualDisplayComposer(
      * Dashboard <-> desktop slide progress (0 = tile in place, 1 = fully slid out to the left), driven by GridActivity
      * during the slide.
      */
+    /** The supersampled input spans the dock strip (VirtualLauncher.hiFullWidth): drawn from x = 0, under the glass dock. */
+    @Volatile
+    var hiFullWidth = false
+
     @Volatile
     var tileSlideFraction: Float = 0f
+        set(value) {
+            field = value
+            synchronized(slideHistory) {
+                slideHistoryAt[slideHistoryHead] = System.nanoTime()
+                slideHistory[slideHistoryHead] = value
+                slideHistoryHead = (slideHistoryHead + 1) % SLIDE_HISTORY
+            }
+        }
+
+    /**
+     * Recent (time, fraction) pairs of [tileSlideFraction]. The map tile is drawn by this compositor, but the music card and the
+     * desktop next to it are pixels of the grid display that arrive one or two frames later; drawing the tile at the newest
+     * fraction made the gap between map and music card breathe while a finger dragged the page (user report 2026-11-26). The tile
+     * now uses the fraction that was current when the grid frame on screen was produced (SurfaceTexture timestamps use the same
+     * monotonic clock as System.nanoTime).
+     */
+    private val slideHistory = FloatArray(SLIDE_HISTORY)
+    private val slideHistoryAt = LongArray(SLIDE_HISTORY)
+    private var slideHistoryHead = 0
+
+    /** [tileSlideFraction] as it was at [frameNanos]; the newest value once it has rested for a while (the grid may stop drawing). */
+    private fun slideFractionAt(frameNanos: Long): Float {
+        synchronized(slideHistory) {
+            val newestIndex = (slideHistoryHead - 1 + SLIDE_HISTORY) % SLIDE_HISTORY
+            val newestAt = slideHistoryAt[newestIndex]
+            if (frameNanos <= 0L || newestAt == 0L || System.nanoTime() - newestAt > SLIDE_SETTLE_NANOS) return tileSlideFraction
+            var best = -1
+            for (i in 0 until SLIDE_HISTORY) {
+                val at = slideHistoryAt[i]
+                if (at != 0L && at <= frameNanos && (best < 0 || at > slideHistoryAt[best])) best = i
+            }
+            return if (best >= 0) slideHistory[best] else tileSlideFraction
+        }
+    }
 
     /** Diagnostics sink: a 30 s line with each input's frame rate and the composed rate. */
     @Volatile
@@ -141,13 +179,58 @@ class DualDisplayComposer(
     var targetFps: Int = 30
 
     companion object {
+        private const val SLIDE_HISTORY = 16
+
+        /** After this long without a new slide value the tile uses the newest one (the slide has ended). */
+        private const val SLIDE_SETTLE_NANOS = 120_000_000L
+
+        /** Glass backdrops are drawn and blurred at 1/4 of the output resolution (16x fewer pixels; the blur hides the loss). */
+        private const val GLASS_DOWNSCALE = 4f
+
+        /** One direction of a 9-tap Gaussian, folded into 5 bilinear fetches (offsets/weights for sigma ~2 texels). */
+        private val BLUR_FRAGMENT =
+            """
+            precision mediump float;
+            varying vec2 vTexCoord;
+            uniform sampler2D uTexture;
+            uniform vec2 uDir;
+            void main() {
+                vec4 c = texture2D(uTexture, vTexCoord) * 0.2270270270;
+                c += texture2D(uTexture, vTexCoord + uDir * 1.3846153846) * 0.3162162162;
+                c += texture2D(uTexture, vTexCoord - uDir * 1.3846153846) * 0.3162162162;
+                c += texture2D(uTexture, vTexCoord + uDir * 3.2307692308) * 0.0702702703;
+                c += texture2D(uTexture, vTexCoord - uDir * 3.2307692308) * 0.0702702703;
+                gl_FragColor = c;
+            }
+            """.trimIndent()
+
+        /** Blurred backdrop drawn into the frame, with a rounded clip in window coordinates. */
+        private val GLASS_FRAGMENT =
+            """
+            precision mediump float;
+            varying vec2 vTexCoord;
+            uniform sampler2D uTexture;
+            uniform vec4 uClipRect;
+            uniform float uClipRadius;
+            void main() {
+                if (uClipRadius > 0.0) {
+                    vec2 p = gl_FragCoord.xy;
+                    vec2 r = vec2(uClipRadius);
+                    vec2 c = clamp(p, uClipRect.xy + r, uClipRect.zw - r);
+                    if (distance(p, c) > uClipRadius) discard;
+                }
+                gl_FragColor = texture2D(uTexture, vTexCoord);
+            }
+            """.trimIndent()
+
         private const val TAG = "DualComposer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
 
         /** Upper bound for one map-region read (about 1.2 MB of RGBA); arrows and lane rows are far smaller. */
         private const val MAX_REGION_PIXELS = 300_000L
 
-        private val TILE_CORNER_RADIUS: Float get() = 24f * DashMetrics.scale
+        /** Corner radius of the map card and media pane in stream pixels (also the knob focus ring's inner radius). */
+        internal val TILE_CORNER_RADIUS: Float get() = 24f * DashMetrics.scale
 
         /** Identity texture matrix for the 2D texture program (the Bitmap vertices are already laid out for the target orientation). */
         private val IDENTITY_ST =
@@ -360,6 +443,51 @@ class DualDisplayComposer(
             overlayDirty = true
             wake()
         }
+
+    // ---- Frosted glass (layer model, user request 2026-11-26): wallpaper < map / music card / desktop apps < dock and
+    // notifications (glass that blurs everything under them) < Gemini. The backdrop under a glass element is redrawn at
+    // 1/GLASS_DOWNSCALE resolution into a small off-screen target and blurred there, so the cost is a few thousand pixels per
+    // pass instead of a copy of the whole frame; the dock's backdrop is cached and only redrawn while something moves under it.
+
+    /** Layer 0 of the glass backdrop: the car wallpaper (only ever sampled at reduced size, so a small bitmap is enough). */
+    @Volatile
+    var backdropWallpaper: android.graphics.Bitmap? = null
+        set(value) {
+            field = value
+            backdropWallpaperCard = value?.let { OverlayCard(it, 0f, 0f, outWidth.toFloat(), outHeight.toFloat()) }
+            glassGeneration++
+            overlayDirty = true
+            wake()
+        }
+
+    @Volatile
+    private var backdropWallpaperCard: OverlayCard? = null
+
+    /** The dock display renders a transparent background (DockActivity glass mode): draw the blurred backdrop under it. */
+    @Volatile
+    var dockGlass = false
+        set(value) {
+            field = value
+            glassGeneration++
+            overlayDirty = true
+            wake()
+        }
+
+    /** Gaussian sigma of the glass in output pixels (VirtualLauncher.glassSigmaPx). */
+    @Volatile
+    var glassSigmaPx = 0f
+        set(value) {
+            field = value
+            glassGeneration++
+            overlayDirty = true
+            wake()
+        }
+
+    /** Bumped whenever the dock's cached backdrop must be rebuilt (wallpaper, radius, mode). */
+    @Volatile
+    private var glassGeneration = 0
+
+    private val backdropSlot = OverlaySlot()
 
     /** GL texture of one overlay bitmap and the card reference already uploaded (GL thread only). */
     private class OverlaySlot {
@@ -873,6 +1001,9 @@ class DualDisplayComposer(
             GLES20.glUniform1i(uTexture, 0)
         }
 
+        /** false while drawing the low-resolution glass backdrop: the rounded clip compares gl_FragCoord in output pixels. */
+        var clipAllowed = true
+
         /** [u0]/[u1]: horizontal texture sampling range (used to sample the central band of the buffer in map split mode). */
         fun drawInputUV(
             input: Input,
@@ -892,7 +1023,7 @@ class DualDisplayComposer(
             // for a full-height tile (landscape) the symmetric range happened to coincide and went unnoticed; for a
             // portrait half-height tile the vertex area
             // and clip area did not intersect at all and the whole tile was discarded (root cause of "map card invisible")
-            if (cornerRadius > 0f) {
+            if (cornerRadius > 0f && clipAllowed) {
                 GLES20.glUniform1i(uClipEnabled, 1)
                 GLES20.glUniform4f(uClipRect, x0, y0, x1, y1)
                 GLES20.glUniform1f(uClipRadius, cornerRadius)
@@ -1049,6 +1180,190 @@ class DualDisplayComposer(
             }
         }
 
+        // ---- Glass: blur and glass programs (plain 2D textures) ----
+        val blurProgram = buildProgramFrom(BLUR_FRAGMENT)
+        val bPos = GLES20.glGetAttribLocation(blurProgram, "aPos")
+        val bTexCoord = GLES20.glGetAttribLocation(blurProgram, "aTexCoord")
+        val bST = GLES20.glGetUniformLocation(blurProgram, "uSTMatrix")
+        val bTexture = GLES20.glGetUniformLocation(blurProgram, "uTexture")
+        val bDir = GLES20.glGetUniformLocation(blurProgram, "uDir")
+        val glassProgram = buildProgramFrom(GLASS_FRAGMENT)
+        val gPos = GLES20.glGetAttribLocation(glassProgram, "aPos")
+        val gTexCoord = GLES20.glGetAttribLocation(glassProgram, "aTexCoord")
+        val gST = GLES20.glGetUniformLocation(glassProgram, "uSTMatrix")
+        val gTexture = GLES20.glGetUniformLocation(glassProgram, "uTexture")
+        val gClipRect = GLES20.glGetUniformLocation(glassProgram, "uClipRect")
+        val gClipRadius = GLES20.glGetUniformLocation(glassProgram, "uClipRadius")
+
+        /** Two small ping-pong targets holding one element's blurred backdrop (GL thread only). */
+        class Backdrop {
+            val fbo = IntArray(2)
+            val tex = IntArray(2)
+            var w = 0
+            var h = 0
+            var generation = -1
+            var dynamicLast = false
+        }
+
+        fun ensureTargets(
+            b: Backdrop,
+            w: Int,
+            h: Int,
+        ) {
+            if (b.fbo[0] == 0) {
+                GLES20.glGenFramebuffers(2, b.fbo, 0)
+                GLES20.glGenTextures(2, b.tex, 0)
+            }
+            if (b.w == w && b.h == h) return
+            for (i in 0..1) {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, b.tex[i])
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, b.fbo[i])
+                GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, b.tex[i], 0)
+            }
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            b.w = w
+            b.h = h
+        }
+
+        /** Full-target quad for the 2D blur program (texture v = 0 at the bottom, like the FBO). */
+        fun drawFullQuad(
+            aPosLoc: Int,
+            aTexLoc: Int,
+        ) {
+            val positions = vertexBuffer(posBuf, -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
+            val coords = vertexBuffer(texBuf, 0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
+            GLES20.glVertexAttribPointer(aPosLoc, 2, GLES20.GL_FLOAT, false, 0, positions)
+            GLES20.glEnableVertexAttribArray(aPosLoc)
+            GLES20.glVertexAttribPointer(aTexLoc, 2, GLES20.GL_FLOAT, false, 0, coords)
+            GLES20.glEnableVertexAttribArray(aTexLoc)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+
+        // Set by composeFrame before any backdrop pass: draws the content layers (map, music card, apps) in output coordinates
+        var drawContent: () -> Unit = {}
+
+        /**
+         * Redraws the layers under the output rectangle [left]..[bottom] (top-left origin) at 1/GLASS_DOWNSCALE into [b] and blurs
+         * them there. The viewport is the whole output scaled down and shifted so the same drawing code lands on the region.
+         */
+        fun renderBackdrop(
+            b: Backdrop,
+            left: Float,
+            top: Float,
+            right: Float,
+            bottom: Float,
+        ) {
+            val w = ((right - left) / GLASS_DOWNSCALE).toInt().coerceAtLeast(1)
+            val h = ((bottom - top) / GLASS_DOWNSCALE).toInt().coerceAtLeast(1)
+            ensureTargets(b, w, h)
+            val sx = w / (right - left)
+            val sy = h / (bottom - top)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, b.fbo[0])
+            GLES20.glViewport(
+                (-left * sx).toInt(),
+                (-(outHeight - bottom) * sy).toInt(),
+                (outWidth * sx).toInt().coerceAtLeast(1),
+                (outHeight * sy).toInt().coerceAtLeast(1),
+            )
+            GLES20.glClearColor(0.04f, 0.07f, 0.09f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            // Layer 0: wallpaper, then the content layers
+            syncOverlayTexture(backdropSlot, backdropWallpaperCard)?.let {
+                drawOverlay(backdropSlot, 0f, 0f, outWidth.toFloat(), outHeight.toFloat())
+            }
+            clipAllowed = false
+            GLES20.glUseProgram(program)
+            GLES20.glUniform1i(uTexture, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            drawContent()
+            clipAllowed = true
+            // Separable Gaussian, horizontal into [1] then vertical back into [0]. One round of the 9-tap kernel at step s has
+            // sigma 1.414 x s texels, n rounds sqrt(n) times that; steps above 3 texels would show the taps, so a wide blur takes
+            // more rounds
+            val lowSigma = glassSigmaPx / GLASS_DOWNSCALE
+            val rounds =
+                kotlin.math
+                    .ceil((lowSigma / (1.4142f * 3f)).let { it * it })
+                    .toInt()
+                    .coerceIn(1, 4)
+            val step = (lowSigma / (1.4142f * kotlin.math.sqrt(rounds.toFloat()))).coerceIn(0.3f, 3f)
+            GLES20.glViewport(0, 0, w, h)
+            GLES20.glDisable(GLES20.GL_BLEND)
+            GLES20.glUseProgram(blurProgram)
+            GLES20.glUniform1i(bTexture, 0)
+            GLES20.glUniformMatrix4fv(bST, 1, false, IDENTITY_ST, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            repeat(rounds) {
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, b.fbo[1])
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, b.tex[0])
+                GLES20.glUniform2f(bDir, step / w, 0f)
+                drawFullQuad(bPos, bTexCoord)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, b.fbo[0])
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, b.tex[1])
+                GLES20.glUniform2f(bDir, 0f, step / h)
+                drawFullQuad(bPos, bTexCoord)
+            }
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            GLES20.glViewport(0, 0, outWidth, outHeight)
+            GLES20.glUseProgram(program)
+            GLES20.glUniform1i(uTexture, 0)
+        }
+
+        /** Draws [b]'s blurred backdrop over the output rectangle (top-left origin), rounded by [radius] (0 = square). */
+        fun drawGlass(
+            b: Backdrop,
+            left: Float,
+            top: Float,
+            right: Float,
+            bottom: Float,
+            radius: Float,
+        ) {
+            GLES20.glUseProgram(glassProgram)
+            GLES20.glUniform1i(gTexture, 0)
+            GLES20.glUniformMatrix4fv(gST, 1, false, IDENTITY_ST, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, b.tex[0])
+            // Rounded clip in GL window coordinates (origin bottom-left)
+            GLES20.glUniform4f(gClipRect, left, outHeight - bottom, right, outHeight - top)
+            GLES20.glUniform1f(gClipRadius, radius)
+            GLES20.glDisable(GLES20.GL_BLEND)
+
+            fun px(v: Float) = v / outWidth * 2f - 1f
+
+            fun py(v: Float) = v / outHeight * 2f - 1f
+            val positions =
+                vertexBuffer(
+                    posBuf,
+                    px(left),
+                    py(outHeight - bottom),
+                    px(right),
+                    py(outHeight - bottom),
+                    px(left),
+                    py(outHeight - top),
+                    px(right),
+                    py(outHeight - top),
+                )
+            val coords = vertexBuffer(texBuf, 0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
+            GLES20.glVertexAttribPointer(gPos, 2, GLES20.GL_FLOAT, false, 0, positions)
+            GLES20.glEnableVertexAttribArray(gPos)
+            GLES20.glVertexAttribPointer(gTexCoord, 2, GLES20.GL_FLOAT, false, 0, coords)
+            GLES20.glEnableVertexAttribArray(gTexCoord)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glUseProgram(program)
+            GLES20.glUniform1i(uTexture, 0)
+        }
+
+        val dockBackdrop = Backdrop()
+
+        // Last desktop frame the dock's backdrop was built from (a new frame may have moved something under the dock)
+        var hiFrameSeen = -1
+        val cardBackdrop = Backdrop()
+
         fun composeFrame(fullRedraw: Boolean) {
             // Pending app-display switch: switch once the target produces a frame (frame counter advances / 600ms
             // fallback if it has content / 2s timeout fallback)
@@ -1064,9 +1379,7 @@ class DualDisplayComposer(
                     pendingTargetHi = null
                 }
             }
-            GLES20.glViewport(0, 0, outWidth, outHeight)
-            GLES20.glClearColor(0.04f, 0.07f, 0.09f, 1f)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            // The window framebuffer is cleared only after the glass backdrops are drawn (see below)
             // Call updateTexImage only for inputs with a new frame; inputs that already have content keep the old
             // texture (picture persists).
             // Both app displays are consumed continuously (the inactive one also stays current, so no stale-frame flash when switching).
@@ -1112,93 +1425,131 @@ class DualDisplayComposer(
             }
             val activeInput = if (activeAppHi) hi else app
             val nowMs = android.os.SystemClock.uptimeMillis()
+            // Tile slide matched to the grid frame being shown (see slideHistory)
+            val slideFraction = slideFractionAt(activeInput?.surfaceTexture?.timestamp ?: 0L)
             val appLeft = if (dockAtBottom) 0f else dockW.toFloat()
             val appBottom = if (dockAtBottom) dockH.toFloat() else 0f
-            if (activeInput?.hasContent == true) {
-                val entry = LayoutMotion.progress(nowMs - appEntryAt)
-                val inset = (1f - entry) * (outWidth - appLeft) * 0.035f
-                val mediaStart = VirtualLauncher.dashSplitPos + DASH_GAP_PX / 2f
-                val originLeft = if (splitVertical) appLeft + CARD_MARGIN_PX else mediaStart
-                val originTop = if (splitVertical) mediaStart else CARD_MARGIN_PX.toFloat()
+            // Content layers (apps / desktop, map tile, media pane): drawn into the frame, and again at low resolution under glass
+            drawContent = {
+                if (activeInput?.hasContent == true) {
+                    // The full-width supersampled display starts under the dock
+                    val appLeft = if (hiFullWidth && activeInput === hi) 0f else appLeft
+                    val entry = LayoutMotion.progress(nowMs - appEntryAt)
+                    val inset = (1f - entry) * (outWidth - appLeft) * 0.035f
+                    val mediaStart = VirtualLauncher.dashSplitPos + DASH_GAP_PX / 2f
+                    val originLeft = if (splitVertical) appLeft + CARD_MARGIN_PX else mediaStart
+                    val originTop = if (splitVertical) mediaStart else CARD_MARGIN_PX.toFloat()
 
-                fun expand(
-                    from: Float,
-                    to: Float,
-                ) = from + (to - from) * entry
-                if (appEntryFromMedia && entry < 1f) {
+                    fun expand(
+                        from: Float,
+                        to: Float,
+                    ) = from + (to - from) * entry
+                    if (appEntryFromMedia && entry < 1f) {
+                        drawInputUV(
+                            activeInput,
+                            expand(originLeft, appLeft),
+                            expand(outWidth - CARD_MARGIN_PX.toFloat(), outWidth.toFloat()),
+                            expand(appBottom + CARD_MARGIN_PX, appBottom),
+                            expand(outHeight - originTop, outHeight.toFloat()),
+                            cornerRadius = (1f - entry) * TILE_CORNER_RADIUS,
+                        )
+                    } else {
+                        drawInputUV(
+                            activeInput,
+                            appLeft + inset,
+                            outWidth - inset,
+                            appBottom + inset,
+                            outHeight - inset,
+                            cornerRadius = (1f - entry) * TILE_CORNER_RADIUS,
+                        )
+                    }
+                }
+                if (map?.hasContent == true && tileLayout != TileLayout.HIDDEN && !tilesSuppressed) {
+                    val expanded =
+                        layoutMotion?.valueAt(nowMs)
+                            ?: if (tileLayout == TileLayout.FULLSCREEN) 1f else 0f
+                    val margin = CARD_MARGIN_PX.toFloat()
+                    val slide = slideFraction * (outWidth - if (hiFullWidth) 0f else appLeft) * (1f - expanded)
+                    val mainLen =
+                        if (splitVertical) {
+                            outHeight - if (dockAtBottom) dockH else 0
+                        } else {
+                            outWidth - if (dockAtBottom) 0 else dockW
+                        }
+                    val tileEdge =
+                        if (tileEdgeOverride > 0f) {
+                            tileEdgeOverride
+                        } else {
+                            (if (splitVertical) 0f else appLeft) +
+                                VirtualLauncher.dashSplitGeom(mainLen, VirtualLauncher.currentDashSplitFraction()).tileEdge
+                        }
+                    val mapPane = VirtualLauncher.mapPaneBounds()
+                    val splitLeft = mapPane.left - slide
+                    val splitRight = mapPane.right - slide
+                    val splitBottom = outHeight - mapPane.bottom
+
+                    fun mix(
+                        from: Float,
+                        to: Float,
+                    ) = from + (to - from) * expanded
                     drawInputUV(
-                        activeInput,
-                        expand(originLeft, appLeft),
-                        expand(outWidth - CARD_MARGIN_PX.toFloat(), outWidth.toFloat()),
-                        expand(appBottom + CARD_MARGIN_PX, appBottom),
-                        expand(outHeight - originTop, outHeight.toFloat()),
-                        cornerRadius = (1f - entry) * TILE_CORNER_RADIUS,
+                        map!!,
+                        mix(splitLeft, appLeft),
+                        mix(splitRight, outWidth.toFloat()),
+                        mix(splitBottom, appBottom),
+                        mix(outHeight - mapPane.top, outHeight.toFloat()),
+                        cornerRadius = TILE_CORNER_RADIUS * (1f - expanded),
                     )
-                } else {
+                }
+                if (showMediaPane &&
+                    !tilesSuppressed &&
+                    media.hasContent &&
+                    tileLayout == TileLayout.SPLIT &&
+                    (VirtualLauncher.dashboardMode || VirtualLauncher.dashboardPageAnimating)
+                ) {
+                    val pane = VirtualLauncher.mediaAppBounds()
+                    val slide = slideFraction * (outWidth - if (hiFullWidth) 0f else appLeft)
                     drawInputUV(
-                        activeInput,
-                        appLeft + inset,
-                        outWidth - inset,
-                        appBottom + inset,
-                        outHeight - inset,
-                        cornerRadius = (1f - entry) * TILE_CORNER_RADIUS,
+                        media,
+                        pane.left - slide,
+                        pane.right - slide,
+                        outHeight - pane.bottom,
+                        outHeight - pane.top,
+                        cornerRadius = TILE_CORNER_RADIUS,
                     )
                 }
             }
-            if (map?.hasContent == true && tileLayout != TileLayout.HIDDEN && !tilesSuppressed) {
-                val expanded =
-                    layoutMotion?.valueAt(nowMs)
-                        ?: if (tileLayout == TileLayout.FULLSCREEN) 1f else 0f
-                val margin = CARD_MARGIN_PX.toFloat()
-                val slide = tileSlideFraction * (outWidth - appLeft) * (1f - expanded)
-                val mainLen =
-                    if (splitVertical) {
-                        outHeight - if (dockAtBottom) dockH else 0
-                    } else {
-                        outWidth - if (dockAtBottom) 0 else dockW
-                    }
-                val tileEdge =
-                    if (tileEdgeOverride > 0f) {
-                        tileEdgeOverride
-                    } else {
-                        (if (splitVertical) 0f else appLeft) +
-                            VirtualLauncher.dashSplitGeom(mainLen, VirtualLauncher.currentDashSplitFraction()).tileEdge
-                    }
-                val mapPane = VirtualLauncher.mapPaneBounds()
-                val splitLeft = mapPane.left - slide
-                val splitRight = mapPane.right - slide
-                val splitBottom = outHeight - mapPane.bottom
-
-                fun mix(
-                    from: Float,
-                    to: Float,
-                ) = from + (to - from) * expanded
-                drawInputUV(
-                    map!!,
-                    mix(splitLeft, appLeft),
-                    mix(splitRight, outWidth.toFloat()),
-                    mix(splitBottom, appBottom),
-                    mix(outHeight - mapPane.top, outHeight.toFloat()),
-                    cornerRadius = TILE_CORNER_RADIUS * (1f - expanded),
-                )
+            // ---- Glass backdrops first, into their small off-screen targets, before the window framebuffer is touched:
+            // switching render targets in the middle of the frame made the tiled GPU store the half-drawn 1920x720 frame
+            // to memory and load it back (twice per frame with a banner), which cost the 60 fps the glass build lost
+            // (user report 2026-11-26). Rendered here, the frame below is one uninterrupted pass.
+            val dockTop = if (dockAtBottom) (outHeight - dockH).toFloat() else 0f
+            val dockRight = if (dockAtBottom) outWidth.toFloat() else dockW.toFloat()
+            if (dock.hasContent && dockGlass) {
+                // The cached backdrop holds while nothing moves under the dock (only the wallpaper is there at rest): it is
+                // redrawn while a sliding tile passes under it, once more after it settles, and when the full-width desktop
+                // drew a new frame (pages and the music card pass under the dock)
+                val hiFrames = hi?.frameCount ?: 0
+                val dynamic =
+                    (tileLayout != TileLayout.HIDDEN && slideFraction > 0.001f) ||
+                        (hiFullWidth && activeAppHi && hi?.hasContent == true && hiFrames != hiFrameSeen)
+                hiFrameSeen = hiFrames
+                if (dynamic || dockBackdrop.dynamicLast || dockBackdrop.generation != glassGeneration) {
+                    renderBackdrop(dockBackdrop, 0f, dockTop, dockRight, outHeight.toFloat())
+                    dockBackdrop.generation = glassGeneration
+                }
+                dockBackdrop.dynamicLast = dynamic
             }
-            if (showMediaPane &&
-                !tilesSuppressed &&
-                media.hasContent &&
-                tileLayout == TileLayout.SPLIT &&
-                (VirtualLauncher.dashboardMode || VirtualLauncher.dashboardPageAnimating)
-            ) {
-                val pane = VirtualLauncher.mediaAppBounds()
-                val slide = tileSlideFraction * (outWidth - appLeft)
-                drawInputUV(
-                    media,
-                    pane.left - slide,
-                    pane.right - slide,
-                    outHeight - pane.bottom,
-                    outHeight - pane.top,
-                    cornerRadius = TILE_CORNER_RADIUS,
-                )
+            val glassCard = overlayCard?.takeIf { it.glassRadius > 0f && it.alpha > 0.01f }
+            glassCard?.let { card ->
+                val inset = card.glassInset
+                renderBackdrop(cardBackdrop, card.left + inset, card.top + inset, card.right - inset, card.bottom - inset)
             }
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            GLES20.glViewport(0, 0, outWidth, outHeight)
+            GLES20.glClearColor(0.04f, 0.07f, 0.09f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            drawContent()
             // Page dots sit above the map/media cards (fixed, not sliding with the tile, same position as GridActivity's original)
             val dotsAlpha = pageDotsAlphaAt(nowMs)
             if (VirtualLauncher.pageDotsOnTop() && dotsAlpha > 0.001f) {
@@ -1206,24 +1557,43 @@ class DualDisplayComposer(
                     drawOverlay(pageDotsSlot, dots.left, dots.top, dots.right, dots.bottom, dotsAlpha)
                 }
             }
-            if (assistLayerVisible && assistLayer.hasContent) {
-                // Premultiplied-alpha blending: blank areas of the virtual display have alpha=0, so only overlay pixels sit on the cards
-                GLES20.glEnable(GLES20.GL_BLEND)
-                GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-                drawInput(assistLayer, appLeft, outWidth.toFloat(), appBottom, outHeight.toFloat())
-                GLES20.glDisable(GLES20.GL_BLEND)
-            }
+            // ---- Glass layer: dock and notifications blur everything drawn so far ----
             if (dock.hasContent) {
+                if (dockGlass) {
+                    drawGlass(dockBackdrop, 0f, dockTop, dockRight, outHeight.toFloat(), 0f)
+                    // The dock renders with a transparent background: premultiplied blend over the glass
+                    GLES20.glEnable(GLES20.GL_BLEND)
+                    GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                }
                 if (dockAtBottom) {
                     drawInput(dock, 0f, outWidth.toFloat(), 0f, dockH.toFloat())
                 } else {
                     drawInput(dock, 0f, dockW.toFloat(), 0f, outHeight.toFloat())
                 }
+                GLES20.glDisable(GLES20.GL_BLEND)
             }
-            // Overlay cards are drawn last (top layer, unaffected by branches): card coordinates are output-frame
-            // coordinates (origin top-left)
+            // Overlay cards (notification banner, hints): card coordinates are output-frame coordinates (origin top-left)
+            // Banner glass: its backdrop was rendered fresh above (the map or an app may move under the banner)
+            glassCard?.let { source ->
+                val inset = source.glassInset
+                drawGlass(
+                    cardBackdrop,
+                    source.left + inset,
+                    source.top + inset,
+                    source.right - inset,
+                    source.bottom - inset,
+                    source.glassRadius,
+                )
+            }
             syncOverlayTexture(overlaySlot, overlayCard)?.let { card ->
                 drawOverlay(overlaySlot, card.left, card.top, card.right, card.bottom, card.alpha)
+            }
+            // ---- Top layer: the voice assistant (Gemini) over everything; its blank pixels have alpha 0 ----
+            if (assistLayerVisible && assistLayer.hasContent) {
+                GLES20.glEnable(GLES20.GL_BLEND)
+                GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                drawInput(assistLayer, appLeft, outWidth.toFloat(), appBottom, outHeight.toFloat())
+                GLES20.glDisable(GLES20.GL_BLEND)
             }
             syncOverlayTexture(focusRingSlot, focusRing)?.let { ring ->
                 drawOverlay(focusRingSlot, ring.left, ring.top, ring.right, ring.bottom, ring.alpha)
@@ -1335,7 +1705,13 @@ class DualDisplayComposer(
             }
         } catch (_: InterruptedException) {
         } finally {
-            for (slot in arrayOf(overlaySlot, pageDotsSlot, assistiveDotSlot, focusRingSlot)) {
+            for (b in arrayOf(dockBackdrop, cardBackdrop)) {
+                if (b.fbo[0] != 0) {
+                    runCatching { GLES20.glDeleteFramebuffers(2, b.fbo, 0) }
+                    runCatching { GLES20.glDeleteTextures(2, b.tex, 0) }
+                }
+            }
+            for (slot in arrayOf(overlaySlot, pageDotsSlot, assistiveDotSlot, focusRingSlot, backdropSlot)) {
                 if (slot.texture != 0) {
                     runCatching { GLES20.glDeleteTextures(1, intArrayOf(slot.texture), 0) }
                     slot.texture = 0
@@ -1376,10 +1752,18 @@ class DualDisplayComposer(
         }
     }
 
+    /** 2D program with the shared vertex shader and [fragment] (glass and blur passes). */
+    private fun buildProgramFrom(fragment: String): Int = buildProgram(oes = false, fragmentOverride = fragment)
+
     /** [oes] = true: external texture sampling (SurfaceTexture); false: plain 2D sampling (wallpaper bitmap). */
-    private fun buildProgram(oes: Boolean): Int {
+    private fun buildProgram(
+        oes: Boolean,
+        fragmentOverride: String? = null,
+    ): Int {
         val fragment =
-            if (oes) {
+            if (fragmentOverride != null) {
+                fragmentOverride
+            } else if (oes) {
                 """
                 #extension GL_OES_EGL_image_external : require
                 precision mediump float;

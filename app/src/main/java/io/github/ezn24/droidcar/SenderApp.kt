@@ -55,7 +55,7 @@ open class SenderApp : Application() {
                     intent: Intent,
                 ) {
                     VirtualLauncher
-                        .invalidateAppsCache()
+                        .invalidateAppsCache(context)
                     Log.i(TAG, "App list cache invalidated (package change)")
                 }
             },

@@ -42,6 +42,8 @@ object KnobFocus {
         val kind: Kind,
         val key: String,
         val view: View? = null,
+        /** Corner radius of the framed card in stream pixels: the ring follows the card's own outline. null = generic rounding. */
+        val radius: Float? = null,
     )
 
     /** Key of the framed target, null = no frame (knob idle or after a touch). */
@@ -358,7 +360,10 @@ object KnobFocus {
         }
         val grid = GridActivity.current
         val gridScale = launcher.gridScale().coerceAtLeast(1f)
-        val offsetX = if (launcher.dockAtBottom) 0f else launcher.dockWidthPx.toFloat()
+        val offsetX = launcher.displayOriginX(launcher.gridDisplayId).toFloat()
+
+        val tileRadius =
+            io.github.ezn24.droidcar.render.DualDisplayComposer.TILE_CORNER_RADIUS
 
         fun fromGrid(view: View): RectF? =
             rectOf(view)?.let { r ->
@@ -379,14 +384,23 @@ object KnobFocus {
             launcher.dashboardMode && !launcher.mapFullscreen -> {
                 if (launcher.mapDisplayId >= 0) {
                     val map = launcher.mapPaneBounds()
-                    list += Target(RectF(map.left, map.top, map.right, map.bottom), Kind.MAP, "map")
+                    list += Target(RectF(map.left, map.top, map.right, map.bottom), Kind.MAP, "map", radius = tileRadius)
                 }
                 val panel = grid?.dashboardFocusViews()
                 if (launcher.isMediaPaneVisible()) {
                     val pane = launcher.mediaAppBounds()
-                    list += Target(RectF(pane.left, pane.top, pane.right, pane.bottom), Kind.MEDIA_CARD, "media", panel?.firstOrNull())
+                    list +=
+                        Target(
+                            RectF(pane.left, pane.top, pane.right, pane.bottom),
+                            Kind.MEDIA_CARD,
+                            "media",
+                            panel?.firstOrNull(),
+                            tileRadius,
+                        )
                 } else if (panel != null) {
-                    panel.firstOrNull()?.let { card -> fromGrid(card)?.let { list += Target(it, Kind.MEDIA_CARD, "media", card) } }
+                    panel.firstOrNull()?.let { card ->
+                        fromGrid(card)?.let { list += Target(it, Kind.MEDIA_CARD, "media", card, outlineRadius(card)?.div(gridScale)) }
+                    }
                     panel.drop(1).forEachIndexed { index, button ->
                         if (button.isShown) fromGrid(button)?.let { list += Target(it, Kind.MEDIA_BUTTON, "mediaBtn$index", button) }
                     }
@@ -399,6 +413,13 @@ object KnobFocus {
             }
         }
         return list
+    }
+
+    /** Corner radius of a view's rounded outline (the dashboard card clips itself with one), null when it has none. */
+    private fun outlineRadius(view: View): Float? {
+        val outline = android.graphics.Outline()
+        view.outlineProvider?.getOutline(view, outline) ?: return null
+        return outline.radius.takeIf { it > 0f }
     }
 
     /** Visible, enabled, clickable views; a clickable row hides the clickable views inside it (one target per row). */
@@ -479,7 +500,9 @@ object KnobFocus {
                 // System blue reads on the dark launcher and the light settings alike (white vanished on light mode)
                 color = if (inside) Color.rgb(48, 209, 88) else Color.rgb(10, 132, 255)
             }
-        val radius = minOf(w, h) * 0.12f
+        // A card's ring is concentric with the card's own corners (radius + the gap to the stroke centre); other targets get a
+        // generic rounding
+        val radius = target.radius?.let { it + pad / 2 } ?: (minOf(w, h) * 0.12f)
         Canvas(bitmap).drawRoundRect(RectF(stroke / 2, stroke / 2, w - stroke / 2, h - stroke / 2), radius, radius, paint)
         VirtualLauncher.setFocusRing(OverlayCard(bitmap, rect.left, rect.top, rect.left + w, rect.top + h))
     }

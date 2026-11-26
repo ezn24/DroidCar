@@ -38,13 +38,13 @@ DroidCar 是基於 [CarDeck](https://github.com/shaonialife/cardeck) 的改版�
 | 1280×720（16:9） | 960×540（16:9） |
 | :---: | :---: |
 | <img src="docs/screenshots/car-1280x720.png" alt="1280×720"> | <img src="docs/screenshots/car-960x540.png" alt="960×540"> |
-| **800×480（5:3）** | **1280×488（8:3）** |
-| <img src="docs/screenshots/car-800x480.png" alt="800×480"> | <img src="docs/screenshots/car-1280x488.png" alt="1280×488"> |
+| **800×480（5:3）** | **1280×480（8:3）** |
+| <img src="docs/screenshots/car-800x480.png" alt="800×480"> | <img src="docs/screenshots/car-1280x480.png" alt="1280×480"> |
 
 ### 手機
 
 <p align="center">
-  <img src="docs/screenshots/phone-home.png" width="300" alt="手機主頁">
+  <img src="docs/screenshots/phone-home.png" width="240" alt="手機主頁">
   <br><sub>手機主頁（Material Design 3，深淺色跟隨手機、主色跟隨系統桌布）</sub>
 </p>
 
@@ -75,6 +75,26 @@ DroidCar 是基於 [CarDeck](https://github.com/shaonialife/cardeck) 的改版�
 - **平板版面**：WhatsApp、Telegram、LINE、Instagram、ChatGPT、YouTube 等在車機上改用平板雙欄版面；Discord 以手機密度渲染，修正文字被截斷。
 - **連線自動化**：連線成功 / 斷開時發出自訂 Intent（類似 MacroDroid「傳送 Intent」：廣播 / Activity / 服務、Action、套件、Extras 等），可搭配 Tasker 使用。
 - **連線頁開關**：「車機聲音」決定是否推送聲音，不再每次連線前詢問；「車機斷開後等待回連」預設關閉，車機斷開即收起藍牙與熱點。斷線後會自動清除 App 存入系統的車機熱點，手機最近任務也不會留下車機上的 App。
+
+## 路線圖
+
+**更多車機協定**：目標是讓 DroidCar 適用於所有車，不只 CarPlay 車機。桌面、虛擬螢幕、合成器、編碼器和觸控是共用的，每種協定只需要加上自己的連線與串流層。細節見 [docs/MULTI-PROTOCOL.md](docs/MULTI-PROTOCOL.md)。
+
+| 協定 | 車款 | 狀態 |
+| --- | --- | --- |
+| Apple CarPlay（無線） | 大多數車款、無線轉接盒 | ✅ 已支援 |
+| 百度 CarLife | 中國市場車款（豐田、本田、一汽／上汽大眾…） | 🚧 開發中（協定核心已完成） |
+| ICCOA CarLink（小米 CarWith、OPPO、vivo） | 較新的中國車款 | 📋 規劃中 |
+| Android Auto | 大多數車款 | 📋 規劃中（使用 Google 原廠接收端的車機可能拒絕非 Google 憑證） |
+| SmartDeviceLink／Ford AppLink | Ford、Lincoln、部分豐田 | 🔍 評估中 |
+| 華為 HiCar、WeLink、亿连 | 中國車款、後裝車機 | ❌ 沒有公開規格 |
+
+**其他計畫**
+
+- 只在測試台驗證過的功能（通話、儀表副螢幕、HEVC、旋鈕操控、鎖屏投放）做實車驗證
+- 通話改走車機的電話音訊通道，取代目前的語音辨識通道
+- 更像 CarPlay 的動畫：統一的彈簧曲線、從圖示放大開啟 App
+- 還沒有 App 播放時，音樂卡也顯示上次播放的歌曲
 
 ## 需求
 

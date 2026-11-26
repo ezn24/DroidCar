@@ -197,12 +197,27 @@ object AssistiveDot {
         return bitmap
     }
 
+    /**
+     * Dot height as a fraction of the car picture's height at [percent] size (the dot is 34 design px at a 540 px tall
+     * canvas, x percent); the phone setup guide draws its preview with it.
+     */
+    fun dotFractionOfHeight(percent: Int): Float = 34f / 540f * percent / 100f
+
+    /** The idle dot drawn at [px] pixels (the setup guide's preview uses the same drawing as the car). */
+    fun renderDot(
+        night: Boolean,
+        px: Int,
+    ): Bitmap = drawDotPx(night, px.coerceAtLeast(8))
+
     private fun drawDot(
         night: Boolean,
         s: Float,
+    ): Bitmap = drawDotPx(night, dotSize().toInt().coerceAtLeast(8))
+
+    private fun drawDotPx(
+        night: Boolean,
+        px: Int,
     ): Bitmap {
-        val size = dotSize()
-        val px = size.toInt().coerceAtLeast(8)
         val bitmap = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)

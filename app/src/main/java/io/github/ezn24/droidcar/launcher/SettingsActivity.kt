@@ -55,6 +55,7 @@ class SettingsActivity :
             return
         }
         setContentView(R.layout.activity_settings)
+        VirtualLauncher.padForDock(this)
         toastView = findViewById(R.id.settingsToast)
         findViewById<TextView>(R.id.btnBack).setOnClickListener { close() }
 

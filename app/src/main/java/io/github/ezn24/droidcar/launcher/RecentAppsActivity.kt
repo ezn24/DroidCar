@@ -97,6 +97,7 @@ class RecentAppsActivity : AppCompatActivity() {
         column.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(column, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
+        VirtualLauncher.padForDock(this)
         onBackPressedDispatcher.addCallback(this) { leave() }
     }
 

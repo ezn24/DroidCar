@@ -394,7 +394,7 @@ object TouchRouter {
             } else {
                 val scale = launcher.gridScale().coerceAtLeast(1f)
                 scaleOut = scale
-                localX = ((px - dockW) * scale).toInt()
+                localX = ((px - launcher.displayOriginX(targetDisplay)) * scale).toInt()
                 localY = (py * scale).toInt()
             }
         } else if (launcher.dockAtBottom) {
@@ -453,7 +453,7 @@ object TouchRouter {
                 targetDisplay = if (inDock) launcher.dockDisplayId else launcher.activeAppDisplayId()
                 val scale = if (inDock) 1f else launcher.activeAppScale().coerceAtLeast(1f)
                 scaleOut = scale
-                localX = if (inDock) px else ((px - dockW) * scale).toInt()
+                localX = if (inDock) px else ((px - launcher.displayOriginX(targetDisplay)) * scale).toInt()
                 localY = (py * scale).toInt()
             }
         }

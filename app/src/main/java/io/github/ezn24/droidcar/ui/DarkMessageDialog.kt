@@ -90,7 +90,10 @@ object DarkMessageDialog {
         if (cancelable) {
             dialog.setOnCancelListener { onCancel?.invoke() }
         }
-        dialog.setOnShowListener {
+        // Size the window before show(): sizing it in the show listener drew the first frame at the system default width and
+        // position, and the dialog visibly jumped to the centre (user report 2026-11-24)
+        dialog.create()
+        run {
             // With a very long body clamp to 46% of the screen height and scroll inside; short text hugs the content (a fixed height
             // would leave large blank space).
             // clampBody also serves as the rotation callback: after landscape shrinks the screen height it must clamp again, or it

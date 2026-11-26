@@ -155,20 +155,10 @@ class GridActivity : AppCompatActivity() {
             android.graphics.drawable.ColorDrawable(
                 android.graphics.Color.argb(alpha, 0, 0, 0),
             )
-        val wallpaper = panel.findViewById<ImageView>(R.id.dashWallpaper)
+        val wallpaper = panel.findViewById<io.github.ezn24.droidcar.ui.BackdropBlurView>(R.id.dashWallpaper) ?: return
         val percent = DockPrefs.blur(this)
-        if (percent <= 0) {
-            wallpaper.setRenderEffect(null)
-        } else {
-            val radius = percent / 100f * 40f * resources.displayMetrics.density
-            wallpaper.setRenderEffect(
-                android.graphics.RenderEffect.createBlurEffect(
-                    radius,
-                    radius,
-                    android.graphics.Shader.TileMode.CLAMP,
-                ),
-            )
-        }
+        // Same Gaussian as the dock's glass (VirtualLauncher.glassSigmaPx, stream pixels), in this display's pixels
+        wallpaper.blurSigma = VirtualLauncher.glassSigmaPx(percent) * VirtualLauncher.gridScale()
     }
 
     /**
@@ -177,35 +167,12 @@ class GridActivity : AppCompatActivity() {
      */
     private fun refreshDashWallpaper() {
         val panel = dashboardView ?: return
-        val wallpaper = panel.findViewById<ImageView>(R.id.dashWallpaper) ?: return
-        val params = wallpaper.layoutParams ?: return
-        val scale = VirtualLauncher.gridScale()
-        val canvasWidth = (VirtualLauncher.streamWidthPx * scale).toInt()
-        val canvasHeight = (VirtualLauncher.streamHeightPx * scale).toInt()
-        if (canvasWidth <= 0 || canvasHeight <= 0) return
-        Bg.run("wallpaper-dash") {
-            val bitmap =
-                runCatching {
-                    WallpaperStore.aspectFillCanvas(
-                        this@GridActivity,
-                        canvasWidth,
-                        canvasHeight,
-                    )
-                }.getOrNull() ?: return@run
-            val pane = VirtualLauncher.mediaPaneBounds()
-            val cropX = (pane.left * scale).toInt().coerceIn(0, bitmap.width - 2)
-            val cropY = (pane.top * scale).toInt().coerceIn(0, bitmap.height - 2)
-            val cropW = (pane.width * scale).toInt().coerceIn(1, bitmap.width - cropX)
-            val cropH = (pane.height * scale).toInt().coerceIn(1, bitmap.height - cropY)
-
-            runOnUiThread {
-                wallpaper.setImageBitmap(
-                    Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH),
-                )
-                // Re-apply RenderEffect once the bitmap is ready (view effects must still take effect after the bitmap updates)
-                applyDashCardChrome()
-            }
-        }
+        val glass = panel.findViewById<io.github.ezn24.droidcar.ui.BackdropBlurView>(R.id.dashWallpaper) ?: return
+        // Live sampling of the desktop wallpaper behind the card (replaced the fixed crop of the card region, which slid along with the
+        // card during paging and blurred against clamped edges)
+        glass.source = wallpaperView
+        glass.invalidateBackdrop()
+        applyDashCardChrome()
     }
 
     /** Music card progress self-refresh (1s; re-scheduled at the end of rendering, position extrapolated from anchor + speed). */
@@ -306,6 +273,11 @@ class GridActivity : AppCompatActivity() {
             }
         }
         panel.findViewById<ImageView>(R.id.dashCover)?.let { cover ->
+            if (panel.getTag(R.id.dashCover) == null) {
+                panel.setTag(R.id.dashCover, true)
+                panel.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> sizeCover(panel, cover) }
+            }
+            sizeCover(panel, cover)
             val art = now?.art
             if (art != null) {
                 cover.setImageBitmap(art)
@@ -332,9 +304,10 @@ class GridActivity : AppCompatActivity() {
                 }
                 cover.setOnClickListener { openMediaApp() }
             } else {
-                // The placeholder does not disappear (INVISIBLE): content does not jump up and down while the cover loads asynchronously /
-                // between tracks
-                cover.visibility = View.INVISIBLE
+                // A track without its cover yet keeps the placeholder (INVISIBLE): content does not jump up and down while the cover
+                // loads asynchronously / between tracks. With nothing playing there is no cover to wait for: GONE, so the
+                // "not playing" text and the controls sit centred in the card instead of below an empty third (user report 2026-11-25)
+                cover.visibility = if (now?.title.isNullOrBlank()) View.GONE else View.INVISIBLE
                 cover.setOnClickListener { openMediaApp() }
             }
         }
@@ -649,7 +622,9 @@ class GridActivity : AppCompatActivity() {
                                     topMargin = 0
                                 } else {
                                     // Landscape head unit: dock on the left, desktop slice = right part of the canvas
-                                    leftMargin = -(VirtualLauncher.dockWidthPx * scale).toInt()
+                                    // Full-width desktop display (it spans the dock strip): the canvas starts at its own x = 0
+                                    leftMargin =
+                                        if (VirtualLauncher.gridContentInsetPx() > 0) 0 else -(VirtualLauncher.dockWidthPx * scale).toInt()
                                     topMargin = 0
                                 }
                             }
@@ -683,6 +658,14 @@ class GridActivity : AppCompatActivity() {
         VirtualLauncher.dashboardDragSink = dashboardDragSink
         dotsRow = findViewById(R.id.dotsRow)
         dotsRow?.alpha = 0f // Page dots hidden normally, faded in only while paging
+        // Full-width desktop display (it spans the dock strip): every page is the full display wide and pads its own content
+        // past the dock, like CarPlay's pages, whose gap is wider than the dock. At rest only the wallpaper lies under the dock;
+        // while paging the icons and the music card slide under it. Dots and spinner stay centred on the app area.
+        val dockInset = VirtualLauncher.gridContentInsetPx()
+        if (dockInset > 0) {
+            dotsRow?.translationX = dockInset / 2f
+            findViewById<View>(R.id.gridLoading)?.translationX = dockInset / 2f
+        }
         pager?.registerOnPageChangeCallback(
             object : ViewPager2.OnPageChangeCallback() {
                 override fun onPageSelected(position: Int) {
@@ -759,7 +742,10 @@ class GridActivity : AppCompatActivity() {
                         "view=${params?.width}x${params?.height} left=${params?.leftMargin} " +
                         "samples=[$samples]",
                 )
-                runOnUiThread { view.setImageBitmap(bitmap) }
+                runOnUiThread {
+                    view.setImageBitmap(bitmap)
+                    refreshDashWallpaper()
+                }
             } else {
                 VirtualLauncher.logSink?.invoke("WALLPAPER-GRID: decode failed")
             }
@@ -782,30 +768,36 @@ class GridActivity : AppCompatActivity() {
         return holder.cells()
     }
 
+    /** Album cover = a square one third of the card's height, never wider than the card (user request 2026-11-24). */
+    private fun sizeCover(
+        panel: View,
+        cover: ImageView,
+    ) {
+        if (panel.height <= 0) return
+        val maxWidth = panel.width - (24 * resources.displayMetrics.density).toInt()
+        val side = minOf(panel.height / 3, maxWidth)
+        val params = cover.layoutParams
+        if (side <= 0 || params.width == side) return
+        params.width = side
+        params.height = side
+        // Inside a layout pass: apply on the next frame
+        cover.post {
+            cover.layoutParams = params
+            cover.invalidateOutline()
+        }
+    }
+
     /** Knob: slide from the dashboard to the first desktop page with the same pager animation as a left swipe. */
     fun animateDashboardToDesktop() {
         val p = pager ?: return
-        if (!VirtualLauncher.beginDashboardDragOut()) return
-        val total = p.width.toFloat() * 0.6f
-        val animator =
-            android.animation.ValueAnimator
-                .ofFloat(0f, total)
-                .setDuration(260)
-        var done = 0f
-        animator.addUpdateListener {
-            val value = it.animatedValue as Float
-            VirtualLauncher.dashboardDragBy(-(value - done))
-            done = value
+        if (pages.size < 2) {
+            // Desktop pages not built yet (app list still loading): switch the mode; reload() moves the pager once they exist
+            Bg.run("knob-to-desktop") { VirtualLauncher.showDesktop() }
+            return
         }
-        animator.addListener(
-            object : android.animation.AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: android.animation.Animator) {
-                    VirtualLauncher.endDashboardDrag()
-                }
-            },
-        )
-        // The drag sink posts to the same main thread: start after its beginFakeDrag
-        tickHandler.post { animator.start() }
+        if (!VirtualLauncher.beginDashboardSlideOut()) return
+        // Smooth programmatic scroll: onPageScrolled slides the map tile, the IDLE callback commits the desktop mode
+        p.setCurrentItem(1, true)
     }
 
     /** Knob: the next / previous desktop page (page 0 is the dashboard and is reached from the dock or Home). */
@@ -861,7 +853,8 @@ class GridActivity : AppCompatActivity() {
         val density = dm.density
         val chromeHorizontalPx = (2 * 10 * density).toInt() // item_grid_page left/right padding
         val chromeVerticalPx = ((8 + 26 + 16) * density).toInt() // top/bottom padding + page-dot area
-        val usableW = dm.widthPixels - chromeHorizontalPx
+        // The full-width desktop display includes the dock strip, which every page keeps as padding
+        val usableW = dm.widthPixels - chromeHorizontalPx - VirtualLauncher.gridContentInsetPx()
         val usableH = dm.heightPixels - chromeVerticalPx
         if (usableW <= 0 || usableH <= 0) {
             cellWidthPx = 0
@@ -891,7 +884,13 @@ class GridActivity : AppCompatActivity() {
         }
         val shared = VirtualLauncher.peekCachedApps()
         if (shared == null) {
-            findViewById<View>(R.id.gridLoading).visibility = View.VISIBLE
+            // The dashboard (map + music card) needs no app list: show it now instead of a blank pager until the scan ends
+            if (pages.isEmpty()) {
+                pages = listOf(listOf<Cell>(Cell.Dashboard))
+                pager?.adapter?.notifyDataSetChanged()
+            }
+            findViewById<View>(R.id.gridLoading).visibility =
+                if (VirtualLauncher.dashboardMode) View.GONE else View.VISIBLE
             if (appScanInFlight) return
             appScanInFlight = true
             val app = applicationContext
@@ -951,12 +950,20 @@ class GridActivity : AppCompatActivity() {
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     )
+                // Card margins stay relative to the app area: the dock strip is the page's own padding
+                container.setPadding(VirtualLauncher.gridContentInsetPx(), 0, 0, 0)
                 val panel = layoutInflater.inflate(R.layout.view_dashboard, container, false)
                 container.addView(panel)
                 container.addView(DashSplitHandle(parent.context))
                 DashboardHolder(container, panel)
             } else {
                 val grid = layoutInflater.inflate(R.layout.item_grid_page, parent, false) as GridLayout
+                grid.setPadding(
+                    grid.paddingLeft + VirtualLauncher.gridContentInsetPx(),
+                    grid.paddingTop,
+                    grid.paddingRight,
+                    grid.paddingBottom,
+                )
                 grid.columnCount = COLUMNS
                 // Row count is decided by computeCellMetrics per orientation (landscape 3, portrait up to 6)
                 grid.rowCount = rows

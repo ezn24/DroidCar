@@ -11,6 +11,20 @@ and includes the wireless adapter work of https://github.com/zz85/cardeck. That
 code was released under the MIT License below; its copyright and permission
 notice are kept as the MIT License requires.
 
+The Baidu CarLife protocol code under app/src/main/java/io/github/ezn24/droidcar/carlife/
+is ported from FT, used under the Apache License, Version 2.0. Its NOTICE reads:
+
+    FT
+    Copyright 2026 OneAboveAll1964
+    https://github.com/OneAboveAll1964
+
+    This product includes software developed by OneAboveAll1964.
+
+    Anyone who forks, modifies or redistributes FT, in source or as an app,
+    must keep this NOTICE file and credit OneAboveAll1964 with a link to
+    https://github.com/OneAboveAll1964, as section 4 of the Apache License,
+    Version 2.0 requires.
+
 -------------------------------------------------------------------------------
 
 MIT License

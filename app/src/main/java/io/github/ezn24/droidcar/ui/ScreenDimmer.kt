@@ -31,6 +31,42 @@ import io.github.ezn24.droidcar.util.Bg
  * used only to reset the timer; it never intercepts or consumes events.
  */
 object ScreenDimmer {
+    /**
+     * Minimum refresh rate the session windows ask the phone panel for. Apps on the car's virtual displays draw on the phone
+     * panel's vsync: with an LTPO panel idling under a static (dim) screen it dropped to 30 Hz and the car desktop paged at
+     * ~34 fps (dumpsys display: allowed 10-30 Hz, 2026-11-26). It is a minimum, set only while a car session runs: the first
+     * version used preferredRefreshRate = 60 on the always-present touch probe, which pinned the whole phone to 60 Hz instead
+     * of 120 Hz whenever the app was alive and made the phone feel laggy. While the phone is really locked (dozing) the system
+     * caps the panel at 30 Hz regardless.
+     */
+    private const val SESSION_MIN_REFRESH_HZ = 60f
+
+    /** WindowManager.LayoutParams.preferredMinDisplayRefreshRate (@hide, API 30+): read reflectively, null when missing. */
+    private val minRefreshField =
+        runCatching {
+            WindowManager.LayoutParams::class.java.getField("preferredMinDisplayRefreshRate")
+        }.getOrNull()
+
+    private fun applyRefreshFloor(
+        params: WindowManager.LayoutParams,
+        active: Boolean,
+    ) {
+        val field = minRefreshField
+        val applied = field != null && runCatching { field.setFloat(params, if (active) SESSION_MIN_REFRESH_HZ else 0f) }.isSuccess
+        // Hidden field unavailable: pin 60 Hz, but only for the session (0 = no preference)
+        if (!applied) params.preferredRefreshRate = if (active) SESSION_MIN_REFRESH_HZ else 0f
+    }
+
+    /** Re-applies the refresh floor to both session windows (session start / end). */
+    private fun updateRefreshFloor() {
+        val wm = windowManager ?: return
+        for (view in listOfNotNull(dimView, watchView)) {
+            val params = view.layoutParams as? WindowManager.LayoutParams ?: continue
+            applyRefreshFloor(params, sessionActive)
+            runCatching { wm.updateViewLayout(view, params) }
+        }
+    }
+
     private const val TAG = "ScreenDimmer"
     private const val IDLE_TIMEOUT_MS = 45_000L
     private const val TIMEOUT_MAX = 2_147_483_647
@@ -112,6 +148,7 @@ object ScreenDimmer {
     fun setSessionActive(active: Boolean) {
         if (sessionActive == active) return
         sessionActive = active
+        handler?.post { updateRefreshFloor() }
         val ctx = appContext ?: return
         val h = handler
         if (active) {
@@ -275,15 +312,16 @@ object ScreenDimmer {
                 setOnClickListener { onUserInteraction() }
             }
         val params =
-            WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                PixelFormat.OPAQUE,
-            )
+            WindowManager
+                .LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.OPAQUE,
+                ).apply { applyRefreshFloor(this, sessionActive) }
         runCatching { wm.addView(view, params) }
             .onSuccess {
                 dimView = view
@@ -342,6 +380,7 @@ object ScreenDimmer {
                     gravity = Gravity.TOP or Gravity.START
                     x = 0
                     y = 0
+                    applyRefreshFloor(this, sessionActive)
                 }
         runCatching { wm.addView(view, params) }
             .onSuccess { watchView = view }

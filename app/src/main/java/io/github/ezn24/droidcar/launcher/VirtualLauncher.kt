@@ -468,6 +468,87 @@ object VirtualLauncher {
         return true
     }
 
+    /**
+     * Knob: the dashboard -> desktop transition driven by a programmatic page change instead of a fake drag. The same state as a
+     * finger drag-out (the GL map follows onPageScrolled, the IDLE callback commits the mode), without beginFakeDrag, which the
+     * pager refuses while it still settles and which left the knob on the dashboard now and then (user report 2026-11-24).
+     */
+    fun beginDashboardSlideOut(): Boolean {
+        if (!dashboardMode || mapFullscreen || dashboardPageAnimating) return false
+        dashboardUserDragging = true
+        dashboardPageAnimating = true
+        setTileSlide(0f)
+        composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
+        return true
+    }
+
+    /**
+     * Head-unit map zoom key (ChairPlay "Controls" zoom in / out = event command changeMapZoomLevel): a two-finger pinch in the
+     * middle of the map display, which every map app understands (Google Maps, Amap, Waze), on the dashboard card and in fullscreen.
+     */
+    fun zoomMap(zoomIn: Boolean) {
+        val id = mapDisplayId
+        val w = mapDisplayW
+        val h = mapDisplayH
+        if (id < 0 || w <= 0 || h <= 0) return
+        // One gesture at a time: ChairPlay sends presses ~150 ms apart while a pinch takes ~0.5 s, and parallel pinches on the
+        // same two slots scrambled each other. Presses beyond one waiting gesture are dropped.
+        if (zoomPending.incrementAndGet() > 2) {
+            zoomPending.decrementAndGet()
+            return
+        }
+        zoomExecutor.execute {
+            val svc = CarInputClient.service
+            if (svc == null) {
+                zoomPending.decrementAndGet()
+                return@execute
+            }
+            val cx = w / 2
+            val cy = h / 2
+            val near = minOf(w, h) / 10
+            val far = minOf(w, h) * 3 / 10
+            val from = if (zoomIn) near else far
+            val to = if (zoomIn) far else near
+            runCatching {
+                // Slots far above the head unit's contact ids, so a finger on the screen keeps its own stream
+                // Paced like a real hand: Waze ignored the first, fast version (both fingers down in the same millisecond, 8 moves in
+                // ~130 ms, lifted at once) while Google Maps zoomed. Second finger lands a little later, the spread takes ~320 ms,
+                // and the fingers rest before lifting so the gesture ends as a pinch, not a fling.
+                if (!svc.touchDown(ZOOM_SLOT_A, id, cx - from, cy)) {
+                    logSink?.invoke("MAP: zoom gesture refused (another touch stream is active)")
+                    return@runCatching
+                }
+                Thread.sleep(30)
+                svc.touchDown(ZOOM_SLOT_B, id, cx + from, cy)
+                Thread.sleep(30)
+                for (step in 1..ZOOM_STEPS) {
+                    val d = from + (to - from) * step / ZOOM_STEPS
+                    svc.touchMove(ZOOM_SLOT_A, id, cx - d, cy)
+                    svc.touchMove(ZOOM_SLOT_B, id, cx + d, cy)
+                    Thread.sleep(16)
+                }
+                Thread.sleep(100)
+                svc.touchUp(ZOOM_SLOT_B, id, cx + to, cy)
+                Thread.sleep(20)
+                svc.touchUp(ZOOM_SLOT_A, id, cx - to, cy)
+            }.onFailure { logSink?.invoke("MAP: zoom gesture failed - ${it.message}") }
+            zoomPending.decrementAndGet()
+        }
+    }
+
+    private val zoomPending =
+        java.util.concurrent.atomic
+            .AtomicInteger()
+
+    private val zoomExecutor =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "map-zoom").apply { isDaemon = true }
+        }
+
+    private const val ZOOM_SLOT_A = 90
+    private const val ZOOM_SLOT_B = 91
+    private const val ZOOM_STEPS = 20
+
     fun dashboardDragBy(px: Float) {
         if (dashboardUserDragging) dashboardDragSink?.dragBy(px)
     }
@@ -770,6 +851,38 @@ object VirtualLauncher {
      * Render ratio of the display hosting the desktop relative to the video stream (native display = 1, supersampled display = hiScale).
      * Used for size/offset conversion when the desktop draws its "full-stream canvas wallpaper slice".
      */
+
+    /** The supersampled display spans the dock strip too (side dock, landscape); its x = 0 is the stream's x = 0. */
+    @Volatile
+    var hiFullWidth = false
+        private set
+
+    /** Stream x of [displayId]'s left edge: 0 for the full-width supersampled display, the dock width for other app displays. */
+    fun displayOriginX(displayId: Int): Int =
+        when {
+            dockAtBottom -> 0
+            hiFullWidth && displayId >= 0 && displayId == appHiDisplayId -> 0
+            else -> dockWidthPx
+        }
+
+    /** Left padding (in the display's pixels) that keeps a CarDeck screen on the full-width display clear of the dock. */
+    fun gridContentInsetPx(): Int =
+        if (hiFullWidth &&
+            gridDisplayId >= 0 &&
+            gridDisplayId == appHiDisplayId
+        ) {
+            (dockWidthPx * hiScale).toInt()
+        } else {
+            0
+        }
+
+    /** Settings / background apps on the desktop display: pad the whole window past the dock (only the desktop runs under it). */
+    fun padForDock(activity: android.app.Activity) {
+        val inset = gridContentInsetPx()
+        if (inset <= 0 || activity.display?.displayId != appHiDisplayId) return
+        activity.window.decorView.setPadding(inset, 0, 0, 0)
+    }
+
     fun gridScale(): Float = if (gridDisplayId >= 0 && gridDisplayId == appHiDisplayId) hiScale else 1f
 
     private var dockDisplay: VirtualDisplay? = null
@@ -825,6 +938,45 @@ object VirtualLauncher {
             mediaDisplayId -> mediaAppBounds().let { it.width * mediaSupersample to it.height * mediaSupersample }
             else -> null
         }
+
+    /**
+     * Frosted glass of the dock and notification banners (DualDisplayComposer layer model): the blur radius follows the dock blur
+     * setting (same strength the dock's own blurred wallpaper had: percent x 40 design px), the glass is on whenever blur is, and the
+     * compositor gets the wallpaper as backdrop layer 0 at a quarter of the stream size (it only ever samples it that small).
+     */
+    private fun applyGlass(context: Context) {
+        val c = composer ?: return
+        val percent = DockPrefs.blur(context)
+        // Dock design px = stream px x (short side / 540) = DashMetrics.scale x 4/3
+        c.glassSigmaPx = glassSigmaPx(percent)
+        c.dockGlass = percent > 0
+        val app = context.applicationContext
+        val w = (streamWidthPx / 4).coerceAtLeast(1)
+        val h = (streamHeightPx / 4).coerceAtLeast(1)
+        Bg.run("glass-wallpaper") {
+            val bitmap =
+                runCatching {
+                    io.github.ezn24.droidcar.ui.WallpaperStore
+                        .aspectFillCanvas(app, w, h)
+                }.getOrNull()
+            if (composer === c) c.backdropWallpaper = bitmap
+        }
+    }
+
+    /**
+     * Gaussian sigma of all glass (dock, banners, music card) in stream pixels, from the dock blur setting: the sigma the dock's
+     * old RenderEffect blur had (radius = percent x 40 design px, sigma = 0.57735 x radius + 0.5 as Skia converts it), so the
+     * compositor's glass and the music card's RenderEffect blur look the same.
+     */
+    fun glassSigmaPx(percent: Int): Float {
+        if (percent <= 0) return 0f
+        val radius = percent / 100f * 40f * DashMetrics.scale * 4f / 3f
+        return 0.57735f * radius + 0.5f
+    }
+
+    private val glassPrefsListener: () -> Unit = { appContextRef?.let { applyGlass(it) } }
+
+    private val glassWallpaperListener: (Long) -> Unit = { _ -> appContextRef?.let { applyGlass(it) } }
 
     /** Attach / detach an overlay card on the compositor. */
     @Volatile
@@ -897,7 +1049,7 @@ object VirtualLauncher {
             if (bitmap == null || area == null) {
                 null
             } else {
-                val l = area.left + left / scale
+                val l = displayOriginX(gridDisplayId) + left / scale
                 val t = area.top + top / scale
                 OverlayCard(bitmap, l, t, l + bitmap.width / scale, t + bitmap.height / scale)
             }
@@ -1108,7 +1260,11 @@ object VirtualLauncher {
             } else {
                 1f
             }
-        val appHiWidth = (appWidth * appScaleFactor).toInt()
+        // Side dock: the supersampled display (it hosts the desktop) also spans the strip under the dock, so the desktop, its
+        // pages and the music card can slide under the glass dock and be seen blurred through it (user request 2026-11-26).
+        // Its content keeps the app-area layout: the desktop pads its pages by the dock width (see gridContentInsetPx).
+        hiFullWidth = landscapeApp && !dockAtBottom
+        val appHiWidth = ((appWidth + if (hiFullWidth) dockWidthPx else 0) * appScaleFactor).toInt()
         val appHiHeight = (appHeightPx * appScaleFactor).toInt()
         this.hiScale = appScaleFactor
         val appHiDensity =
@@ -1150,11 +1306,17 @@ object VirtualLauncher {
         log("LAUNCHER: virtual-display mode=${if (useTrusted) "trusted (shell)" else "app-side (fallback)"}")
 
         val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom, splitVertical)
+        composer.hiFullWidth = hiFullWidth
+        // The frame rate negotiated with the head unit for this session (SessionController.activeTargetFps)
         composer.targetFps =
-            DisplayPrefs
-                .fps(context)
+            io.github.ezn24.droidcar.SessionController.activeTargetFps
+                .takeIf { it > 0 } ?: DisplayPrefs.fps(context)
         this.composer = composer
         composer.statsLog = { line -> log(line) }
+        applyGlass(context)
+        DockPrefs.addListener(glassPrefsListener)
+        io.github.ezn24.droidcar.ui.WallpaperStore
+            .addListener(glassWallpaperListener)
         val displaysCreated = arrayOf(false)
         composer.onSurfacesReady = { dockSurface, appSurface, appHiSurface, mapSurface, mediaSurface ->
             // Preferred: create a trusted virtual display via Shizuku shell (VIRTUAL_DISPLAY_FLAG_TRUSTED) -
@@ -1633,6 +1795,9 @@ object VirtualLauncher {
         Bg.run("letterbox-reset") {
             runCatching { Shell.exec("cmd window reset-letterbox-style aspectRatio") }
         }
+        DockPrefs.removeListener(glassPrefsListener)
+        io.github.ezn24.droidcar.ui.WallpaperStore
+            .removeListener(glassWallpaperListener)
         runCatching { composer?.stop() }
         composer = null
         dockDisplay = null
@@ -1680,6 +1845,7 @@ object VirtualLauncher {
         splitVertical = false
         dashLayout = DashLayout.SIDE_BY_SIDE
         hiScale = 1f
+        hiFullWidth = false
         streamWidthPx = 0
         streamHeightPx = 0
     }
@@ -2698,8 +2864,33 @@ object VirtualLauncher {
         if (appsCache == null) appsCache = apps
     }
 
-    fun invalidateAppsCache() {
+    /** Bumped by every invalidation: a delayed re-warm only runs if no newer change came in meanwhile (debounces app-update bursts). */
+    @Volatile
+    private var appsCacheGeneration = 0
+
+    /**
+     * Scans the app list in the background ahead of time, so the desktop does not show its spinner after connecting (the cold scan
+     * used to start only when the desktop was first drawn). Called when a connection starts; a no-op when the cache is warm.
+     */
+    fun warmAppsCache(
+        context: Context,
+        delayMillis: Long = 0L,
+    ) {
+        if (appsCache != null) return
+        val app = context.applicationContext
+        val generation = appsCacheGeneration
+        Bg.run("apps-warm") {
+            if (delayMillis > 0) Thread.sleep(delayMillis)
+            if (generation != appsCacheGeneration || appsCache != null) return@run
+            runCatching { cachedApps(app) }
+        }
+    }
+
+    /** A package was installed, removed or updated: drop the list, and rescan right away while a car is connected. */
+    fun invalidateAppsCache(context: Context? = null) {
         appsCache = null
+        appsCacheGeneration++
+        if (context != null && appContext() != null) warmAppsCache(context, delayMillis = 3_000L)
     }
 
     fun launchableApps(context: Context): List<AppEntry> = cachedApps(context)
@@ -2744,27 +2935,31 @@ object VirtualLauncher {
         infos.forEach { info -> firstInfoByPackage.putIfAbsent(info.packageName, info) }
         // Pinyin key computed once per app (previously repeated transliteration per pair inside the comparator, 150 apps ~ thousands of
         // ICU calls)
-        val apps =
-            keepOrder
-                .mapNotNull { firstInfoByPackage[it] }
-                .mapNotNull { info ->
-                    // A single app's loadLabel/loadIcon throwing must not bring down the whole list
-                    runCatching {
-                        val label = info.loadLabel(pm).toString().ifBlank { info.packageName }
-                        AppEntry(
-                            component = ComponentName(info.packageName, info.name),
-                            label = label,
-                            // Do not cache the oversized raw icon of each APK, to avoid hundreds of adaptive icons blowing up memory.
-                            icon =
-                                android.graphics.drawable.BitmapDrawable(
-                                    context.resources,
-                                    AppIcons.rounded(info.loadIcon(pm), 144),
-                                ),
-                        ) to pinyinKey(label)
-                    }.onFailure {
-                        skipped++
-                    }.getOrNull()
-                }
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        val skippedCount =
+            java.util.concurrent.atomic
+                .AtomicInteger()
+        // Label + icon loading dominates the scan (457 apps took ~12 s on one thread on the S24, 2026-11-24), and the desktop and
+        // dashboard waited for it: load them on a small pool, keeping the system order
+        val pool =
+            java.util.concurrent.Executors
+                .newFixedThreadPool(SCAN_THREADS)
+        val loaded =
+            try {
+                pool
+                    .invokeAll(
+                        keepOrder.mapNotNull { firstInfoByPackage[it] }.map { info ->
+                            java.util.concurrent.Callable { loadAppEntry(context, pm, info, skippedCount) }
+                        },
+                    ).map { it.get() }
+            } finally {
+                pool.shutdown()
+            }
+        val apps = loaded.filterNotNull()
+        skipped = skippedCount.get()
+        logSink?.invoke(
+            "LAUNCHER: app scan ${apps.size} apps in ${android.os.SystemClock.elapsedRealtime() - startedAt} ms ($SCAN_THREADS threads)",
+        )
         if (skipped > 0 || resolved.size != apps.size) {
             // Diagnostic trace: when users report "missing apps", this single line is enough to tell
             // "the system only returned this many / same-package entries were merged" from "label/icon loading failed and was skipped"
@@ -2775,6 +2970,31 @@ object VirtualLauncher {
         }
         return apps.sortedBy { it.second }.map { it.first }
     }
+
+    private const val SCAN_THREADS = 4
+
+    private fun loadAppEntry(
+        context: Context,
+        pm: android.content.pm.PackageManager,
+        info: android.content.pm.ActivityInfo,
+        skipped: java.util.concurrent.atomic.AtomicInteger,
+    ): Pair<AppEntry, String>? =
+        // A single app's loadLabel/loadIcon throwing must not bring down the whole list
+        runCatching {
+            val label = info.loadLabel(pm).toString().ifBlank { info.packageName }
+            AppEntry(
+                component = ComponentName(info.packageName, info.name),
+                label = label,
+                // Do not cache the oversized raw icon of each APK, to avoid hundreds of adaptive icons blowing up memory.
+                icon =
+                    android.graphics.drawable.BitmapDrawable(
+                        context.resources,
+                        AppIcons.rounded(info.loadIcon(pm), 144),
+                    ),
+            ) to pinyinKey(label)
+        }.onFailure {
+            skipped.incrementAndGet()
+        }.getOrNull()
 
     /** Letter index group key: digit -> "#", ASCII letter -> uppercase letter, Han character -> pinyin initial. */
     fun indexLetterOf(label: String): String {

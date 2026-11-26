@@ -160,10 +160,10 @@ object DisclaimerDialog {
             onDismiss?.invoke()
         }
 
-        dialog.setOnShowListener {
-            // Width 92%, height 78% of the screen; once registered, the Activity calls resizeShowing on rotation to recompute
-            PanelWindow.apply(dialog, activity, WINDOW_HEIGHT_FRACTION)
-        }
+        // Width 92%, height 78% of the screen, set before show() so the first frame is already centred (sizing it in the show
+        // listener made the dialog jump); once registered, the Activity calls resizeShowing on rotation to recompute
+        dialog.create()
+        PanelWindow.apply(dialog, activity, WINDOW_HEIGHT_FRACTION)
         dialog.show()
         return dialog
     }

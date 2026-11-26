@@ -65,6 +65,12 @@
              已填热点 SSID、正在显示的弹窗），系统重建会把它们全部丢掉。
              声明 configChanges 后 Activity 不重建、视图状态原样保留；
              依赖屏幕尺寸的弹窗窗口在 onConfigurationChanged 里重算。 -->
+        <!-- First-run setup guide (also reachable from the Car tab) -->
+        <activity
+            android:name=".setup.SetupActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:exported="false" />
+
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"

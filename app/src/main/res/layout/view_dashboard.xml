@@ -7,12 +7,12 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <ImageView
+    <!-- Live frosted glass: samples the desktop wallpaper behind the card at the card's current position (BackdropBlurView) -->
+    <io.github.ezn24.droidcar.ui.BackdropBlurView
         android:id="@+id/dashWallpaper"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:importantForAccessibility="no"
-        android:scaleType="fitXY" />
+        android:importantForAccessibility="no" />
 
     <View
         android:id="@+id/dashScrim"
@@ -33,32 +33,21 @@
             android:layout_height="0dp"
             android:layout_weight="0.3" />
 
-        <!-- 专辑封面（有封面时显示，圆角由代码裁剪） -->
+        <!-- Album cover: a square one third of the card's height (sized in GridActivity.sizeCover), corners clipped in code -->
         <ImageView
             android:id="@+id/dashCover"
             android:layout_width="48dp"
             android:layout_height="48dp"
-            android:layout_marginBottom="6dp"
+            android:layout_marginBottom="10dp"
             android:importantForAccessibility="no"
             android:scaleType="centerCrop"
             android:visibility="gone" />
-
-        <!-- 静态小标题不能写「正在播放」：它不随状态变化，会和下方状态文案
-             （「未在播放」/「无法读取播放信息」）直接矛盾（2026-10-19 截图实测）。
-             中性的「媒体」标签，具体状态交给标题/副标题两行表达。 -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:letterSpacing="0.1"
-            android:text="@string/ui_111"
-            android:textColor="#FFE0E0E5"
-            android:textSize="13sp" />
 
         <TextView
             android:id="@+id/dashMediaTitle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
+            android:layout_marginTop="2dp"
             android:ellipsize="end"
             android:gravity="center"
             android:maxLines="1"

@@ -38,13 +38,13 @@ The layout adapts to the head unit's resolution: wide screens split side by side
 | 1280×720 (16:9) | 960×540 (16:9) |
 | :---: | :---: |
 | <img src="docs/screenshots/car-1280x720.png" alt="1280×720"> | <img src="docs/screenshots/car-960x540.png" alt="960×540"> |
-| **800×480 (5:3)** | **1280×488 (8:3)** |
-| <img src="docs/screenshots/car-800x480.png" alt="800×480"> | <img src="docs/screenshots/car-1280x488.png" alt="1280×488"> |
+| **800×480 (5:3)** | **1280×480 (8:3)** |
+| <img src="docs/screenshots/car-800x480.png" alt="800×480"> | <img src="docs/screenshots/car-1280x480.png" alt="1280×480"> |
 
 ### Phone
 
 <p align="center">
-  <img src="docs/screenshots/phone-home.png" width="300" alt="Phone home screen">
+  <img src="docs/screenshots/phone-home.png" width="240" alt="Phone home screen">
   <br><sub>Phone home screen (Material Design 3; follows the phone's dark/light mode and the system accent color)</sub>
 </p>
 
@@ -75,6 +75,26 @@ The layout adapts to the head unit's resolution: wide screens split side by side
 - **Tablet layouts**: WhatsApp, Telegram, LINE, Instagram, ChatGPT, YouTube and others use their tablet layout on the car screen; Discord renders at the phone's density so text is no longer clipped.
 - **Connection automation**: send your own Intents when the car connects or disconnects (MacroDroid-style: broadcast / activity / service, action, package, extras…), e.g. for Tasker.
 - **Connect-tab switches**: "Car audio" decides whether audio is sent, with no prompt before each connection; "Wait for the car to reconnect" is off by default, so a disconnect from the car releases Bluetooth and the hotspot. The car hotspot the app saved is forgotten on disconnect, and car apps no longer pile up in the phone's recents.
+
+## Roadmap
+
+**More head-unit protocols** — DroidCar should work with every car, not only CarPlay ones. The launcher, virtual screens, compositor, encoder and touch handling are shared; each protocol adds its own connection and streaming layer. Details in [docs/MULTI-PROTOCOL.md](docs/MULTI-PROTOCOL.md).
+
+| Protocol | Cars | Status |
+| --- | --- | --- |
+| Apple CarPlay (wireless) | Most cars, wireless adapters | ✅ Available |
+| Baidu CarLife | Chinese-market cars (Toyota, Honda, VW China…) | 🚧 In progress (protocol core done) |
+| ICCOA CarLink (Xiaomi CarWith, OPPO, vivo) | Newer Chinese cars | 📋 Planned |
+| Android Auto | Most cars | 📋 Planned (cars with Google's receiver may reject non-Google certificates) |
+| SmartDeviceLink / Ford AppLink | Ford, Lincoln, some Toyota | 🔍 Evaluating |
+| Huawei HiCar, WeLink, EasyConnection | Chinese / aftermarket units | ❌ No public specification |
+
+**Other plans**
+
+- Real-car verification of the features that were only tested on bench receivers (calls, cluster screen, HEVC, knob control, lock-screen streaming)
+- Calls through the car's telephony audio channel instead of the voice-recognition channel
+- CarPlay-like motion: unified spring animations and opening apps from their icon
+- A music card that shows the last played song before any app starts playing
 
 ## Requirements
 

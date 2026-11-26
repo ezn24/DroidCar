@@ -801,23 +801,46 @@ class CarInputServiceImpl(
         y: Float,
     ): MotionEvent? =
         try {
-            val e =
-                MotionEvent.obtain(
+            // One finger, built like the multi-pointer events: the short obtain() leaves toolType UNKNOWN, so a pinch started
+            // as a single-pointer stream changed pointer 0 from UNKNOWN to FINGER mid-gesture, and Waze dropped the whole pinch
+            // (Google Maps tolerated it; user report 2026-11-25). A real touchscreen reports FINGER throughout.
+            val properties =
+                arrayOf(
+                    MotionEvent.PointerProperties().apply {
+                        id = 0
+                        toolType = MotionEvent.TOOL_TYPE_FINGER
+                    },
+                )
+            val coords =
+                arrayOf(
+                    MotionEvent.PointerCoords().apply {
+                        this.x = x
+                        this.y = y
+                        pressure = 1f
+                        size = 1f
+                        touchMajor = 40f
+                        touchMinor = 40f
+                        toolMajor = 40f
+                        toolMinor = 40f
+                    },
+                )
+            MotionEvent
+                .obtain(
                     downTime,
                     eventTime,
                     action,
-                    x,
-                    y,
-                    1f,
-                    1f,
-                    0,
-                    1f,
-                    1f,
-                    0,
-                    0,
-                )
-            e.setSource(InputDevice.SOURCE_TOUCHSCREEN)
-            e
+                    1,
+                    properties,
+                    coords,
+                    0, // metaState
+                    0, // buttonState
+                    1f, // xPrecision
+                    1f, // yPrecision
+                    0, // deviceId
+                    0, // edgeFlags
+                    InputDevice.SOURCE_TOUCHSCREEN,
+                    0, // flags
+                ).apply { setSource(InputDevice.SOURCE_TOUCHSCREEN) }
         } catch (t: Throwable) {
             Log.d(TAG, "build MotionEvent exception", t)
             null

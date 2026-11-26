@@ -144,6 +144,8 @@ class DockActivity : AppCompatActivity() {
         current = this
         val dm = resources.displayMetrics
         barForm = dm.widthPixels > dm.heightPixels
+        // Glass mode needs an alpha channel in the dock's surface (the compositor draws the live blurred backdrop under it)
+        window.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
         setContentView(if (barForm) R.layout.activity_dock_bar else R.layout.activity_dock_sidebar)
 
         clockView = findViewById(R.id.dockClock)
@@ -262,6 +264,17 @@ class DockActivity : AppCompatActivity() {
             )
         val wallpaper = wallpaperView ?: return
         val percent = DockPrefs.blur(this)
+        // Glass (blur on): the dock no longer paints its own blurred wallpaper slice; the compositor blurs whatever lies under the
+        // dock live (wallpaper and the map / cards sliding past) and the scrim above only tints it. Blur off: the old opaque dock.
+        val glass = percent > 0
+        val background = if (glass) android.graphics.Color.TRANSPARENT else android.graphics.Color.BLACK
+        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(background))
+        findViewById<android.view.ViewGroup>(android.R.id.content)?.getChildAt(0)?.setBackgroundColor(background)
+        wallpaper.visibility = if (glass) View.GONE else View.VISIBLE
+        if (glass) {
+            wallpaper.setRenderEffect(null)
+            return
+        }
         if (percent <= 0) {
             wallpaper.setRenderEffect(null)
         } else {

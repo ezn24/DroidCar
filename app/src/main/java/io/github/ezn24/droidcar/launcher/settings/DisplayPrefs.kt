@@ -20,7 +20,8 @@ object DisplayPrefs {
     const val SCALE_STEP = 5
     const val SCALE_DEFAULT = 100
 
-    const val FPS_DEFAULT = 30
+    /** Upper limit; the session uses min(this, head unit /info maxFPS), so 60 = follow the head unit. */
+    const val FPS_DEFAULT = 60
 
     /**
      * Head-unit notifications show only these apps (package names); empty set = all apps. Independent of which apps the desktop shows - a
@@ -45,6 +46,22 @@ object DisplayPrefs {
     }
 
     /** Push head-unit-side audio on connect (switch on the connection page; replaces the per-connection dialog). */
+
+    /** Press play when a car session's audio comes up (off by default). */
+    fun autoPlayOnConnect(context: Context): Boolean =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("autoPlayOnConnect", false)
+
+    fun setAutoPlayOnConnect(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        context
+            .getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("autoPlayOnConnect", enabled)
+            .apply()
+    }
+
     fun carAudio(context: Context): Boolean = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("carAudio", true)
 
     fun setCarAudio(
@@ -148,7 +165,9 @@ object DisplayPrefs {
     fun hevc(context: Context): Boolean =
         context
             .getSharedPreferences("settings", Context.MODE_PRIVATE)
-            .getBoolean("hevc", false)
+            // On by default (2026-11-26): HEVC is used only when the head unit declares it (/info hevcInfo + SETUP
+            // enabledFeatures), so the setting now means "allow"; turning it off forces H.264
+            .getBoolean("hevc", true)
 
     fun setHevc(
         context: Context,

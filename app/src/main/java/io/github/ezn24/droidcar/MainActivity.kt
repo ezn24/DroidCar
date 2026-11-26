@@ -315,10 +315,8 @@ class MainActivity : AppCompatActivity() {
      * The entry name is kept because several continue-connect paths (e.g. permission callbacks) go through it.
      */
     private fun showAudioChoiceDialog() {
-        beginWithAudio(
-            io.github.ezn24.droidcar.launcher.settings.DisplayPrefs
-                .carAudio(this),
-        )
+        // Car audio is always on (the switch was removed 2026-11-26: nobody connects without sound)
+        beginWithAudio(true)
     }
 
     /** "Cancel connection" confirmation dialog (guards against accidental taps): aborts the current attempt and drops the Bluetooth/WiFi links. */
@@ -655,6 +653,13 @@ class MainActivity : AppCompatActivity() {
             startConnectionNow()
             return
         }
+        // Shizuku captures the system output directly: no screen-capture grant needed (the session falls back to one only if
+        // that capture fails, SessionController.requestProjectionFallback)
+        if (ShizukuGate.state(this) == ShizukuGate.State.READY) {
+            log("MODE: sound via Shizuku system output capture (no screen-capture grant needed)")
+            startConnectionNow()
+            return
+        }
         // Enabling sound needs the screen-capture permission (the source of the playback-capture grant): request it first, then start the connection once granted
         log(
             "MODE: sound needs screen-capture permission - requesting in sequence (audio capture depends on it), connection starts after the grant",
@@ -846,6 +851,14 @@ class MainActivity : AppCompatActivity() {
             if (!isFinishing && !isDestroyed) applyContentLayout(startLandscape)
         }
 
+        // First run: the setup guide walks through the disclaimer, permissions and the main options (it handles the disclaimer itself)
+        if (savedInstanceState == null &&
+            !io.github.ezn24.droidcar.setup.SetupPrefs
+                .done(this)
+        ) {
+            startActivity(Intent(this, io.github.ezn24.droidcar.setup.SetupActivity::class.java))
+            return
+        }
         // Disclaimer: forced dialog when the current version is not yet accepted (not cancelable, needs countdown + scroll to bottom).
         // A non-null savedState (rotation/recreate) reuses the original deadline instead of restarting the timer.
         if (savedInstanceState == null &&
@@ -878,6 +891,21 @@ class MainActivity : AppCompatActivity() {
                     },
                     onDismiss = { activeDisclaimer = null },
                 )
+    }
+
+    /** Hides a list row and the 1dp divider that separates it from its neighbour (the one before it, else the one after). */
+    private fun hideRowWithDivider(row: View) {
+        row.visibility = View.GONE
+        val parent = row.parent as? android.view.ViewGroup ?: return
+        val index = parent.indexOfChild(row)
+
+        fun isDivider(view: View?) = view != null && view.javaClass == View::class.java
+        val before = parent.getChildAt(index - 1)
+        val after = parent.getChildAt(index + 1)
+        when {
+            isDivider(before) -> before.visibility = View.GONE
+            isDivider(after) -> after.visibility = View.GONE
+        }
     }
 
     /** Tail of onCreate's UI initialization: switches/buttons/collapsible cards (session logic unchanged, just attached to the new UI). */
@@ -997,14 +1025,10 @@ class MainActivity : AppCompatActivity() {
 
         // ---- Head-unit display ----
         // Connection-page switches: head-unit audio (replaces the pre-connect dialog), and whether to wait for a reconnect after the head unit disconnects
+        // The former "car audio" switch row (sound is always on now) is "play music when connected"
         findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchCarAudio).apply {
-            isChecked =
-                io.github.ezn24.droidcar.launcher.settings.DisplayPrefs
-                    .carAudio(this@MainActivity)
-            setOnCheckedChangeListener { _, checked ->
-                io.github.ezn24.droidcar.launcher.settings.DisplayPrefs
-                    .setCarAudio(this@MainActivity, checked)
-            }
+            isChecked = DisplayPrefs.autoPlayOnConnect(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> DisplayPrefs.setAutoPlayOnConnect(this@MainActivity, checked) }
         }
         findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchWaitReconnect).apply {
             isChecked =
@@ -1044,6 +1068,11 @@ class MainActivity : AppCompatActivity() {
                 .enterDimNow()
             log("DIMMER: manual fake screen-off (tap the screen to restore)")
         }
+
+        // Removed 2026-11-26: "car audio" (always on now) with its readiness row (Shizuku captures sound without a screen-capture
+        // grant) and "fake screen-off now" (the dim cover comes on by itself). Hidden with the divider next to each row.
+        hideRowWithDivider(findViewById<View>(R.id.rowDim))
+        hideRowWithDivider(btnAudio.parent as View)
 
         buildWallpaperStrips()
 
@@ -1426,7 +1455,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (bondedCount > 0) ready++
-        if (CarPlayService.mediaProjection != null) ready++
 
         btBadge.visibility = if (bondedCount >= 0) View.VISIBLE else View.GONE
         if (bondedCount >= 0) {
@@ -1497,7 +1525,8 @@ class MainActivity : AppCompatActivity() {
                 UiStrings
                     .text(R.string.ui_025)
         }
-        readyCount.text = "$ready/4"
+        // Shizuku, Bluetooth pairing, head-unit hotspot (audio needs no grant of its own any more)
+        readyCount.text = "$ready/3"
     }
 
     /**
@@ -1628,12 +1657,12 @@ class MainActivity : AppCompatActivity() {
             pendingBondAddress = null
             updateReadyRow()
         }
-        dialog.setOnShowListener {
-            // The panel has its own rounded corners: the window background must be transparent, otherwise square corners show through
-            dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
-            val width = (resources.displayMetrics.widthPixels * PanelWindow.WIDTH_FRACTION).toInt()
-            dialog.window?.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
-        }
+        // The panel has its own rounded corners: the window background must be transparent, otherwise square corners show through.
+        // Set before show(): doing it in the show listener drew one frame off-centre at the default width first
+        dialog.create()
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        val width = (resources.displayMetrics.widthPixels * PanelWindow.WIDTH_FRACTION).toInt()
+        dialog.window?.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
         dialog.show()
         startTargetScan(dialog)
     }
@@ -2992,6 +3021,15 @@ class MainActivity : AppCompatActivity() {
             row.setOnClickListener { SettingsContentActivity.start(this, item) }
             list.addView(row)
         }
+        // Setup guide: run the first-time flow again
+        val guide = layoutInflater.inflate(R.layout.item_phone_settings_menu, list, false)
+        guide.setBackgroundResource(ripple.resourceId)
+        (guide.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.topMargin = 0
+        guide.findViewById<ImageView>(R.id.menuIcon).setImageResource(R.drawable.ic_info_circle)
+        guide.findViewById<TextView>(R.id.menuTitle).text = getString(R.string.setup_menu_title)
+        guide.findViewById<TextView>(R.id.menuDesc).text = getString(R.string.setup_menu_desc)
+        guide.setOnClickListener { startActivity(Intent(this, io.github.ezn24.droidcar.setup.SetupActivity::class.java)) }
+        list.addView(guide)
     }
 
     override fun onResume() {
@@ -2999,8 +3037,11 @@ class MainActivity : AppCompatActivity() {
         uiResumed = true
         ScreenDimmer.addCoverListener(dimmerCoverListener)
         syncPhoneUiActivity()
-        // Not yet accepted after rotation/recreate: resume the dialog from the original deadline (no new 10s wait)
-        if (needsDisclaimerAtLaunch(
+        // Not yet accepted after rotation/recreate: resume the dialog from the original deadline (no new 10s wait).
+        // While the setup guide is still pending it owns the disclaimer.
+        if (io.github.ezn24.droidcar.setup.SetupPrefs
+                .done(this) &&
+            needsDisclaimerAtLaunch(
                 DisclaimerPrefs.acceptedVersion(this),
                 DisclaimerPrefs.CURRENT_VERSION,
             ) &&

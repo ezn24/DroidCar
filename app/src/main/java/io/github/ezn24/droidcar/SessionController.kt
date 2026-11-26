@@ -199,6 +199,28 @@ object SessionController {
      * Dispatch a system media key (AudioManager routes it globally to the currently active media session, no permission needed).
      * The desktop music card buttons and the head-unit / steering-wheel media keys (Consumer HID) share this path.
      */
+
+    /**
+     * "Play music when connected": once the session's audio stream is live, press play unless something already plays. The play
+     * key goes to the active media session, or to the app that played last (Android's media button resumption restarts it).
+     */
+    private fun maybeAutoPlay(context: Context) {
+        if (!DisplayPrefs.autoPlayOnConnect(context)) return
+        Bg.run("auto-play") {
+            Thread.sleep(AUTO_PLAY_DELAY_MS)
+            if (io.github.ezn24.droidcar.media.MediaSessionsState.nowPlaying
+                    ?.playing == true
+            ) {
+                return@run
+            }
+            appendLog("MEDIA: auto play on connect")
+            dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
+        }
+    }
+
+    /** Lets the car's audio pipeline open before the music starts (the first second would otherwise be lost). */
+    private const val AUTO_PLAY_DELAY_MS = 1_500L
+
     fun dispatchMediaKey(keyCode: Int) {
         val ctx = appContext ?: return
         val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -725,6 +747,9 @@ object SessionController {
      */
     fun startConnection(context: Context) {
         connectCancelled = false
+        // The desktop's app list takes seconds to scan with hundreds of apps: do it while Bluetooth / Wi-Fi / pairing run
+        io.github.ezn24.droidcar.launcher.VirtualLauncher
+            .warmAppsCache(context)
         // Connecting again (by hand, or auto-connect after the hold-off) ends a manual-disconnect hold-off.
         autoConnectSuppressedUntil = 0L
         userEndedSession = false
@@ -1104,6 +1129,37 @@ object SessionController {
         // Restore runs only at real terminal states: disconnect() (user disconnects) and streaming onEnded (the head unit tears down the link),
         // each calling resetAllAsync. The new round's applyAll is idempotent with the old overrides (enable over enable),
         // so there is no need to restore before writing.
+    }
+
+    /** One screen-capture fallback per process run (the Shizuku capture failed); see [requestProjectionFallback]. */
+    private val projectionFallbackTried =
+        java.util.concurrent.atomic
+            .AtomicBoolean(false)
+
+    /**
+     * Audio normally comes from the Shizuku system-output capture (REMOTE_SUBMIX) and needs no screen-capture grant; connecting no
+     * longer asks for one (2026-11-26, it only flashed a trampoline activity for a token that went unused). Only when that capture
+     * fails is the MediaProjection playback capture used: the token is taken silently (Shizuku appops path) and the audio channel
+     * restarted on the running session.
+     */
+    private fun requestProjectionFallback(context: Context) {
+        if (CarPlayService.mediaProjection != null || !projectionFallbackTried.compareAndSet(false, true)) return
+        val app = context.applicationContext
+        appendLog("AUDIO: system output capture failed - falling back to screen-capture playback capture")
+        Bg.run("audio-projection-fallback") {
+            val grant =
+                io.github.ezn24.droidcar.audio.SilentProjectionActivity
+                    .request(app)
+            if (grant == null) {
+                appendLog("AUDIO: silent screen-capture grant failed - this session stays without sound")
+                return@run
+            }
+            CarPlayService.pendingProjectionResult = grant.resultCode to grant.data
+            CarPlayService.start(app)
+            val deadline = SystemClock.uptimeMillis() + 5_000L
+            while (CarPlayService.mediaProjection == null && SystemClock.uptimeMillis() < deadline) Thread.sleep(200)
+            if (CarPlayService.mediaProjection != null) maybeStartAudioNow(app)
+        }
     }
 
     /** When the session is established and the projection is ready but audio has not started, start it dynamically (the capture grant came after the connection). */
@@ -2156,6 +2212,7 @@ object SessionController {
                 audioSender = null
                 activeAudioProfile = null
                 activeAudioStartedAt = 0L
+                if (projection == null) requestProjectionFallback(context)
                 false
             } else {
                 true
@@ -3076,6 +3133,15 @@ object SessionController {
                                         }
                                     }
 
+                                    "changeMapZoomLevel" -> {
+                                        // Receiver map zoom key (ChairPlay Controls): zoomDirection 0 = in, 1 = out (xcertplay constants)
+                                        val params = command["params"] as? Map<*, *>
+                                        val zoomIn = (params?.get("zoomDirection") as? Number)?.toInt() != 1
+                                        appendLog("EVENT: map zoom ${if (zoomIn) "in" else "out"}")
+                                        io.github.ezn24.droidcar.launcher.VirtualLauncher
+                                            .zoomMap(zoomIn)
+                                    }
+
                                     "showUI", "updateViewArea" -> {
                                         // The receiver chooses what its alternate (cluster) screen shows (ChairPlay AltScreen)
                                         val params = command["params"] as? Map<*, *>
@@ -3218,12 +3284,14 @@ object SessionController {
                                         ((setup.displayWidth * scale).toInt().coerceAtLeast(320) / 2) * 2
                                     val streamH =
                                         ((setup.displayHeight * scale).toInt().coerceAtLeast(180) / 2) * 2
+                                    // Frame rate follows the head unit: the setting is only an upper limit (default 60), the receiver's
+                                    // /info maxFPS caps it (2026-11-26; it used to be a fixed 30 / 60 choice)
                                     val fps =
-                                        appContext
-                                            ?.let {
-                                                DisplayPrefs
-                                                    .fps(it)
-                                            } ?: 30
+                                        minOf(
+                                            appContext?.let { DisplayPrefs.fps(it) } ?: 60,
+                                            setup.maxFps.coerceIn(24, 60),
+                                        )
+                                    appendLog("VIDEO: frame rate $fps (head unit max ${setup.maxFps})")
                                     activeScalePercent = scalePct
                                     activeTargetFps = fps
                                     // Head-unit touch is in the advertised view coordinate system (e.g. 1160x540) while the stream is scaled
@@ -3377,6 +3445,7 @@ object SessionController {
                                         )
                                         client.record()
                                     }
+                                    if (audioStarted) maybeAutoPlay(context)
                                 }
                             }
                         } else {
