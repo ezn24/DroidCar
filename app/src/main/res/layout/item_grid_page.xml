@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 单页图标网格（列数固定 4；行数由代码按横竖屏设置——横屏 CarPlay 规格 3 行、
-     竖屏自适应至多 6 行，避免固定 3 行把格子拉成瘦高条；格子尺寸由代码按屏幕计算） -->
+<!-- One page of the icon grid (always 4 columns; rows set in code by orientation: 3 in landscape like CarPlay,
+     up to 6 in portrait so fixed 3 rows do not stretch cells into tall strips; cell size computed from the screen) -->
 <GridLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"

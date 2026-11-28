@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 通用深色消息弹窗（标题 + 可滚动正文 + 右侧主操作）。
-     与「免责声明」「选择目标车机」同一套视觉：bg_dialog_panel + M3 令牌 + 胶囊按钮。
-     系统 AlertDialog 默认浅色主题与本应用深色 UI 割裂（2026-10-18 真机暴露），
-     需要提示框时统一走 DarkMessageDialog 而不是裸 AlertDialog。 -->
+<!-- Shared dark message dialog (title + scrollable body + main action on the right).
+     Same look as the disclaimer and the head-unit picker: bg_dialog_panel + M3 tokens + pill buttons.
+     The system AlertDialog's light default theme clashed with the app's dark UI (seen on a phone 2026-10-18),
+     so prompts always go through DarkMessageDialog, never a bare AlertDialog. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -21,7 +21,7 @@
         android:textSize="17sp"
         android:textStyle="bold" />
 
-    <!-- 正文：超长时滚动（最大 46% 屏高，由代码设上限），底部按钮始终可见 -->
+    <!-- Body: scrolls when long (at most 46% of the screen height, capped in code); the buttons stay visible -->
     <ScrollView
         android:id="@+id/msgScroll"
         android:layout_width="match_parent"

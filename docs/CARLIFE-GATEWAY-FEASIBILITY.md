@@ -1,5 +1,9 @@
 # CarLife/Carlink → CarPlay 网关可行性调研
 
+> **Superseded (2026-11)**: DroidCar no longer plans to be a CarLife / ICCOA *receiver* gateway. It now speaks these
+> protocols as the phone (sender) side itself; see [MULTI-PROTOCOL.md](MULTI-PROTOCOL.md). This study is kept for its
+> research notes.
+
 > 调研日期：2026-10-08。目标：在现有 app（CarPlay 发送端）中增加一个
 > CarLife/ICCOA Carlink **接收端**，让手机上的车联 app / 高德把画面投进我们的 app，
 > 再经 CarPlay 转发到奥迪车机——从「自绘桌面」升级为「真实投屏内容网关」。

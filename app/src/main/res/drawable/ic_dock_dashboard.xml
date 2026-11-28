@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- dock home 按钮「仪表盘」态：田字格（分屏 dashboard 布局意象）。
-     当前在仪表盘时按钮显示房屋（回桌面）；在桌面/应用时显示本图标（进仪表盘）。 -->
+<!-- Dock home button, dashboard state: a four-pane grid (the split dashboard layout).
+     On the dashboard the button shows the house (to the desktop); on the desktop or in an app it shows this icon (to the dashboard). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="16dp"
     android:height="16dp"
