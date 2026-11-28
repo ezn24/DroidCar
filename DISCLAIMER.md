@@ -1,103 +1,124 @@
-# 免责声明 / Disclaimer
+# Disclaimer
 
-> 本文件与 App 内首次启动时展示的免责声明同源。App 内声明为中文正文，
-> 本文件作为仓库层面的补充，供下载、分发、二次分发时一并向使用者提供。
+> This file comes from the same source as the disclaimer the app shows on first start (the app shows it in your language).
+> It is the repository-level copy, to be handed to users together with any download, distribution or redistribution.
 
-## 非官方声明
+## Unofficial project
 
-本项目（下称「本应用」）是一个**非官方的个人实验性项目**，与 Apple Inc.、
-任何汽车制造商及其关联公司**均无关联**，未获得任何形式的授权、认证或背书。
+This project (the "app") is an **unofficial, personal, experimental project**. It is **not affiliated** with Apple Inc.,
+Google LLC, Baidu, the ICCOA alliance, any car manufacturer or any of their affiliates, and has no authorization,
+certification or endorsement of any kind.
 
-本应用**不是** MFi（Made for iPhone）认证产品，也不属于 Apple 的 CarPlay 生态官方实现。
+The app is **not** an MFi (Made for iPhone) product and is not an official implementation of the CarPlay, Android Auto,
+CarLife or ICCOA CarLink ecosystems.
 
-## 商标归属
+## Trademarks
 
-- **CarPlay** 是 Apple Inc. 的商标。
-- **AirPlay** 是 Apple Inc. 的商标。
-- 本应用名称「DroidCar」不含上述任何商标；文中出现 CarPlay / AirPlay 字样，
-  **仅用于说明本应用的兼容目标**（即：本应用尝试以发送端身份与支持 CarPlay
-  的接收端通信），属描述性引用，不表示任何关联、赞助或认可。
-- 本项目**不使用** Apple、任何汽车厂商的图形标识（logo、图标、认证标等）。
-- 其他文中提及的产品名称、商标均为其各自所有者的财产。
+- **CarPlay** and **AirPlay** are trademarks of Apple Inc.
+- **Android Auto** is a trademark of Google LLC.
+- **CarLife** is a trademark of Baidu.
+- The name "DroidCar" contains none of these trademarks. CarPlay, AirPlay, Android Auto, CarLife and CarLink appear in
+  this project **only to describe what the app is compatible with** (the app tries to talk to head units that support
+  them, in the phone's role). This is descriptive use and implies no affiliation, sponsorship or endorsement.
+- The project **does not use** the logos, icons or certification marks of Apple, Google, Baidu or any car maker.
+- Other product names and trademarks mentioned belong to their respective owners.
 
-## 驾驶安全警告
+## Driving safety
 
-**本应用不是安全关键系统，不能替代车辆原厂导航与仪表。**
+**The app is not a safety-critical system and does not replace the car's own navigation and instruments.**
 
-- 请在**停车状态**下完成连接、配对与全部设置；
-- 行驶过程中如需操作，必须由车上的乘客进行，驾驶员不得手持或操作手机；
-- 无线链路可能因信号干扰、系统休眠、热点切换、蓝牙重连等原因**随时中断**，
-  表现为画面冻结、黑屏、触摸失灵或导航中断；
-- 行驶中断连可能导致错过路口、路线丢失或注意力分散。
-  请始终以车机原厂导航作为安全冗余。
+- Connect, pair and change settings **only while parked**.
+- While driving, only a passenger may operate it; the driver must not hold or operate the phone.
+- The wireless link can **drop at any time** (interference, phone sleep, hotspot changes, Bluetooth reconnects): the
+  picture freezes or goes black, touch stops working or navigation stops.
+- A drop while driving can mean a missed turn, a lost route or distraction. Always keep the car's own navigation as a
+  safety fallback.
 
-## 已测试范围
+## What has been tested
 
-本应用仅在下列组合上验证过：
+The app has been checked only on these combinations:
 
-| 角色 | 设备 |
+| Role | Device |
 |---|---|
-| 发送端 | 荣耀 Magic7 Pro（Android 17） |
-| 接收端 | 奥迪 MIB3 车机（真车） |
-| 接收端 | Redmi K40 上的 DiPlay 测试台（Android 13） |
+| Phone | Honor Magic7 Pro (Android 17), Samsung Galaxy S24 |
+| CarPlay head unit | Audi MIB3 (real car); benches: ChairPlay, WinPlay (Windows), DiPlay on a Redmi K40 (Android 13) |
+| Android Auto head unit | Benches only: Google's Desktop Head Unit, AARE's desktop head unit |
+| Baidu CarLife head unit | Bench only: carlife_pc_tool |
+| ICCOA CarLink head unit | Not tested |
 
-**其他手机、其他 Android 版本、其他车型均未验证**，可能完全无法工作，也可能
-出现画面异常、触摸错位或反复断连。「应用横屏」功能需要 Android 14 及以上系统，
-Android 13 及更早机型该功能不可用。
+**Other phones, Android versions and cars are not verified.** The app may not work at all, or show a broken picture,
+misplaced touches or repeated disconnects. Android Auto, CarLife and ICCOA support is experimental. "Force landscape"
+for apps needs Android 14 or later.
 
-## 系统权限说明
+## System permissions
 
-本应用为实现功能会请求并使用以下能力：
+To work, the app asks for and uses:
 
-- **Shizuku（shell 权限）**：创建受信虚拟屏、注入触摸事件、写入系统兼容性设置
-  （如强制应用横屏）、读取窗口与显示状态。不会执行与本应用服务无关的命令。
-  Shizuku 是独立第三方开源项目（[官网](https://shizuku.rikka.app/) /
-  [GitHub](https://github.com/RikkaApps/Shizuku)），其权限授予范围与安全边界
-  由你自行在 Shizuku 中管理；本应用只获得 shell 身份能做的事，不额外提权。
-  Shizuku 还用于：通话时代为接听/挂断、静音麦克风并把通话对方的声音转到车机；
-  把车机麦克风注入为手机麦克风（语音助手与通话）；代为开启本应用的通知使用权与
-  导航无障碍服务。
-- **通知使用权**：在车机桌面显示正在播放的音乐；读取来电通知（来电者名称、头像、
-  接听/挂断按钮）以显示车机通话卡片；读取 Google 地图导航通知用于仪表转弯提示；
-  可选的车机通知横幅。通知内容不写入日志、不上传。
-- **麦克风**：Android 要求有此权限才能捕获手机播放的声音推到车机；语音或通话时
-  用车机麦克风代替手机麦克风。不录音保存、不上传。
-- **位置 / 附近的 Wi-Fi 设备**：加入车机 Wi-Fi 热点时 Android 的要求（Android 12
-  为位置，13 起为附近的设备）。本应用不读取、不保存你的位置。
-- **蓝牙**：与车机配对并建立 CarPlay 连接（只配对，不建立蓝牙音频连接）。
-- **屏幕录制（投屏）授权**：仅在开启「车机侧声音」时用于捕获音频。
-- **显示在其他应用上层**：车机蓝牙连上时在后台自动开始连接，以及手机端的息屏遮罩。
-- **无障碍服务（可选，默认关闭）**：仅读取高德地图与 Waze 画面上的导航文字和
-  转弯/车道箭头，且只在车机订阅导航时读取，用于仪表转弯提示。
-- **通知**：显示连接状态的常驻通知。
+- **Shizuku (shell permission)**: creating trusted virtual displays, injecting touch, writing system compatibility
+  settings (such as forcing apps to landscape), reading window and display state. It runs no commands unrelated to the
+  app's own functions. Shizuku is an independent open-source project ([website](https://shizuku.rikka.app/) /
+  [GitHub](https://github.com/RikkaApps/Shizuku)); you manage what it may do in Shizuku itself. The app gets only what
+  the shell identity can do, nothing more. Shizuku is also used to answer / end calls and mute the microphone, to send
+  the other party's voice to the car, to inject the car's microphone as the phone's microphone (assistant and calls),
+  to capture the phone's audio for the car, and to turn on the app's notification access and navigation accessibility
+  service.
+- **Notification access**: shows what is playing on the car launcher; reads call notifications (caller name, photo,
+  answer / end buttons) for the car's call card; reads Google Maps navigation notifications for turn prompts on the
+  cluster; optional notification banners on the car. Notification content is never logged or uploaded.
+- **Microphone**: Android requires it to capture the sound the phone plays for the car; during voice or calls the car's
+  microphone replaces the phone's. Nothing is recorded to storage or uploaded.
+- **Location / nearby Wi-Fi devices**: Android requires them to join the car's Wi-Fi hotspot or Wi-Fi Direct group
+  (location on Android 12, nearby devices from 13). The app does not read or store your location.
+- **Bluetooth (connect and scan)**: pairing with the car and setting up the connection (pairing only, no Bluetooth audio
+  connection); scanning for ICCOA CarLink head units over Bluetooth LE.
+- **Screen capture (projection) permission**: only to capture audio when Shizuku cannot.
+- **Display over other apps**: starting the connection in the background when the car's Bluetooth connects, and the
+  dim cover on the phone screen.
+- **Accessibility service (optional, off by default)**: reads only the navigation text and turn / lane arrows on screen
+  in Amap and Waze, and only while a car subscribes to navigation, for turn prompts on the cluster.
+- **Notifications**: the ongoing notification showing the connection.
 
-配对信息、目标设备名称、壁纸与设置项仅保存在本机，不上传至任何服务器；
-本应用不含统计分析或广告 SDK。
+Pairing data, target device names, wallpapers, settings and Android Auto certificates stay on the phone and are not
+uploaded to any server. The app contains no analytics or advertising SDK. The only network requests the app makes on its
+own initiative are the ones you start: the optional Android Auto certificate download (see below).
 
-## 免责条款
+## Android Auto certificates
 
-本应用按「现状」提供，不附带任何明示或默示的担保，包括但不限于适销性、
-特定用途适用性与不侵权担保。
+Most factory Android Auto head units only accept a certificate issued by Google. DroidCar ships no such certificate.
+At your request (a button in the Car page) it can download one from a third-party repository
+([iscle/android-auto-certificates](https://github.com/iscle/android-auto-certificates)) that publishes certificates
+extracted from the Android Auto app, or you can import your own files. Using such a certificate may break the terms of
+the services involved; you decide whether to use it and carry the risk.
 
-在适用法律允许的最大范围内，作者与贡献者不对因使用或无法使用本应用而产生的
-任何直接或间接损失承担责任，包括但不限于：连接中断、导航或通话中断、数据丢失、
-设备异常、车辆系统异常，以及因驾驶中操作或分心导致的事故与损失。
+## No warranty
 
-是否使用本应用、如何配置与操作、以及在何种场景下使用，完全由使用者自行判断
-并自行承担风险。若不同意上述任何一条，请停止使用并卸载本应用。
+The app is provided "as is", without warranty of any kind, express or implied, including but not limited to the
+warranties of merchantability, fitness for a particular purpose and non-infringement.
 
-## 第三方代码与许可
+To the maximum extent permitted by applicable law, the authors and contributors are not liable for any direct or indirect
+loss from using or being unable to use the app, including but not limited to: dropped connections, interrupted
+navigation or calls, data loss, device faults, vehicle system faults, and accidents or losses caused by operating the
+app or being distracted while driving.
 
-- 本仓库 `reference/` 目录（若存在）为**本地参考资料**，已在 `.gitignore` 中排除，
-  不会随本仓库分发。其中参考项目（xcertplay / DiPlay 为 GPL-3.0 等）的源码
-  及许可义务不适用于本仓库。
-- 本项目为独立实现，仅参考公开的协议格式与公开研究成果。
-- **请勿分发从任何固件或设备中提取的密钥、证书或私有素材。**
+Whether you use the app, how you configure and operate it and in which situations is entirely your decision and your
+risk. If you do not agree with any of the above, stop using the app and uninstall it.
 
-## 许可证
+## Third-party code and licenses
 
-本应用源码以 [GNU General Public License v3.0](LICENSE) 发布。本应用基于以 MIT 许可发布的 CarDeck，其许可声明见 [NOTICE](NOTICE)。
+- The repository's `reference/` folder (if present) holds **local reference material**, excluded in `.gitignore` and not
+  distributed with the repository.
+- CarPlay is an independent implementation, written from public protocol formats and public research.
+- Some code is ported under its license, with the original notices kept in [NOTICE](NOTICE): Baidu CarLife and ICCOA
+  CarLink from FT (Apache-2.0), the Android Auto protocol module from AARE (GPL-3.0) with protocol buffer definitions from
+  aasdk (GPL-3.0).
+- **Do not redistribute keys, certificates or private material extracted from any firmware or device together with
+  this project.**
+
+## License
+
+The app's source code is released under the [GNU General Public License v3.0](LICENSE). The app is based on CarDeck,
+released under the MIT license; its license notice is in [NOTICE](NOTICE).
 
 ---
 
-*最后更新：2026-10-18*
+*Last updated: 2026-11-28*

@@ -1,92 +1,147 @@
-## 0.1.42 分屏操作、預設地圖、電池與語音助理
+# Dashboard UX notes
 
-- 分屏地圖卡可直接操作（平移、縮放、點按都注入地圖屏），不再「點地圖卡 → 全屏」。地圖卡內起手的手勢不觸發儀表板左滑；要翻到應用頁從媒體卡或空白處滑。
-- 預設地圖 = 最後使用的地圖：`switchMap` 成功即寫入預設；設定頁移除「切換目前地圖（不改預設）」。
-- Dock 電量改為 CarPlay/iOS 16 樣式電池圖示（`ui/BatteryGlyphView`）：數字鏤空在電池身內，充電綠色 + 閃電，≤20% 紅色。
-- 頁點由合成器畫在地圖/媒體卡之上（GridActivity 快照頁點交給 `DualDisplayComposer.pageDots`），判據 `VirtualLauncher.pageDotsOnTop()`。
-- 語音助理上車（實驗，預設關）：見 AGENTS.md 同日條目。
-- Dock 運行中圖示：快取查不到（啟動入口為 activity-alias，如高德）時依序退到同包名快取 → 系統元件圖示 → 應用圖示；桌面掃描換表後通知 dock 重繪。
+> A change log of the car dashboard (split map / media view), newest first, kept from the CarDeck 0.1.x era. Several
+> early rules were replaced later; the current rules are in AGENTS.md section 12 ("Dashboard layout"), which wins where
+> they differ. Notably: the fixed 3:1 split is now an adaptive ratio from the pane shape
+> (`VirtualLauncher.dashSplitFractionFor`), the "back to playback controls" row became a GL floating button, and
+> paging between dashboard and apps follows the 0.1.35 rule.
 
-## 0.1.39 連線直接進分屏
+## 0.1.42 Split-view interaction, default map, battery and voice assistant
 
-- 新連線先設定分屏為首頁，再啟動 Dock 和桌面；背景啟動預設地圖，回到分屏時沿用已切換的地圖。
-- Android ICU 會拒絕任務解析規則中未跳脫的右大括號，導致地圖、媒體和背景管理的任務操作中斷。規則改用明確的十六進位字元；查詢或解析異常不應阻斷 App 啟動。
+- The split map card can be used directly (pan, zoom and taps are injected into the map display) instead of "tap the
+  map card -> fullscreen". Gestures that start inside the map card do not trigger the dashboard swipe; to page to the
+  apps, swipe from the media card or empty space.
+- Default map = the last used map: a successful `switchMap` writes the default; the settings entry "switch current map
+  (keep default)" was removed.
+- The dock battery is a CarPlay / iOS 16 style battery glyph (`ui/BatteryGlyphView`): the number is cut out inside the
+  battery body, green with a bolt while charging, red at <= 20%.
+- Page dots are drawn by the compositor above the map / media cards (GridActivity hands a snapshot of the dots to
+  `DualDisplayComposer.pageDots`), decided by `VirtualLauncher.pageDotsOnTop()`.
+- Voice assistant on the car (experimental, default off): see AGENTS.md.
+- Running-app icons in the dock: when the cache misses (launch entry is an activity-alias, as in Amap) it falls back to
+  the same-package cache -> system component icon -> application icon; after the desktop scan replaces the table, the
+  dock is told to redraw.
 
-## 0.1.38 地圖及媒體回歸修正
+## 0.1.39 Connecting goes straight to split view
 
-- 桌面、Dock 和分屏的觸控都接受清零的抬手報文。空槽不會影響另一個手勢。
-- 桌面開地圖成功後才切換畫面，回分屏時沿用當前地圖。可用的車機 App 任務會移入對應地圖／媒體區，不移動手機主畫面的任務。
-- Dock 背景應用頁離開即關閉，同時只保留一個管理視窗。
+- A new connection first sets split view as home, then starts the dock and desktop; the default map launches in the
+  background, and returning to split view keeps a map that was switched.
+- Android ICU rejects an unescaped `}` in the task-parsing regexes, which broke task operations of map, media and
+  background management. The regexes use explicit hex escapes; a query or parse error must never block launching an
+  app.
 
-## 0.1.37 Dock 背景應用與地圖搜尋
+## 0.1.38 Map and media regression fixes
 
-- 背景應用入口位於 Dock。本次連線成功開啟的 App 才會列入；斷線清除。清單不依賴系統任務掃描。關閉視窗時仍需查驗車機任務，避免關到手機的視窗。
-- 「切換目前地圖」與「選擇其他已安裝應用」使用相同的搜尋欄、圖示列及單選標記；前者不改預設值。
+- Desktop, dock and split-view touch all accept a lift report with zeroed fields. An empty slot does not affect another
+  gesture.
+- Opening a map from the desktop switches the view only after it succeeded; returning to split view keeps the current
+  map. Usable car app tasks move into the matching map / media area; tasks of the phone's main screen are not moved.
+- Leaving the dock's background apps page closes it, and only one management window exists at a time.
 
-## 0.1.36 背景應用管理
+## 0.1.37 Dock background apps and map search
 
-- 應用頁固定「背景應用」入口；長按 Dock Home 也可開啟。點 App 切換、單獨關閉或全部關閉；返回應用頁。
-- 以實際車機 Task 清單為來源，解析 Samsung `Display #N` 與 Honor `Display: mDisplayId=N`；排除手機主屏、Dock、DroidCar 自身所有 affinity。
-- 關閉僅移除車機視窗，不 force-stop 套件；音樂服務可能繼續播放。執行前重新取 task ID，完成後重讀驗證；失敗顯示可重試訊息。
-- shell 查詢、關閉命令、APK 圖示和名稱讀取都在背景；不以記憶體 runningApps 當真實程序狀態。
+- The background apps entry lives in the dock. Only apps opened successfully during this connection are listed; the
+  list is cleared on disconnect and does not depend on a system task scan. Closing a window still checks the car tasks,
+  so a phone window is never closed.
+- "Switch current map" and "choose another installed app" use the same search field, icon rows and single-choice mark;
+  the former does not change the default.
 
-0.1.35 最新需求：正常分頁順序為儀表盤（0）→應用頁（1+）。儀表盤僅左滑前進；應用第一頁右滑由原生 pager 返回儀表盤。已移除邊界攔截和 onPageSelected 強制退回；用 dashboardUserDragging 區分使用者拖動與自動動畫，使用者拖動不可阻斷 MOVE/UP 注入。拖動期間預覽 GL，IDLE 才提交模式；取消拖動保持原模式。優先於下文單向禁用及雙向同目的地舊約定。
+## 0.1.36 Background app management
 
-0.1.34：實機紀錄顯示有一次右滑已成功觸發，其餘多段為向左滑；儀表盤改為左右橫滑均可返回應用頁，開始追蹤不再依賴注入 pressed 或地圖點按狀態。橫向手勢限制優先於舊版單方向約定。
+- The apps page has a fixed "background apps" entry; long-pressing dock Home opens it too. Tap an app to switch, close
+  one or all; back returns to the apps page.
+- The source is the real car task list, parsing Samsung `Display #N` and Honor `Display: mDisplayId=N`; the phone's
+  main display, the dock and all DroidCar affinities are excluded.
+- Closing removes car windows only, without force-stopping the package; music services may keep playing. Task IDs are
+  re-read before and verified after; failures show a retry message.
+- Shell queries, close commands and APK icon / label loading all run in the background; the in-memory `runningApps` is
+  never taken as the real process state.
 
-0.1.33：整個儀表盤（包含嵌入媒體 App）可右滑返回應用頁；MOVE 達距離即觸發，跨區域保持手勢歸屬，觸發後吞掉剩餘事件，支援抬手座標 0,0。優先於舊媒體區排除約定。
+## 0.1.35 Paging order (current rule)
 
-0.1.32 媒體 App 使用完整區域高度，返回播放控制改為右下角浮動箭頭。
+Normal page order is dashboard (0) -> app pages (1+). The dashboard only swipes left to go forward; the first app page
+swipes right back to the dashboard through the native pager. Boundary interception and forced `onPageSelected` returns
+were removed; `dashboardUserDragging` separates user drags from automatic animations, and a user drag must never block
+MOVE/UP injection. The GL preview runs during the drag, the mode is committed at IDLE, and a cancelled drag keeps the
+mode. This overrides the one-direction and two-direction rules below.
 
-0.1.32 手勢：在地圖卡或播放控制區右滑可回應用頁，使用 Home 相同的分頁動畫；媒體 App 內保留原有滑動操作。
+0.1.34: a real-car log showed one right swipe that triggered and several left swipes; the dashboard then returned to
+the apps page on either horizontal swipe, and tracking no longer depended on injected pressed state or map taps.
 
-## 0.1.32 顯示修正
+0.1.33: the whole dashboard (including an embedded media app) could swipe right back to the apps page; a MOVE past the
+distance triggered it, gesture ownership was kept across areas, remaining events were swallowed after the trigger, and a
+lift at 0,0 was supported.
 
-- Home 分頁動畫只處理 Home 切換；開啟 App／全屏地圖時同步桌面位置不再改寫顯示層。
-- 已在媒體區運行的 App，從桌面或 Dock 再次點擊會回到媒體區，避免 singleTask 複用舊屏後切到空白屏。
-- 地圖首次開啟前套用會話方向相容設定，避免固定直式造成兩側黑邊；斷線撤銷。
-- 實機高德套用前為 FIXED_ORIENTATION，套用並重啟地圖後不再出現此 letterbox 原因。
+0.1.32: media apps got the full area height; "back to playback controls" became a floating arrow at the bottom right.
+A right swipe on the map card or playback controls returned to the apps page with the same page animation as Home;
+swipes inside media apps kept working.
 
-# 儀表板、語言與預設地圖
+## 0.1.32 Display fixes
 
-## 操作
+- The Home page animation handles only the Home switch; syncing the desktop position when opening an app / fullscreen
+  map no longer rewrites the display layer.
+- An app already running in the media area, tapped again from the desktop or dock, returns to the media area (a
+  singleTask app reusing its old display used to switch to a blank screen).
+- The session orientation compatibility override is applied before a map first opens, avoiding black bars from fixed
+  portrait; it is undone on disconnect.
+- On a real car, Amap was FIXED_ORIENTATION before the override; after applying it and restarting the map that
+  letterbox reason was gone.
 
-- 儀表板採用固定 3:1 比例：橫向車機左側地圖、右側媒體；直向車機上方地圖、下方媒體。卡片邊距與中縫不計入比例。
-- 不提供拖曳調整；舊版 `dashSplitFraction` 偏好不再套用。
-- 點地圖卡進入全屏地圖；儀表板上的地圖是入口，觸摸不穿透到地圖 App。
-- 點媒體卡或封面在媒體區域內開啟目前播放器；不離開分屏，不放大到全屏。沒有媒體會話時先用先前選擇的 App，否則嘗試 Spotify、YouTube Music、Apple Music；都不可用時提供已安裝 App 選擇器。
-- 上一首、播放／暫停、下一首各自處理點擊，不觸發全屏。
-- 媒體 App 頂部的「返回播放控制」列可收回 App 並恢復控制卡。Dock 主頁切換儀表板／應用頁；全屏 App／地圖中點主頁回儀表板。
+## Dashboard, language and default map (0.1.30 era)
 
-## 語言
+### Interaction (since replaced, see the note at the top)
 
-設定 → 顯示可選擇跟隨系統、繁體中文、簡體中文、英文。
-Android 13 以上也可從系統的 App 語言設定切換。語言變更由 AppCompat 重建介面，連線由程序級 SessionController 持有。
+- The dashboard used a fixed 3:1 ratio: map left and media right on landscape cars, map on top and media below on
+  portrait cars; card margins and the centre gap were not counted.
+- No drag adjustment; the old `dashSplitFraction` preference is no longer applied.
+- Tapping the map card opened the fullscreen map; the map on the dashboard was an entry point and touches did not reach
+  the map app (replaced in 0.1.42 by direct control).
+- Tapping the media card or cover opens the current player inside the media area, without leaving split view or going
+  fullscreen. With no media session it uses the previously chosen app, otherwise tries Spotify, YouTube Music, Apple
+  Music; if none is available it offers an installed-app picker.
+- Previous, play / pause and next each handle their own taps and never trigger fullscreen.
+- The "back to playback controls" row at the top of the media app closed the app and restored the control card. Dock
+  Home switches dashboard / apps page; Home inside a fullscreen app / map returns to the dashboard.
 
-主要介面、媒體狀態、選單、連線提示與常用對話框使用 Android 字串資源。底層診斷日誌、部分進階系統覆寫提示與免責聲明原文仍保留中文；第三方 App 的語言由該 App 控制。
-新增語言時同步 `values/strings.xml`、`values-en/strings.xml`、`values-b+zh+Hant/strings.xml`、`xml/locales_config.xml` 與設定中的語言清單。
+### Language
 
-## 地圖
+Settings -> Display offers follow system, Traditional Chinese, Simplified Chinese and English. On Android 13+ the
+system's per-app language setting works too. A language change recreates the UI through AppCompat; the connection is
+held by the process-wide `SessionController`.
 
-預設清單新增 Google Maps、Google Maps Go、Waze、HERE WeGo、OsmAnd、Organic Maps、MAPS.ME、Sygic、TomTom，原有高德、百度、騰訊仍保留。
-「選擇其他已安裝應用」可把其他有啟動入口的 App 指定為預設地圖。手動指定的套件會被路由到地圖虛擬螢幕；卸載後回退到預設優先序中可用的地圖。
-支援選擇不代表每個 App 都已實車驗證；第三方 App 是否支援橫屏、視窗尺寸變更與虛擬螢幕，仍取決於該 App。
+The UI, media states, menus, connection hints and common dialogs use Android string resources; diagnostic logs are in
+English (converted 2026-11-21); third-party apps decide their own language. When adding a language, update
+`values/strings.xml`, `values-en/strings.xml`, `values-b+zh+Hant/strings.xml`, `xml/locales_config.xml` and the
+language list in settings.
 
-## 動畫與座標
+### Maps
 
-`LayoutMotion` 提供 320ms smoothstep 曲線。GL 合成器按實際時間更新矩形和圓角，動畫期間也按目標幀率合成；中途反向切換從當前進度繼續。
-地圖全屏與卡片間插值；音樂 App 使用獨立的 CarPlayMedia 虛擬螢幕，大小與媒體卡一致；建屏、繪製與觸摸共享同一份整數矩形。這是合成器上的轉場，第三方 App 的冷啟動與配置重建仍可能增加等待時間。
-地圖螢幕 resize 經背景執行器處理，消費端 SurfaceTexture buffer 同步更新。過渡期間暫停觸摸注入，避免用靜態座標點擊移動中的內容。
+The default list added Google Maps, Google Maps Go, Waze, HERE WeGo, OsmAnd, Organic Maps, MAPS.ME, Sygic and TomTom,
+next to Amap, Baidu and Tencent. "Choose another installed app" can make any app with a launch entry the default map.
+A manually chosen package is routed to the map virtual display; after it is uninstalled the default priority list picks
+an available map. Being selectable does not mean every app was verified in a car; whether a third-party app supports
+landscape, window resizing and virtual displays is up to that app.
 
-## 建置與驗證
+### Animation and coordinates
 
-使用 JDK 17 或 21、Android SDK Platform 34。設定 `ANDROID_HOME` 或在專案根目錄建立 `local.properties`：
+`LayoutMotion` provides a 320 ms smoothstep curve. The GL compositor updates rectangles and corners by real time and
+composes at the target frame rate during the animation; reversing midway continues from the current progress. The map
+interpolates between fullscreen and card; music apps use the separate CarPlayMedia virtual display, sized like the
+media card; display creation, drawing and touch share the same integer rectangle. This is a compositor transition; a
+third-party app's cold start or configuration recreation can still add waiting time. Map display resizes run on a
+background executor and the consumer SurfaceTexture buffer is updated with them. Touch injection pauses during the
+transition so static coordinates never tap moving content.
+
+### Build and verification
+
+Use JDK 17 or 21 and Android SDK Platform 34 or later. Set `ANDROID_HOME` or create `local.properties` in the project
+root:
 
 ```properties
 sdk.dir=D:/Android/Sdk
 ```
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
 .\gradlew.bat assembleStandardDebug
@@ -94,53 +149,88 @@ Windows PowerShell：
 .\gradlew.bat spotlessCheck
 ```
 
-APK 位於 `app/build/outputs/apk/standard/debug/app-standard-debug.apk`。
-正式版使用 `assembleStandardRelease` 與既有簽章設定；Debug 簽章不能覆蓋原有正式簽章安裝。
+The APK is at `app/build/outputs/apk/standard/debug/app-standard-debug.apk`. Release builds use
+`assembleStandardRelease` with the existing signing setup; a debug-signed build cannot install over a release-signed
+one.
 
-實車驗證：
+Car checks:
 
-1. 分別使用繁中、英文與系統語言重新開啟手機設定與車機桌面。
-2. 選擇 Google Maps／Waze／自訂地圖，確認分屏與全屏均顯示同一導航任務。
-3. 點地圖卡展開、主頁收合；快速連點與反向切換時確認無錯位或誤觸。
-4. Spotify 播放／暫停各測一次；無封面時點媒體卡仍須能開啟播放器。
-5. 逐一點媒體控制鍵，確認不會開啟播放器。
-6. 測試橫向與直向車機、100% 與其他解析度縮放，確認按鈕與座標正確。
+1. Reopen the phone settings and car desktop in Traditional Chinese, English and the system language.
+2. Pick Google Maps / Waze / a custom map and confirm split view and fullscreen show the same navigation task.
+3. Expand from the map card and collapse with Home; tap quickly and reverse midway and check nothing is misplaced or
+   mis-tapped.
+4. Play / pause Spotify once each; without cover art, tapping the media card must still open the player.
+5. Tap each media control and confirm none opens the player.
+6. Test landscape and portrait cars, 100% and other resolution scales, and check buttons and coordinates.
 
-本次不啟動 Android 模擬器，也不自動安裝到裝置。
+## 2026-11-02 update
 
-## 2026-11-02 更新
+- "Manage desktop apps" got search by name / package name, with case and full-width normalisation and several keywords;
+  searching does not change existing checks.
+- "Choose another map" uses the same dark rounded list rows as the other options, with icons and arrows; the picker is
+  always dark.
+- After opening another map app from the desktop or dock, returning to the dashboard keeps that choice instead of going
+  back to the default map.
+- While connected, Settings -> Default map gained "switch current map (keep default)", switching the app on the same
+  map display without reconnecting; the persisted default and the session choice are separate (removed again in
+  0.1.42).
+- Settings -> Display "swap map and music positions" applies at once and is saved. It only swaps positions and keeps
+  the ratio; dragging did not come back.
+- Self-drawn media control buttons grew to 56 dp with less icon padding and space. Third-party music apps decide their
+  own layout.
 
-- 「管理桌面應用」新增名稱／套件名稱搜尋。支援大小寫與全形英文正規化、多個關鍵字；搜尋不變更原有勾選。
-- 「選擇其他地圖」使用與原有選項相同的深色圓角列表列，配圖示與箭頭；選擇器固定深色。
-- 在桌面或 Dock 開啟另一個地圖 App 後，返回儀表板沿用本次選擇，不會自動換回預設地圖。
-- 連線中，設定 → 預設地圖增加「切換目前地圖（不改預設）」，可在原地圖屏切換 App，不需要重連；持久化預設與當前會話選擇分開處理。
-- 設定 → 顯示的「對調地圖與音樂位置」立即生效並保存。只交換位置，維持原本固定比例，沒有恢復拖曳。
-- 自繪媒體控制按鈕高度增至 56dp、減少圖示內距與空白。第三方音樂 App 內部版面由該 App 決定。
+### WinPlay sound diagnosis
 
-### WinPlay 聲音診斷
+The phone log showed WinPlay's audio SETUP answered 200 and data flowing, but the PCM samples were all zero. Restoring
+the phone volume still gave zeros, so the phone being muted was not the whole story.
 
-手機日誌顯示 WinPlay 音訊 SETUP 回覆 200、資料持續送出，但 PCM 樣本一直全零。暫時恢復手機音量後仍全零，因此不能把問題完全歸因於手機靜音。
+This version first tries capturing system output (REMOTE_SUBMIX) through the authorised Shizuku UserService and pipes
+the PCM into the existing AAC/PCM encoding and AirPlay sending; the microphone is never used. If system capture cannot
+start, it falls back to the original MediaProjection playback capture. Platform references:
+[Android REMOTE_SUBMIX](https://developer.android.com/reference/android/media/MediaRecorder.AudioSource#REMOTE_SUBMIX),
+[scrcpy audio source notes](https://github.com/Genymobile/scrcpy/blob/master/doc/audio.md#source).
 
-本版優先嘗試透過已授權的 Shizuku UserService 擷取系統輸出（REMOTE_SUBMIX），把 PCM 經管線送回原有 AAC/PCM 編碼及 AirPlay 傳送流程；不使用麥克風。若系統擷取無法啟動，回退到原本 MediaProjection 播放擷取。參考平台機制：[Android REMOTE_SUBMIX](https://developer.android.com/reference/android/media/MediaRecorder.AudioSource#REMOTE_SUBMIX)、[scrcpy 音訊來源說明](https://github.com/Genymobile/scrcpy/blob/master/doc/audio.md#source)。
+Zeroing the whole STREAM_MUSIC volume by default is avoided. The explicit mute option stays in Settings -> Display,
+applies only to the playback-capture fallback and is off by default; some phones may still play out loud.
 
-已避免預設將整個 STREAM_MUSIC 音量歸零。顯式靜音選項仍保留在設定 → 顯示，僅適用原有播放擷取回退模式，預設關閉；部分手機可能同時外放。
+Device probe: at first both captures were all zero; after skipping to the next track in Spotify, system output capture
+got 114,688 samples, 97,989 non-zero, peak 8,628, while playback capture stayed zero. The new source is verified to get
+Spotify's sound; the final playback of the new APK on WinPlay over AirPlay still needs an end-to-end test. If a newly
+created system capture is still all zero, skipping a track rebuilds the source track.
 
-實機探測：最初兩種擷取均全零；在 Spotify 切到下一首後，系統輸出擷取取得 114,688 個樣本，其中 97,989 個非零，峰值 8,628；同時原有播放擷取仍為零。已驗證新來源能取得 Spotify 聲音，但新版 APK 經 AirPlay 傳到 WinPlay 的最終播放仍需端到端實測。若新建系統擷取後仍全零，可先切歌以重建來源音軌。
+New checks: in both position layouts the media app must be usable, map taps expand correctly and the dock is
+unaffected; after switching Amap / Google Maps, returning to the dashboard keeps the choice; no CarPlayMedia display or
+system audio recording may remain after disconnect.
 
-新增實測項目：兩種位置布局都要確認媒體 App 可操作、地圖點按展開正確、Dock 不受影響；切換高德／Google Maps 後返回儀表板需保留選擇；斷線後不可遺留 CarPlayMedia 螢幕或系統音訊錄製。
+2026-11-02 ratio tweak: map / music fixed at 3:1 (music shrank from about 33% to 25%, card gap not counted); swapping
+positions keeps each share. Media display size, GL rectangles and touch areas use the same ratio; a reconnect applies
+the new virtual display sizes. (Replaced later by the adaptive ratio.)
 
-2026-11-02 比例微調：地圖／音樂固定為 3:1（音樂由約 33% 縮至 25%，不計卡片間距），位置對調後仍維持各自占比。媒體屏尺寸、GL 矩形與觸摸區域同步使用此比例。重新連線套用新虛擬螢幕尺寸。
+## 0.1.31 ANR, navigation and touch fixes
 
-## 0.1.31：ANR、導航與觸控修正
+Two ANR stacks from the device's Dropbox (01:15:47 and 01:16:56, 0.1.30) pointed at the same problem: the main thread
+read other APKs' labels / icons in `GridActivity.onResume -> reload -> VirtualLauncher.scanLaunchableApps`, and APK
+resource loading took more than 10 s under memory pressure.
 
-實機 Dropbox 的兩份 ANR 堆疊（01:15:47、01:16:56，0.1.30）均指向同一問題：主執行緒在 `GridActivity.onResume → reload → VirtualLauncher.scanLaunchableApps` 內讀取其他 APK 的標籤／圖示，APK 資源載入在記憶體壓力下超過 10 秒。
+Fix: cold scans moved to a background job with one shared cache and serialised cold scans; the icon cache is
+uniformly 144 px bitmaps instead of keeping many original adaptive icons. The media app picker also reads its list in
+the background, with a loading indicator, without blocking the home page.
 
-修正：冷掃描改為背景工作，共用單一快取並串行冷掃描；圖示快取統一為 144px 位圖，避免保留大量原始自適應圖示。媒體 App 選擇器也只在背景讀取清單；掃描中有載入指示，不阻塞主頁事件。
+- Media apps got a "back to playback controls" row at the top, not covered by the GL media layer (later replaced by the
+  floating button).
+- Dock Home always switches apps page / dashboard with the native ViewPager2 horizontal animation. Map, media app and
+  control card share the page scroll progress; when leaving, layers hide only after the slide reaches its end, and list
+  rebinding waits until the animation ends.
+- The dashboard did not allow swiping to the apps page, and the first app page could not swipe past its edge to the
+  dashboard (replaced by the 0.1.35 rule). Paging inside the apps pages still works.
+- The old TouchRouter split "left / top is always the map" was removed; dashboard taps are judged only by the real
+  `PaneBounds`, and direct map injection is only for fullscreen. Tests cover landscape / portrait and both swapped
+  positions.
+- Car notification banners: enabled in the phone home page -> Quick settings, default off, need the existing
+  notification access. They show the app, title and text for 5 s; tap opens the app, the top-right closes. Own,
+  ongoing, group-summary and media notifications are filtered; no message preview while locked. Content is never
+  logged or stored.
 
-- 媒體 App 頂部新增「返回播放控制」，此列不被 GL 媒體層覆蓋。
-- Dock 主頁現在固定切換應用頁／儀表板，使用原生 ViewPager2 平順橫向動畫。地圖、媒體 App 與控制卡共用頁面捲動進度，退出時在滑到終點後才隱藏圖層；動畫中延後清單重綁。
-- 儀表板禁止手勢切換到應用頁；第一個應用頁也不能手勢越界到儀表板。應用頁內部仍可翻頁。
-- 移除 TouchRouter 對「左邊／上方永遠是地圖」的舊分流，只以實際 PaneBounds 判斷儀表板點擊；直接地圖注入僅供全屏模式。測試涵蓋橫／直向與兩種對調位置。
-- 車機通知橫幅：在手機主頁 → 快速設定開啟，預設關閉，需要原有通知使用權。顯示 App、標題和內容 5 秒；點擊開啟 App，右上角關閉。過濾自己的通知、常駐、群組摘要及媒體通知；鎖屏時不顯示訊息預覽。內容不寫入日誌或儲存。
-
-驗證：新增觸控區域、跨頁邊界、動畫層進度、通知過濾測試；Android 建置、單元測試與 Lint。WinPlay 桌面控制未獲工具授權，因此桌面上的連續動畫觀感仍需使用者實測。
+Verification: new tests for touch areas, page boundaries, animation layer progress and notification filtering; Android
+build, unit tests and Lint. Continuous animation on the WinPlay desktop could not be checked by the tools, so it still
+needs the user's test.

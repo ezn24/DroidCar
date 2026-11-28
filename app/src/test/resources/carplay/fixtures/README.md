@@ -1,28 +1,30 @@
-# 车型重放 fixtures
+# Car replay fixtures
 
-由 `tools/extract_car_fixtures.py` 从真实运行日志提取（`*.jsonl`），供
-`replay/BtLinkReplayTest`、`replay/TunnelReplayTest` 做跨车型回归：改某车型的
-协议后，其它车型的录制刺激必须得到与录制一致的应答。
+Extracted from real run logs by `tools/extract_car_fixtures.py` (`*.jsonl`) for `replay/BtLinkReplayTest` and
+`replay/TunnelReplayTest`, the cross-car regression: after changing the protocol for one car, every other car's recorded
+stimuli must still get the recorded answers.
 
 ```bash
 python3 tools/extract_car_fixtures.py ~/logs/droidcar -o app/src/test/resources/carplay/fixtures
 ./gradlew testStandardDebugUnitTest --tests '*Replay*'
 ```
 
-**`*.jsonl` 默认 gitignore**：含车机蓝牙地址、热点名、配对公钥等真实数据。需要入册
-作为公共回归样本时逐个评审、脱敏（SSID 可化名；MAC 参与协议校验勿改）后再解除忽略。
-无 fixture 时两个测试自动跳过（新鲜克隆不受影响）。
+**`*.jsonl` is gitignored by default**: the files hold real data (head-unit Bluetooth addresses, hotspot names, pairing
+public keys). To add one as a public regression sample, review and redact it file by file first (SSIDs may be renamed;
+leave MAC addresses alone, the protocol checks them), then un-ignore it. Without fixtures both tests skip themselves
+(fresh clones are not affected).
 
-## 断言分级（提取时自动判定，写在每轮的 rxHasIdent 字段）
+## Assertion tiers (decided at extraction, stored per round in the rxHasIdent field)
 
-- RAW 转储预算旧值 512B/方向，常把识别帧（奥迪 575B、吉利 489B）拦腰截断；更隐蔽的是
-  截断会把**不同 read 的尾巴拼成「长度恰好完整」的伪帧**（载荷校验和不过、引擎静默
-  丢弃——重放调试实测发现）。提取器按引擎同款校验（帧头/载荷求和为零）逐帧验证，
-  第一个坏帧起全部裁掉并标 `rxHasIdent`，此类轮只做**链路层断言**（SYN/采纳会话表/
-  识别启动 0x1D00 必须与录制一致）；
-- 识别帧完整幸存（`rxHasIdent=true`）→ **全量断言**：录制 distinct CSM 序列必须是
-  回放的有序前缀；
-- 隧道层：录制序列必须是回放的**有序子序列**（放行有意新增的应答，如 MIB3 突发，
-  捕捉少答/乱序）；
-- 预算已提至 4096B（`Iap2LinkChannel.RAW_DUMP_LIMIT*`）——新日志的识别/MFi/凭据
-  全程可录，fixture 自动升级为全量断言。
+- The old RAW dump budget of 512 B per direction often cut the identification frame in half (Audi 575 B, Geely 489 B).
+  Worse, truncation can **splice the tails of different reads into a fake frame of exactly the right length** (payload
+  checksum fails and the engine drops it silently; found while debugging replays). The extractor checks every frame the
+  way the engine does (header / payload sums to zero), cuts everything from the first bad frame and marks
+  `rxHasIdent`; such rounds get **link-layer assertions** only (SYN / adopted session table / identification start
+  0x1D00 must match the recording).
+- Identification frame intact (`rxHasIdent=true`) -> **full assertions**: the recorded distinct CSM sequence must be an
+  ordered prefix of the replay.
+- Tunnel layer: the recorded sequence must be an **ordered subsequence** of the replay (allows deliberate additions such
+  as the MIB3 burst, catches missing or reordered answers).
+- The budget is now 4096 B (`Iap2LinkChannel.RAW_DUMP_LIMIT*`): new logs capture identification / MFi / credentials in
+  full, and their fixtures get full assertions automatically.
