@@ -169,6 +169,8 @@ android {
 }
 
 dependencies {
+    // Android Auto Projection protocol, ported from AARE (GPL-3.0), see aap/build.gradle.kts
+    implementation(project(":aap"))
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     // CarPlay-style desktop: paged grid

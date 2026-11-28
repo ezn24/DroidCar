@@ -11,8 +11,9 @@ and includes the wireless adapter work of https://github.com/zz85/cardeck. That
 code was released under the MIT License below; its copyright and permission
 notice are kept as the MIT License requires.
 
-The Baidu CarLife protocol code under app/src/main/java/io/github/ezn24/droidcar/carlife/
-is ported from FT, used under the Apache License, Version 2.0. Its NOTICE reads:
+The Baidu CarLife protocol code under app/src/main/java/io/github/ezn24/droidcar/carlife/ and the
+ICCOA CarLink code under app/src/main/java/io/github/ezn24/droidcar/iccoa/ (with its tests)
+are ported from FT, used under the Apache License, Version 2.0. Its NOTICE reads:
 
     FT
     Copyright 2026 OneAboveAll1964
@@ -48,3 +49,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Android Auto
+------------
+The Android Auto Projection protocol module under aap/ and the code under
+app/src/main/java/io/github/ezn24/droidcar/aa/transport/ and .../aa/cert/ are ported from
+AARE (https://github.com/prototux/AARE), licensed under the GNU General Public License v3.0.
+The protocol buffer definitions under aap/src/main/proto/ come from aasdk
+(https://github.com/opencardev/aasdk), Copyright (C) 2018 f1x.studio (Michal Szwaj) and the
+OpenCarDev community, GPL-3.0-or-later, with AARE's changes (see aap/src/main/proto/NOTICE.md).

@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- 无线 CarPlay 全链路：蓝牙 RFCOMM（iAP2 控制通道）+ WiFi（热点加入 / mDNS） -->
+    <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
@@ -65,6 +66,21 @@
              已填热点 SSID、正在显示的弹窗），系统重建会把它们全部丢掉。
              声明 configChanges 后 Activity 不重建、视图状态原样保留；
              依赖屏幕尺寸的弹窗窗口在 onConfigurationChanged 里重算。 -->
+        <!-- Android Auto over USB: a head unit switches the phone into accessory mode (AOA) -->
+        <activity
+            android:name=".aa.UsbAccessoryActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
+                android:resource="@xml/aa_accessory_filter" />
+        </activity>
+
         <!-- First-run setup guide (also reachable from the Car tab) -->
         <activity
             android:name=".setup.SetupActivity"

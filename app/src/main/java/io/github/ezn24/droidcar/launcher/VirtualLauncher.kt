@@ -39,6 +39,8 @@ import io.github.ezn24.droidcar.util.Bg
  * (translated).
  */
 object VirtualLauncher {
+    private const val HI_WIDEN_DELAY_MS = 500L
+    private const val HI_NARROW_SETTLE_MS = 2_000L
     private const val TAG = "VirtualLauncher"
 
     /**
@@ -857,6 +859,69 @@ object VirtualLauncher {
     var hiFullWidth = false
         private set
 
+    /**
+     * Whether this session's supersampled display may span the dock strip at all (side dock, landscape). It does only while
+     * DroidCar's own desktop is on it: another app laid out on the full width had its left edge hidden under the dock
+     * (WeChat's chat list, 2026-11-28), so [setHiWide] narrows it to the app area before such an app opens and widens it
+     * again when the desktop comes back.
+     */
+    @Volatile
+    private var hiCanBeWide = false
+    private var hiDensityDpi = 0
+    private var hiAppWidth = 0
+
+    private val hiResizeExecutor =
+        java.util.concurrent.Executors
+            .newSingleThreadExecutor()
+
+    /** Set by GridActivity onResume / onPause. */
+    @Volatile
+    var desktopInFront = false
+
+    @Volatile
+    private var hiNarrowedAt = 0L
+
+    /**
+     * Desktop on the supersampled display came to the front: give it the full width again (background). Narrowing makes
+     * the desktop recreate and resume once while the app is still opening, so wait a moment and only widen while the
+     * desktop is really in front and not right after a narrow.
+     */
+    fun onDesktopResumed() {
+        if (!hiCanBeWide || hiFullWidth) return
+        hiResizeExecutor.execute {
+            Thread.sleep(HI_WIDEN_DELAY_MS)
+            if (desktopInFront && SystemClock.uptimeMillis() - hiNarrowedAt > HI_NARROW_SETTLE_MS) setHiWide(true)
+        }
+    }
+
+    @Synchronized
+    private fun setHiWide(wide: Boolean) {
+        val id = appHiDisplayId
+        if (!hiCanBeWide || id < 0 || wide == hiFullWidth) return
+        val w = (((hiAppWidth + if (wide) dockWidthPx else 0) * hiScale).toInt() / 2) * 2
+        val h = appHiDisplayH
+        if (w <= 0 || h <= 0) return
+        val applied =
+            runCatching {
+                if (displaysViaService) {
+                    CarInputClient.service?.resizeDisplay(id, w, h, hiDensityDpi) == true
+                } else {
+                    val display = appHiDisplay ?: return@runCatching false
+                    display.resize(w, h, hiDensityDpi)
+                    true
+                }
+            }.getOrDefault(false)
+        if (!applied) {
+            logSink?.invoke("LAUNCHER: supersampled display resize to ${w}x$h failed")
+            return
+        }
+        appHiDisplayW = w
+        hiFullWidth = wide
+        if (!wide) hiNarrowedAt = SystemClock.uptimeMillis()
+        composer?.resizeHiInput(w, h, wide)
+        logSink?.invoke("LAUNCHER: supersampled display ${if (wide) "full width (desktop)" else "app area (app)"} -> ${w}x$h")
+    }
+
     /** Stream x of [displayId]'s left edge: 0 for the full-width supersampled display, the dock width for other app displays. */
     fun displayOriginX(displayId: Int): Int =
         when {
@@ -1264,6 +1329,8 @@ object VirtualLauncher {
         // pages and the music card can slide under the glass dock and be seen blurred through it (user request 2026-11-26).
         // Its content keeps the app-area layout: the desktop pads its pages by the dock width (see gridContentInsetPx).
         hiFullWidth = landscapeApp && !dockAtBottom
+        hiCanBeWide = hiFullWidth
+        hiAppWidth = appWidth
         val appHiWidth = ((appWidth + if (hiFullWidth) dockWidthPx else 0) * appScaleFactor).toInt()
         val appHiHeight = (appHeightPx * appScaleFactor).toInt()
         this.hiScale = appScaleFactor
@@ -1274,6 +1341,7 @@ object VirtualLauncher {
             } else {
                 appPortraitDensity
             }
+        hiDensityDpi = appHiDensity
         // Native app-display density: keep the **same logical size** as the supersampled display (app layout is unaffected by the display
         // it is on,
         // supersampling is only a render-resolution difference). Landscape: native 1034x540 @~200dpi = 827x432dp,
@@ -1846,6 +1914,7 @@ object VirtualLauncher {
         dashLayout = DashLayout.SIDE_BY_SIDE
         hiScale = 1f
         hiFullWidth = false
+        hiCanBeWide = false
         streamWidthPx = 0
         streamHeightPx = 0
     }
@@ -2715,6 +2784,8 @@ object VirtualLauncher {
                 appHiDisplayId >= 0 &&
                 SupersamplePrefs.shouldSupersample(ctx, component)
         val targetDisplay = if (wantHi) appHiDisplayId else appDisplayId
+        // Another app on the supersampled display gets the app area only, never the strip under the dock
+        if (wantHi && component.packageName != ctx?.packageName) setHiWide(false)
         // Chat mode: before a chat app launches, set the target display to tablet density (it starts directly in two-pane, without
         // flashing the phone version once); restore for other apps
         if (ctx != null) ChatMode.beforeLaunch(ctx, targetDisplay, component.packageName) { logSink?.invoke(it) }

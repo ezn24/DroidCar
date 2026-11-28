@@ -11,7 +11,7 @@
 
 ---
 
-DroidCar is a modified version based on [CarDeck](https://github.com/shaonialife/cardeck). The phone (no root needed) acts as a CarPlay sender: it streams its own car launcher and the apps on your phone to a head unit that supports wireless CarPlay, and touches on the head unit are sent back to the phone.
+DroidCar is a heavily reworked version of [CarDeck](https://github.com/shaonialife/cardeck). The phone (no root needed) acts as a CarPlay sender: it streams its own car launcher and the apps on your phone to a head unit that supports wireless CarPlay, and touches on the head unit are sent back to the phone. Baidu CarLife, ICCOA CarLink and Android Auto head units have experimental support too, with the same car launcher.
 
 > **Unofficial project**: not affiliated with Apple Inc. or any car manufacturer, not authorized or certified, and **not an MFi product**. CarPlay and AirPlay are trademarks of Apple Inc., mentioned only to describe compatibility.
 >
@@ -59,6 +59,7 @@ The layout adapts to the head unit's resolution: wide screens split side by side
 - **Dock**: shows time, signal, Wi-Fi and battery (green while charging); running apps can be switched or closed from "Recent apps" on the home grid.
 - **Car wallpapers**: built-in wallpapers, set separately for dark and light mode and switched automatically with the phone; you can also pick your own photo.
 - **Phone UI**: Material Design 3 with three tabs at the bottom — Connect / Car / Diagnostics; follows the phone's dark/light mode and system accent color.
+- **Several head-unit protocols**: one Connect waits for CarPlay, Baidu CarLife, ICCOA CarLink and Android Auto head units at the same time; the first one that connects stops the others, and the connection ends with the projection. The last three are experimental, see the [Roadmap](#roadmap).
 - **Languages**: Traditional Chinese, Simplified Chinese and English, switchable under **Car settings → Display → Language**.
 - **Car screen capture**: one tap on the Diagnostics tab saves the current head-unit screen as a PNG (in Download/DroidCar).
 - **Car microphone**: when any app starts recording (voice search, voice messages, Gemini, WhatsApp / Telegram / WeChat calls…), audio comes from the car's microphone instead, and the phone mic is restored afterwards (verified with WinPlay; not yet tested in a real car).
@@ -83,9 +84,9 @@ The layout adapts to the head unit's resolution: wide screens split side by side
 | Protocol | Cars | Status |
 | --- | --- | --- |
 | Apple CarPlay (wireless) | Most cars, wireless adapters | ✅ Available |
-| Baidu CarLife | Chinese-market cars (Toyota, Honda, VW China…) | 🚧 In progress (protocol core done) |
-| ICCOA CarLink (Xiaomi CarWith, OPPO, vivo) | Newer Chinese cars | 📋 Planned |
-| Android Auto | Most cars | 📋 Planned (cars with Google's receiver may reject non-Google certificates) |
+| Baidu CarLife | Chinese-market cars (Toyota, Honda, VW China…) | 🧪 Experimental (wireless session done, untested on a car) |
+| ICCOA CarLink (Xiaomi CarWith, OPPO, vivo) | Newer Chinese cars | 🧪 Experimental (ported, untested on a car) |
+| Android Auto | Most cars | 🧪 Experimental (USB and wireless, untested on a car; strict head units need Google's certificate) |
 | SmartDeviceLink / Ford AppLink | Ford, Lincoln, some Toyota | 🔍 Evaluating |
 | Huawei HiCar, WeLink, EasyConnection | Chinese / aftermarket units | ❌ No public specification |
 
@@ -100,7 +101,7 @@ The layout adapts to the head unit's resolution: wide screens split side by side
 
 - An Android 12+ phone ("Force landscape" needs Android 14+)
 - [Shizuku](https://shizuku.rikka.app/) installed and running (started via wireless debugging, no root). Virtual displays, touch injection and audio capture all go through it; the app can't connect without it
-- A head unit with wireless CarPlay, already paired with the phone over Bluetooth
+- A head unit with wireless CarPlay, already paired with the phone over Bluetooth; or a Baidu CarLife, ICCOA CarLink or Android Auto head unit (experimental)
 
 ## How to use
 
@@ -108,6 +109,17 @@ The layout adapts to the head unit's resolution: wide screens split side by side
 2. Start Shizuku and grant access from the DroidCar home screen.
 3. Turn on wireless CarPlay (pairing mode) on the head unit, then tap **Start connection** on the phone.
 4. Once connected the head unit shows the dashboard. Car-side settings are on the phone's Car tab or in the settings app on the head unit.
+
+## Testing status
+
+DroidCar is developed and checked mainly on these benches; real-car testing is still in progress:
+
+- **CarPlay**: ChairPlay (main bench, including the cluster screen and the knob), WinPlay (Windows), DiPlay (Android)
+- **Android Auto**: the Desktop Head Unit (DHU) from Android Studio, and AARE's desktop head unit (`adb forward tcp:5277 localabstract:aare_hu`)
+- **Baidu CarLife**: [carlife_pc_tool](https://github.com/MeshHun/carlife_pc_tool) (LAN mode)
+- **ICCOA CarLink**: no wireless bench available yet
+
+Features marked "not yet tested in a real car" were only checked on these benches.
 
 ## Building from source
 
@@ -141,7 +153,12 @@ See the [dashboard guide](docs/DASHBOARD-UX.md) for detailed usage and testing; 
 
 ### Protocol references
 
-DroidCar is an independent implementation. The projects below were studied for protocol facts and timing only; no code from the GPL-licensed or unlicensed ones is copied.
+DroidCar's CarPlay is an independent implementation. Some code for the other protocols is ported under its license, with the original notices kept (see [NOTICE](NOTICE)):
+
+- Baidu CarLife and ICCOA CarLink: ported from [FT](https://github.com/OneAboveAll1964/ft-app) (Apache-2.0)
+- Android Auto: protocol module ported from [AARE](https://github.com/prototux/AARE) (GPL-3.0), protobuf definitions from [aasdk](https://github.com/opencardev/aasdk) (GPL-3.0)
+
+The projects below were studied for protocol facts and timing only; apart from the ports above, no code from GPL-licensed or unlicensed projects is copied.
 
 | Project | Role | Used for |
 | --- | --- | --- |
@@ -152,6 +169,9 @@ DroidCar is an independent implementation. The projects below were studied for p
 | [Nitsuya/AADisplay](https://github.com/Nitsuya/AADisplay) (GPL-3.0) | Virtual-display launcher | Audi MIB3 Wi-Fi iAP2 tunnel timing |
 | [amineross/showcase](https://github.com/amineross/showcase) (GPL-3.0), [wiomoc/iap2](https://github.com/wiomoc/iap2) | Receiver implementations | Cross-checking iAP2 message lists |
 | [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) (Apache-2.0) | Screen mirroring | Turning off the phone panel while displays stay on |
+| [MeshHun/carlife_pc_tool](https://github.com/MeshHun/carlife_pc_tool) | CarLife head-unit simulator | Head-unit handshake order, bench |
+| [xhcoding1998/Carlink](https://github.com/xhcoding1998/Carlink) | ICCOA CarLink receiver | Wireless network types, channel directions |
+| [PiggyBackBayonet/MiAuto](https://github.com/PiggyBackBayonet/MiAuto) (AGPL-3.0) | ICCOA head-unit side | Real-phone behaviour notes |
 
 ### Libraries
 

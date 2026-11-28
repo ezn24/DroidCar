@@ -103,6 +103,17 @@ object AltScreenCard {
         return if (end <= 0) "" else text.substring(0, end) + "…"
     }
 
+    /** The maneuver arrow alone, white on transparent (CarLife HUD turn icon). */
+    fun maneuverIcon(
+        info: NavInfo,
+        size: Int,
+    ): android.graphics.Bitmap {
+        val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val inset = size * 0.08f
+        drawManeuver(Canvas(bitmap), info, RectF(inset, inset, size - inset, size - inset))
+        return bitmap
+    }
+
     /** Generic arrow: a stem from the bottom that bends towards the exit angle; U-turn, roundabout and arrival get their own shapes. */
     private fun drawManeuver(
         canvas: Canvas,

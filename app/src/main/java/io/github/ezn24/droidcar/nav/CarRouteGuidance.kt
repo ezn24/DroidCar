@@ -69,7 +69,24 @@ object CarRouteGuidance {
     }
 
     /** Whether navigation is enabled and any head unit wants guidance. */
-    val isWanted: Boolean get() = enabled && subscriptions.isNotEmpty()
+    val isWanted: Boolean get() = enabled && (subscriptions.isNotEmpty() || listeners.isNotEmpty())
+
+    /** Non-iAP2 consumers (CarLife HUD): get every reading, keep the sources reading while registered. */
+    private val listeners = ConcurrentHashMap<String, (NavInfo?) -> Unit>()
+
+    fun listen(
+        name: String,
+        listener: (NavInfo?) -> Unit,
+    ) {
+        listeners[name] = listener
+        NavAccessibilityService.onRouteGuidanceWanted()
+        log("NAV-CAR: $name listening for route guidance")
+        schedule(0)
+    }
+
+    fun unlisten(name: String) {
+        if (listeners.remove(name) != null) log("NAV-CAR: $name stopped listening for route guidance")
+    }
 
     /**
      * A source read new navigation info; null = it no longer shows navigation. Fields a reading lacks are carried
@@ -214,7 +231,7 @@ object CarRouteGuidance {
     }
 
     private fun schedule(delayMs: Long) {
-        if (subscriptions.isEmpty() || !scheduled.compareAndSet(false, true)) return
+        if ((subscriptions.isEmpty() && listeners.isEmpty()) || !scheduled.compareAndSet(false, true)) return
         executor.schedule({
             scheduled.set(false)
             runCatching { push() }.onFailure { log("NAV-CAR: update failed - ${it.message}") }
@@ -228,6 +245,7 @@ object CarRouteGuidance {
     private fun push() {
         val info = current()
         runCatching { onInfo?.invoke(info) }
+        listeners.values.forEach { l -> runCatching { l(info) } }
         val navigating = info != null
         for (subscription in subscriptions.values) {
             for (frame in framesFor(subscription, force = false)) {

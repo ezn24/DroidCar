@@ -1,0 +1,605 @@
+package net.prototux.aare.aap
+
+import aap_protobuf.service.control.message.AudioFocusNotificationOuterClass.AudioFocusNotification
+import aap_protobuf.service.control.message.AudioFocusRequestTypeOuterClass.AudioFocusRequestType
+import aap_protobuf.service.control.message.AudioFocusStateTypeOuterClass.AudioFocusStateType
+import aap_protobuf.service.control.message.ByeByeReasonOuterClass.ByeByeReason
+import aap_protobuf.service.control.message.ByeByeResponseOuterClass.ByeByeResponse
+import aap_protobuf.service.control.message.ChannelOpenResponseOuterClass.ChannelOpenResponse
+import aap_protobuf.service.control.message.ServiceDiscoveryResponseOuterClass.ServiceDiscoveryResponse
+import aap_protobuf.service.inputsource.message.FeedbackEventOuterClass.FeedbackEvent
+import aap_protobuf.service.inputsource.message.InputReportOuterClass.InputReport
+import aap_protobuf.service.media.sink.message.VideoConfigurationOuterClass.VideoConfiguration
+import aap_protobuf.service.media.video.message.VideoFocusModeOuterClass.VideoFocusMode
+import aap_protobuf.service.navigationstatus.message.NavigationDestinationOuterClass.NavigationDestination
+import aap_protobuf.service.navigationstatus.message.NavigationNextTurnEventOuterClass.NavigationNextTurnEvent
+import aap_protobuf.service.navigationstatus.message.NavigationStateOuterClass.NavigationState
+import aap_protobuf.service.navigationstatus.message.NavigationStatusOuterClass.NavigationStatus
+import aap_protobuf.service.sensorsource.message.SensorBatchOuterClass.SensorBatch
+import aap_protobuf.service.sensorsource.message.SensorTypeOuterClass.SensorType
+import aap_protobuf.shared.MessageStatusOuterClass.MessageStatus
+import net.prototux.aare.aap.cert.SelfSignedCertificate
+import net.prototux.aare.aap.channels.AudioChannel
+import net.prototux.aare.aap.channels.InputChannel
+import net.prototux.aare.aap.channels.MediaPlaybackChannel
+import net.prototux.aare.aap.channels.MicrophoneChannel
+import net.prototux.aare.aap.channels.NavigationStatusChannel
+import net.prototux.aare.aap.channels.SensorChannel
+import net.prototux.aare.aap.channels.VideoChannel
+import net.prototux.aare.aap.sim.HeadUnitSimulator
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+open class SessionLoopbackTest {
+
+    /** Whether the simulated head unit leaves out fields that are 0, like a proto3 encoder. */
+    protected open val omitZeroFields = false
+
+    /** The protocol minor version the simulated head unit announces (1.x). */
+    protected open val headUnitMinor = 6
+
+    /** Whether the phone opens the sensor channel before the others (a vehicles.json quirk). */
+    protected open val sensorChannelFirst = false
+    private val modernNav get() = headUnitMinor >= 6
+
+    private lateinit var hu: HeadUnitSimulator
+    private lateinit var huSocket: Socket
+    private lateinit var phone: AapSession
+    private val running = CountDownLatch(1)
+    private val closed = CountDownLatch(1)
+    private val videoStarted = CountDownLatch(1)
+    private val focusGained = CountDownLatch(1)
+    private val inputs = LinkedBlockingQueue<InputReport>()
+    private val sensors = LinkedBlockingQueue<SensorBatch>()
+    private val micData = CountDownLatch(1)
+    private val audioFocus = LinkedBlockingQueue<AudioFocusNotification>()
+    private var video: VideoChannel? = null
+    private var mic: MicrophoneChannel? = null
+    private var nav: NavigationStatusChannel? = null
+    @Volatile private var input: InputChannel? = null
+    private val audio = mutableListOf<AudioChannel>()
+    private val encoding = AtomicBoolean(false)
+    @Volatile private var closeError: Throwable? = null
+    @Volatile private var closeReason: String? = null
+
+    @Before
+    fun setUp() {
+        val server = ServerSocket(0)
+        huSocket = Socket("127.0.0.1", server.localPort)
+        val phoneSocket = server.accept()
+        server.close()
+
+        hu = HeadUnitSimulator(SocketTransport(huSocket), maxUnacked = 2, omitZeroFields = omitZeroFields, protocolMinor = headUnitMinor)
+        val id = SelfSignedCertificate.generate("phone")
+        phone = AapSession(
+            InterruptibleCloseTransport(SocketTransport(phoneSocket)),
+            PhoneIdentity(id.certificate, id.keyPair.private),
+            PhoneDescription(deviceName = "Test phone", label = "AARE", instanceId = "test-1"),
+            callbacks = Callbacks(),
+        )
+        phone.start()
+        hu.start()
+    }
+
+    @After
+    fun tearDown() {
+        encoding.set(false)
+        hu.stop()
+    }
+
+    private inner class Callbacks : AapSession.Callbacks {
+        override fun onServiceDiscovery(session: AapSession, response: ServiceDiscoveryResponse): List<ServiceChannel> =
+            response.channelsList.also { session.sensorChannelFirst = sensorChannelFirst }.mapNotNull { s ->
+                when {
+                    s.hasMediaSinkService() && s.mediaSinkService.videoConfigsCount > 0 -> VideoChannel(s, VideoListener()).also { video = it }
+                    s.hasMediaSinkService() -> AudioChannel(s).also { audio += it }
+                    s.hasMediaSourceService() -> MicrophoneChannel(s, object : MicrophoneChannel.Listener {
+                        override fun onMicData(data: ByteArray, offset: Int, length: Int, timestampUs: Long) = micData.countDown()
+                    }).also { mic = it }
+                    s.hasInputSourceService() -> InputChannel(s, object : InputChannel.Listener {
+                        override fun onInput(report: InputReport) { inputs.add(report) }
+                    }).also { input = it }
+                    s.hasSensorSourceService() -> SensorChannel(s, object : SensorChannel.Listener {
+                        override fun onSensors(batch: SensorBatch) { sensors.add(batch) }
+                    })
+                    s.hasNavigationStatusService() -> NavigationStatusChannel(s).also { nav = it }
+                    s.hasMediaPlaybackService() -> MediaPlaybackChannel(s)
+                    else -> null
+                }
+            }
+
+        override fun onRunning(session: AapSession) = running.countDown()
+        override fun onAudioFocus(session: AapSession, notification: AudioFocusNotification) { audioFocus.add(notification) }
+        override fun onClosed(session: AapSession, reason: String, error: Throwable?) {
+            closeError = error
+            closeReason = reason
+            closed.countDown()
+        }
+    }
+
+    /**
+     * Like the wireless transport, whose close() ends in an interruptible blocking call: it throws
+     * if the closing thread has been interrupted.
+     */
+    private class InterruptibleCloseTransport(private val inner: Transport) : Transport by inner {
+        override fun close() {
+            LinkedBlockingQueue<Unit>().put(Unit)
+            inner.close()
+        }
+    }
+
+    /** Stands in for MediaCodec: a key frame then small P frames, 10 bytes of headroom each. */
+    private inner class VideoListener : VideoChannel.Listener {
+        override fun chooseConfiguration(configs: List<VideoConfiguration>, preferred: List<Int>) = 0
+        override fun onVideoStart(index: Int, config: VideoConfiguration) {
+            videoStarted.countDown()
+            video!!.sendCodecConfig(byteArrayOf(0, 0, 0, 1, 0x67, 1, 2, 3, 0, 0, 0, 1, 0x68, 4), 0, 14)
+        }
+        override fun onVideoFocus(projected: Boolean) {
+            if (!projected) return
+            focusGained.countDown()
+            if (!encoding.compareAndSet(false, true)) return
+            Thread {
+                var n = 0
+                while (encoding.get()) {
+                    val key = n % 30 == 0
+                    val size = if (key) 40_000 else 3_000
+                    val buf = ByteArray(10 + size)
+                    buf[10 + 4] = if (key) 0x65 else 0x41
+                    video!!.sendFrame(buf, 10, size, n * 33_333L, key) {}
+                    n++
+                    Thread.sleep(5)
+                }
+            }.start()
+        }
+        override fun onKeyFrameNeeded() {}
+    }
+
+    @Test
+    fun fullSession() {
+        assertTrue("session should reach RUNNING", running.await(10, TimeUnit.SECONDS))
+        assertEquals("Test phone", hu.phoneRequest!!.deviceName)
+        assertEquals(setOf(1, 2, 3, 4, 5, 6, 7, 8, 9), hu.openedChannels.toSet())
+
+        // video: config chosen, focus granted, frames flow within the ack window
+        assertTrue(videoStarted.await(5, TimeUnit.SECONDS))
+        assertTrue(focusGained.await(5, TimeUnit.SECONDS))
+        assertTrue("frames should reach the head unit", hu.firstVideoFrame.await(5, TimeUnit.SECONDS))
+        Thread.sleep(500)
+        assertTrue("several frames delivered, got ${hu.videoFrames.get()}", hu.videoFrames.get() > 10)
+        assertTrue(hu.codecConfigs.get() >= 1)
+        assertNotNull(hu.videoStart)
+
+        // input: a tap arrives as a touch down + up
+        hu.tap(100, 200)
+        val down = inputs.poll(3, TimeUnit.SECONDS)!!
+        assertEquals(100, down.touchEvent.getPointerData(0).x)
+        assertNotNull(inputs.poll(3, TimeUnit.SECONDS))
+
+        // input: a D-pad key and a rotary detent reach the phone through the same channel
+        // (rotary/D-pad-only units have no touchscreen; keys and detents must still route). #42
+        hu.key(19) // KEYCODE_DPAD_UP
+        val keyDown = inputs.poll(3, TimeUnit.SECONDS)!!
+        assertTrue("expected a key event", keyDown.hasKeyEvent())
+        assertEquals(19, keyDown.keyEvent.getKeys(0).keycode)
+        assertTrue("expected the key down", keyDown.keyEvent.getKeys(0).down)
+        assertFalse("expected the key up", inputs.poll(3, TimeUnit.SECONDS)!!.keyEvent.getKeys(0).down)
+        hu.rotary(1)
+        val rotate = inputs.poll(3, TimeUnit.SECONDS)!!
+        assertTrue("expected a relative (rotary) event", rotate.hasRelativeEvent())
+        assertEquals(1, rotate.relativeEvent.getData(0).delta)
+
+        // sensors: every one the car offers is requested at setup, driving status first, one at a
+        // time (each after the previous answer), and answered with data
+        for (type in listOf(SensorType.SENSOR_DRIVING_STATUS_DATA, SensorType.SENSOR_NIGHT_MODE, SensorType.SENSOR_LOCATION)) {
+            assertEquals(type to 0L, hu.sensorRequestLog.poll(3, TimeUnit.SECONDS))
+        }
+        assertTrue(sensors.poll(3, TimeUnit.SECONDS)!!.drivingStatusDataCount > 0)
+        assertTrue(sensors.poll(3, TimeUnit.SECONDS)!!.nightModeDataCount > 0)
+
+        // microphone
+        mic!!.openMic()
+        assertTrue(micData.await(3, TimeUnit.SECONDS))
+
+        // audio focus round trip, then PCM on the media channel
+        phone.requestAudioFocus(AudioFocusRequestType.AUDIO_FOCUS_GAIN)
+        assertEquals(AudioFocusStateType.AUDIO_FOCUS_STATE_GAIN, audioFocus.poll(3, TimeUnit.SECONDS)!!.focusState)
+        val media = audio.first { it.streamType.name.endsWith("MEDIA") }
+        media.startPlayback()
+        repeat(5) { assertTrue(media.sendPcm(ByteArray(10 + 3840), 10, 3840, it * 20_000L)) }
+        Thread.sleep(300)
+        assertEquals(5, hu.audioChunks.get())
+
+        // keep-alive
+        Thread.sleep(1500)
+        assertTrue("pings answered: ${hu.pingsAnswered.get()}", hu.pingsAnswered.get() >= 1)
+        assertTrue(phone.lastRttMs >= 0)
+
+        // focus away and back: the stream stops, then restarts on a new media session (#109) and
+        // frames resume starting with a key frame
+        val session0 = hu.videoStart?.sessionId ?: 0
+        assertEquals("the first media session is 0", 0, session0)
+        hu.requestFocusNative()
+        Thread.sleep(300)
+        val during = hu.videoFrames.get()
+        Thread.sleep(300)
+        assertTrue("no frames while native", hu.videoFrames.get() - during <= 1)
+        hu.requestFocusProjected()
+        Thread.sleep(500)
+        assertTrue(hu.videoFrames.get() > during)
+        assertEquals("a new media session (the next id) starts after full native focus", session0 + 1, hu.videoStart?.sessionId ?: 0)
+
+        // orderly shutdown from the phone
+        encoding.set(false)
+        phone.stop()
+        assertTrue(hu.byeBye.await(3, TimeUnit.SECONDS))
+        assertTrue(closed.await(3, TimeUnit.SECONDS))
+        assertEquals(null, closeError)
+    }
+
+    /**
+     * A head unit that acks audio for a while then stops mid-stream (#82). Without recovery the
+     * in-flight window fills and every further chunk is dropped, so the car goes silent until the
+     * phone is reconnected. Once we are well past the window with no ack in sight, the stream must
+     * switch to ack-less sending and keep flowing.
+     */
+    @Test
+    fun audioRecoversWhenHeadUnitStopsAcking() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        val media = audio.first { it.streamType.name.endsWith("MEDIA") }
+        val deadline = System.currentTimeMillis() + 5000
+        while (!media.ready && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        assertTrue("media channel should become ready", media.ready)
+        media.startPlayback()
+        media.ackStallMs = 100 // the real 2 s would make this test slow
+
+        // Normal play: a few chunks, all acked. The stream stays ack-based.
+        repeat(3) { assertTrue(media.sendPcm(ByteArray(10 + 3840), 10, 3840, it * 20_000L)) }
+        Thread.sleep(300)
+        assertFalse("ack-based while acks flow", media.ackless)
+        val delivered = hu.audioChunks.get()
+        assertEquals(3, delivered)
+
+        // The head unit goes quiet: it stops acking audio. The capture thread keeps handing us
+        // ~20 ms chunks regardless, so keep offering them.
+        hu.ackAudio = false
+        repeat(40) { media.sendPcm(ByteArray(10 + 3840), 10, 3840, (it + 3) * 20_000L); Thread.sleep(5) }
+
+        assertTrue("stream should fall back to ack-less sending once acks stop", media.ackless)
+        assertTrue(
+            "audio should keep reaching the head unit after the stall (got ${hu.audioChunks.get()}, was $delivered)",
+            hu.audioChunks.get() > delivered + AudioChannel.SLACK + 2,
+        )
+    }
+
+    /**
+     * Acks are checked against the media session only once the head unit has acked with the
+     * running session's id (ids compared modulo 256); before that every ack counts. An ack is for
+     * one message per receive time when the head unit sends those, a count of 0 counts as one,
+     * and a count over 4096 is ignored.
+     */
+    @Test
+    fun audioAcksCountOnlyWhenTheyAreForTheStream() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        val media = audio.first { it.streamType.name.endsWith("MEDIA") }
+        val deadline = System.currentTimeMillis() + 5000
+        while (!media.ready && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        hu.ackAudio = false
+        media.startPlayback()
+        val window = 2 + AudioChannel.SLACK // the simulated head unit's window is 2
+        var ts = 0L
+        fun fill() { while (media.hasRoom) assertTrue(media.sendPcm(ByteArray(10 + 3840), 10, 3840, ts++ * 20_000L)) }
+        repeat(window) { assertTrue(media.sendPcm(ByteArray(10 + 3840), 10, 3840, ts++ * 20_000L)) }
+        assertFalse("window full", media.hasRoom)
+        while (hu.sessionIds[hu.mediaAudio] == null && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        val session = hu.sessionIds[hu.mediaAudio]!!
+        fun roomAfterAWhile(): Boolean { Thread.sleep(200); return media.hasRoom }
+
+        // The head unit hasn't acked with this session yet: any ack counts, as it always did.
+        hu.sendAck(hu.mediaAudio, session + 1, count = 1)
+        assertTrue("before any ack with the session, another id still counts", roomAfterAWhile())
+        fill()
+        hu.sendAck(hu.mediaAudio, session, count = 1)
+        assertTrue(roomAfterAWhile())
+        fill()
+
+        // Now it has: other sessions' acks and oversized counts free nothing.
+        hu.sendAck(hu.mediaAudio, session + 1, count = 3)
+        assertFalse("another session's ack frees nothing", roomAfterAWhile())
+        hu.sendAck(hu.mediaAudio, session, count = 5000)
+        assertFalse("an ack for more than 4096 messages is ignored", roomAfterAWhile())
+        hu.sendAck(hu.mediaAudio, session, count = 0)
+        assertTrue("a count of 0 counts as one", roomAfterAWhile())
+        fill()
+
+        // Three receive times: three messages, whatever the count says. The id may wrap at 256.
+        hu.sendAck(hu.mediaAudio, session + 256, count = 1, receiveTimesNs = listOf(1L, 2L, 3L))
+        assertTrue(roomAfterAWhile())
+        repeat(3) { assertTrue("3 acked, 3 more fit", media.sendPcm(ByteArray(10 + 3840), 10, 3840, ts++ * 20_000L)) }
+        assertFalse(media.hasRoom)
+    }
+
+    /**
+     * Acks the stream ignores (another session's) still show the head unit is there: a run of them
+     * must not count as a stall and switch the stream to ack-less sending.
+     */
+    @Test
+    fun ignoredAcksAreNoStall() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        val media = audio.first { it.streamType.name.endsWith("MEDIA") }
+        val deadline = System.currentTimeMillis() + 5000
+        while (!media.ready && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        hu.ackAudio = false
+        media.startPlayback()
+        media.ackStallMs = 100 // the real 2 s would make this test slow
+        var ts = 0L
+        while (media.hasRoom) media.sendPcm(ByteArray(10 + 3840), 10, 3840, ts++ * 20_000L)
+        while (hu.sessionIds[hu.mediaAudio] == null && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        val session = hu.sessionIds[hu.mediaAudio]!!
+        hu.sendAck(hu.mediaAudio, session, count = 1) // the head unit echoes the session
+        Thread.sleep(100)
+
+        // ~400 ms of chunks, past the stall time, with only another session's acks coming.
+        repeat(40) {
+            hu.sendAck(hu.mediaAudio, session + 1, count = 1)
+            media.sendPcm(ByteArray(10 + 3840), 10, 3840, ts++ * 20_000L)
+            Thread.sleep(10)
+        }
+        assertFalse("ignored acks still show the head unit is there", media.ackless)
+
+        // With no ack at all, the same run is a stall.
+        repeat(40) { media.sendPcm(ByteArray(10 + 3840), 10, 3840, ts++ * 20_000L); Thread.sleep(10) }
+        assertTrue(media.ackless)
+    }
+
+    /**
+     * A car holding its acks back for a moment (its buffer is full: flow control) is not a stall.
+     * Counting messages since the last ack took a few hundred ms of held acks for one, so the
+     * stream went unpaced for good, overran the car (crackling) and the car dropped the channel.
+     */
+    @Test
+    fun audioStaysPacedWhenHeadUnitHoldsAcksBriefly() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        val media = audio.first { it.streamType.name.endsWith("MEDIA") }
+        val deadline = System.currentTimeMillis() + 5000
+        while (!media.ready && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        assertTrue("media channel should become ready", media.ready)
+        media.startPlayback()
+        repeat(3) { assertTrue(media.sendPcm(ByteArray(10 + 3840), 10, 3840, it * 20_000L)) }
+        Thread.sleep(300)
+
+        // ~400 ms of 20 ms chunks with acks held: well past the old message-count threshold.
+        hu.ackAudio = false
+        repeat(40) { media.sendPcm(ByteArray(10 + 3840), 10, 3840, (it + 3) * 20_000L); Thread.sleep(10) }
+        assertFalse("a short ack hold must keep the car pacing the stream", media.ackless)
+
+        // And a stream that did go ack-less returns to ack-based sending once acks come back.
+        media.ackStallMs = 50
+        repeat(20) { media.sendPcm(ByteArray(10 + 3840), 10, 3840, (it + 43) * 20_000L); Thread.sleep(10) }
+        assertTrue("past the stall time the stream goes ack-less", media.ackless)
+        hu.ackAudio = true
+        val until = System.currentTimeMillis() + 2000
+        while (media.ackless && System.currentTimeMillis() < until) {
+            media.sendPcm(ByteArray(10 + 3840), 10, 3840, 0); Thread.sleep(10)
+        }
+        assertFalse("acks coming back turn pacing back on", media.ackless)
+    }
+
+    @Test
+    fun functionButtonsReachThePhone() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        // The car's dedicated Phone button (AA keycode 65540) arrives as a key down then up.
+        hu.phoneButton()
+        val down = inputs.poll(3, TimeUnit.SECONDS)!!
+        assertTrue("expected a key event", down.hasKeyEvent())
+        assertEquals(65540, down.keyEvent.getKeys(0).keycode)
+        assertTrue("expected the key down", down.keyEvent.getKeys(0).down)
+        assertFalse("expected the key up", inputs.poll(3, TimeUnit.SECONDS)!!.keyEvent.getKeys(0).down)
+        // The Navigation button likewise.
+        hu.navigationButton()
+        assertEquals(65538, inputs.poll(3, TimeUnit.SECONDS)!!.keyEvent.getKeys(0).keycode)
+    }
+
+    @Test
+    fun headUnitDisappearingClosesSession() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        hu.stop()
+        assertTrue("phone notices the dead link", closed.await(5, TimeUnit.SECONDS))
+        assertNotNull(closeError)
+    }
+
+    @Test
+    fun headUnitByeBye() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        hu.sayByeBye()
+        assertTrue(closed.await(3, TimeUnit.SECONDS))
+        assertEquals(null, closeError)
+    }
+
+    @Test
+    fun headUnitByeByeThenHangUp() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        // The car powering down: bye-bye, then the link drops before our response can go out.
+        hu.sayByeBye()
+        huSocket.shutdownOutput()
+        assertTrue(closed.await(3, TimeUnit.SECONDS))
+        assertEquals(null, closeError)
+        assertTrue("reason: $closeReason", closeReason!!.contains("ended"))
+    }
+
+    @Test
+    fun wirelessTurnedOffSaysUserSelectionBefore45() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        phone.stopWirelessDisabled()
+        assertTrue(hu.byeBye.await(3, TimeUnit.SECONDS))
+        // The simulated head unit announces 1.x: it doesn't know WIRELESS_PROJECTION_DISABLED.
+        assertEquals(ByeByeReason.USER_SELECTION, hu.byeByeReason)
+        assertTrue(closed.await(3, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun phoneStopClosesWhenHeadUnitNeverAnswers() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        hu.answerByeBye = false
+        phone.stop()
+        assertTrue(hu.byeBye.await(3, TimeUnit.SECONDS))
+        // The grace-period close runs on the session's timer thread, through a transport whose
+        // close() is interruptible: it must still reach onClosed.
+        assertTrue("onClosed after the grace period", closed.await(3, TimeUnit.SECONDS))
+        assertEquals(null, closeError)
+    }
+
+    @Test
+    fun channelOpenOrder() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        // All at once in discovery order by default, the sensor channel first only when asked to.
+        assertEquals("first open request", if (sensorChannelFirst) hu.sensors else hu.video, hu.openOrder.poll())
+        assertEquals(setOf(1, 2, 3, 4, 5, 6, 7, 8, 9), hu.openedChannels.toSet())
+    }
+
+    @Test
+    fun duplicateOpenResponseIsIgnored() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        hu.send(hu.input, ControlMsg.CHANNEL_OPEN_RESPONSE, ChannelOpenResponse.newBuilder().setStatus(MessageStatus.STATUS_SUCCESS).build(), control = true)
+        assertFalse("session must go on", closed.await(500, TimeUnit.MILLISECONDS))
+        assertEquals("no answer to it", null, hu.unexpectedReplies.poll())
+        hu.tap(10, 20)
+        assertNotNull("input still flows", inputs.poll(3, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun malformedControlMessageIsDropped() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        // A length-delimited field cut short: no protobuf parser can read it.
+        hu.sendBytes(0, ControlMsg.AUDIO_FOCUS_NOTIFICATION, byteArrayOf(0x0a, 0x05, 1))
+        assertFalse("session must go on", closed.await(1, TimeUnit.SECONDS))
+        hu.tap(10, 20)
+        assertNotNull("input still flows", inputs.poll(3, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun byeByeResponseWithoutRequestEndsTheSessionCleanly() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        hu.send(0, ControlMsg.BYEBYE_RESPONSE, ByeByeResponse.getDefaultInstance())
+        assertTrue(closed.await(3, TimeUnit.SECONDS))
+        assertEquals(null, closeError)
+    }
+
+    @Test
+    fun phonePingsCarryAnExplicitBugReportFlag() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        val ping = hu.pingRequests.poll(3, TimeUnit.SECONDS)!!
+        assertTrue(ping.hasBugReport())
+        assertFalse(ping.bugReport)
+        assertTrue(ping.timestamp > 0)
+    }
+
+    @Test
+    fun headUnitFocusRequestWithoutInputStaysProjected() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        assertTrue(focusGained.await(5, TimeUnit.SECONDS))
+        hu.requestFocus(VideoFocusMode.VIDEO_FOCUS_PROJECTED_NO_INPUT_FOCUS)
+        assertEquals(VideoFocusMode.VIDEO_FOCUS_PROJECTED_NO_INPUT_FOCUS, hu.focusNotifications.poll(3, TimeUnit.SECONDS))
+        assertTrue("still projecting", video!!.focused)
+    }
+
+    /** A step whose state names [address], and whose older turn event names it as the road. */
+    private fun sendStep(address: String) = nav!!.update(
+        NavigationState.newBuilder().addDestinations(NavigationDestination.newBuilder().setAddress(address)).build(),
+        null, NavigationNextTurnEvent.newBuilder().setRoad(address).build(), null,
+    )
+
+    /** The next step the head unit got, in whichever form it reads. */
+    private fun receivedStep(seconds: Long): String? =
+        if (modernNav) hu.navStates.poll(seconds, TimeUnit.SECONDS)?.getDestinations(0)?.address
+        else hu.navTurns.poll(seconds, TimeUnit.SECONDS)?.road
+
+    @Test
+    fun navUpdateInsideRateLimitIsSentLate() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        // The simulator asks for 500 ms between updates: the second one must be delayed, not dropped.
+        sendStep("first")
+        sendStep("second")
+        assertEquals("first", receivedStep(3))
+        assertEquals("second", receivedStep(3))
+    }
+
+    @Test
+    fun heldNavUpdateIsDroppedWhenRerouting() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        sendStep("old route")
+        sendStep("abandoned")
+        // The held step belongs to the route being left: it must not follow REROUTING.
+        nav!!.status(NavigationStatus.NavigationStatusEnum.REROUTING)
+        assertEquals("old route", receivedStep(3))
+        assertEquals(null, receivedStep(1))
+    }
+
+    /** Only the messages the head unit's protocol version reads: it refuses the others (0xff). */
+    @Test
+    fun navSendsOnlyWhatTheHeadUnitReads() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        sendStep("only one form")
+        assertEquals("only one form", receivedStep(3))
+        if (modernNav) assertEquals(null, hu.navTurns.poll(1, TimeUnit.SECONDS))
+        else assertEquals(null, hu.navStates.poll(1, TimeUnit.SECONDS))
+    }
+
+    /** REROUTING only exists from protocol 1.6; Android Auto doesn't send it to older head units. */
+    @Test
+    fun reroutingOnlyToHeadUnitsThatKnowIt() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        nav!!.status(NavigationStatus.NavigationStatusEnum.REROUTING)
+        nav!!.status(NavigationStatus.NavigationStatusEnum.ACTIVE)
+        if (modernNav) assertEquals(NavigationStatus.NavigationStatusEnum.REROUTING, hu.navStatuses.poll(3, TimeUnit.SECONDS))
+        assertEquals(NavigationStatus.NavigationStatusEnum.ACTIVE, hu.navStatuses.poll(3, TimeUnit.SECONDS))
+    }
+
+    /** Input feedback goes out only for the events the car listed. */
+    @Test
+    fun inputFeedbackOnlyForWhatTheCarListed() {
+        assertTrue(running.await(10, TimeUnit.SECONDS))
+        val until = System.currentTimeMillis() + 3_000
+        while (input?.opened != true && System.currentTimeMillis() < until) Thread.sleep(10)
+        val ch = input!!
+        assertEquals(setOf(FeedbackEvent.FEEDBACK_SELECT, FeedbackEvent.FEEDBACK_FOCUS_CHANGE), ch.feedbackEvents)
+        ch.sendFeedback(FeedbackEvent.FEEDBACK_DRAG_START) // not listed: never sent
+        ch.sendFeedback(FeedbackEvent.FEEDBACK_FOCUS_CHANGE)
+        ch.sendFeedback(FeedbackEvent.FEEDBACK_SELECT)
+        assertEquals(FeedbackEvent.FEEDBACK_FOCUS_CHANGE, hu.inputFeedback.poll(3, TimeUnit.SECONDS))
+        assertEquals(FeedbackEvent.FEEDBACK_SELECT, hu.inputFeedback.poll(3, TimeUnit.SECONDS))
+        assertEquals(null, hu.inputFeedback.poll(500, TimeUnit.MILLISECONDS))
+    }
+}
+
+/**
+ * The same sessions against a head unit that omits every field set to 0, as Ford SYNC 4 does
+ * (#74: an empty AUTH_COMPLETE, then a service discovery response aasdk's definitions rejected).
+ */
+class ZeroOmittingSessionLoopbackTest : SessionLoopbackTest() {
+    override val omitZeroFields = true
+}
+
+/**
+ * The same sessions against a head unit on protocol 1.5, like the VW Play (Visteon MIB Regio):
+ * it reads only the older navigation turn and distance events.
+ */
+class ProtocolOneFiveSessionLoopbackTest : SessionLoopbackTest() {
+    override val headUnitMinor = 5
+}
+
+/** The same sessions with the sensor channel opened before the others (the vehicles.json quirk). */
+class SensorFirstSessionLoopbackTest : SessionLoopbackTest() {
+    override val sensorChannelFirst = true
+}

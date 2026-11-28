@@ -1,0 +1,17 @@
+syntax="proto2";
+
+package aap_protobuf.service.control.message;
+
+message HeadUnitInfo {
+  optional string make = 1;
+  optional string model = 2;
+  optional string year = 3;
+  optional string vehicle_id = 4;
+  optional string head_unit_make = 5;
+  optional string head_unit_model = 6;
+  optional string head_unit_software_build = 7;
+  optional string head_unit_software_version = 8;
+  // Name is AARE's. AARE fills it in from the SDR when the head unit leaves
+  // headunit_info out: 1 = car, 2 = truck (model name ending in "truck").
+  optional int32 vehicle_type = 9;
+}

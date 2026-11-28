@@ -56,6 +56,8 @@ object DarkMessageDialog {
         actions: List<Action>,
         cancelable: Boolean = true,
         onCancel: (() -> Unit)? = null,
+        /** Optional input under the message (e.g. a PIN field). */
+        extra: android.view.View? = null,
     ): AlertDialog {
         val view = LayoutInflater.from(activity).inflate(R.layout.dialog_message, null)
         val titleView = view.findViewById<TextView>(R.id.msgTitle)
@@ -64,6 +66,9 @@ object DarkMessageDialog {
         val actionRow = view.findViewById<LinearLayout>(R.id.msgActions)
         titleView.text = title
         bodyView.text = message
+        if (extra != null) {
+            (view as LinearLayout).addView(extra, view.indexOfChild(actionRow))
+        }
 
         val density = activity.resources.displayMetrics.density
         val vertical = actions.size > 2

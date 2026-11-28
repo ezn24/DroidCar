@@ -1,0 +1,66 @@
+syntax="proto2";
+
+package aap_protobuf.service.navigationstatus.message;
+
+message NavigationManeuver {
+  optional NavigationType type = 1;
+  enum NavigationType {
+    UNKNOWN = 0;
+    DEPART = 1;
+    NAME_CHANGE = 2;
+    KEEP_LEFT = 3;
+    KEEP_RIGHT = 4;
+    TURN_SLIGHT_LEFT = 5;
+    TURN_SLIGHT_RIGHT = 6;
+    TURN_NORMAL_LEFT = 7;
+    TURN_NORMAL_RIGHT = 8;
+    TURN_SHARP_LEFT = 9;
+    TURN_SHARP_RIGHT = 10;
+    U_TURN_LEFT = 11;
+    U_TURN_RIGHT = 12;
+    ON_RAMP_SLIGHT_LEFT = 13;
+    ON_RAMP_SLIGHT_RIGHT = 14;
+    ON_RAMP_NORMAL_LEFT = 15;
+    ON_RAMP_NORMAL_RIGHT = 16;
+    ON_RAMP_SHARP_LEFT = 17;
+    ON_RAMP_SHARP_RIGHT = 18;
+    ON_RAMP_U_TURN_LEFT = 19;
+    ON_RAMP_U_TURN_RIGHT = 20;
+    OFF_RAMP_SLIGHT_LEFT = 21;
+    OFF_RAMP_SLIGHT_RIGHT = 22;
+    OFF_RAMP_NORMAL_LEFT = 23;
+    OFF_RAMP_NORMAL_RIGHT = 24;
+    FORK_LEFT = 25;
+    FORK_RIGHT = 26;
+    MERGE_LEFT = 27;
+    MERGE_RIGHT = 28;
+    MERGE_SIDE_UNSPECIFIED = 29;
+    // AARE: no 30 and 31 (they were ROUNDABOUT_ENTER and ROUNDABOUT_EXIT here):
+    // accepts 0-29 and 32-50, the Car App Library's Maneuver.TYPE_* numbers, which have neither.
+    reserved 30, 31;
+    ROUNDABOUT_ENTER_AND_EXIT_CW = 32;
+    ROUNDABOUT_ENTER_AND_EXIT_CW_WITH_ANGLE = 33;
+    ROUNDABOUT_ENTER_AND_EXIT_CCW = 34;
+    ROUNDABOUT_ENTER_AND_EXIT_CCW_WITH_ANGLE = 35;
+    STRAIGHT = 36;
+    FERRY_BOAT = 37;
+    FERRY_TRAIN = 38;
+    DESTINATION = 39;
+    DESTINATION_STRAIGHT = 40;
+    DESTINATION_LEFT = 41;
+    DESTINATION_RIGHT = 42;
+    // AARE: 43-50 as the Car App Library numbers them; names from it. AARE sends 43-46 as they
+    // are and 47-50 as FERRY_BOAT / FERRY_TRAIN.
+    ROUNDABOUT_ENTER_CW = 43;
+    ROUNDABOUT_EXIT_CW = 44;
+    ROUNDABOUT_ENTER_CCW = 45;
+    ROUNDABOUT_EXIT_CCW = 46;
+    FERRY_BOAT_LEFT = 47;
+    FERRY_BOAT_RIGHT = 48;
+    FERRY_TRAIN_LEFT = 49;
+    FERRY_TRAIN_RIGHT = 50;
+  }
+
+  optional int32 roundabout_exit_number = 2;
+  optional int32 roundabout_exit_angle = 3;
+}

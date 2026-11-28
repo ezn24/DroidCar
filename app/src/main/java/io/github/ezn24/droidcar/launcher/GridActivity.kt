@@ -823,11 +823,15 @@ class GridActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         resumedOnCar = false
+        VirtualLauncher.desktopInFront = false
     }
 
     override fun onResume() {
         super.onResume()
         resumedOnCar = true
+        VirtualLauncher.desktopInFront = true
+        // The desktop may slide under the glass dock again (an app had narrowed the supersampled display)
+        VirtualLauncher.onDesktopResumed()
         // Backed out of an app the dock opened: the dashboard, not the desktop, is where it came from
         if (VirtualLauncher.returnToDashboardOnExit && !VirtualLauncher.dashboardMode) {
             VirtualLauncher.returnToDashboardOnExit = false

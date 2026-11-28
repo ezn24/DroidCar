@@ -688,6 +688,20 @@ class DualDisplayComposer(
         mapBufferHeight = height
     }
 
+    /**
+     * The supersampled display changed width (full width under the dock for the desktop, the app area for other apps):
+     * the consumer buffer follows it, and [hiFullWidth] moves where it is drawn from, both before the next frame.
+     */
+    fun resizeHiInput(
+        width: Int,
+        height: Int,
+        fullWidth: Boolean,
+    ) {
+        appHi?.surfaceTexture?.setDefaultBufferSize(width, height)
+        hiFullWidth = fullWidth
+        wake()
+    }
+
     /** Current map display buffer size (the alt screen crops it to its own aspect ratio). */
     @Volatile
     private var mapBufferWidth = 0

@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import io.github.ezn24.droidcar.MainActivity
+import io.github.ezn24.droidcar.R
 import io.github.ezn24.droidcar.SessionController
 import io.github.ezn24.droidcar.audio.SilentProjectionActivity
 import io.github.ezn24.droidcar.util.Bg
@@ -328,7 +329,7 @@ class CarPlayService : Service() {
             manager.createNotificationChannel(
                 NotificationChannel(
                     CHANNEL_ID,
-                    "DroidCar 连接",
+                    getString(R.string.fgs_channel_name),
                     NotificationManager.IMPORTANCE_LOW,
                 ).apply {
                     description = "保持与车机的连接"
@@ -349,8 +350,8 @@ class CarPlayService : Service() {
         return NotificationCompat
             .Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentTitle("DroidCar 运行中")
-            .setContentText("正在保持与车机的连接，点开应用可查看日志")
+            .setContentTitle(getString(R.string.fgs_title))
+            .setContentText(getString(R.string.fgs_text))
             .setContentIntent(contentIntent)
             .setAutoCancel(false)
             .setOngoing(true)

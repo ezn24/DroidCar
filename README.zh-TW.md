@@ -11,7 +11,7 @@
 
 ---
 
-DroidCar 是基於 [CarDeck](https://github.com/shaonialife/cardeck) 的改版。手機（不需 root）扮演 CarPlay 發送端，把自繪的車機桌面與手機上的 App 投到支援無線 CarPlay 的車機上，車機觸控再回傳到手機操作。
+DroidCar 是以 [CarDeck](https://github.com/shaonialife/cardeck) 為基礎大幅改寫的版本。手機（不需 root）扮演 CarPlay 發送端，把自繪的車機桌面與手機上的 App 投到支援無線 CarPlay 的車機上，車機觸控再回傳到手機操作。百度 CarLife、ICCOA CarLink 與 Android Auto 車機也已有實驗性支援，共用同一套車機桌面。
 
 > **非官方專案**：與 Apple Inc. 及任何汽車製造商無關，未獲授權或認證，**不是 MFi 產品**。CarPlay / AirPlay 是 Apple Inc. 的商標，僅用於說明相容目標。
 >
@@ -59,6 +59,7 @@ DroidCar 是基於 [CarDeck](https://github.com/shaonialife/cardeck) 的改版�
 - **Dock**：顯示時間、訊號、Wi-Fi 與電量（充電時顯示綠色），背景應用可從主畫面的「背景應用」切換或關閉。
 - **車機桌布**：內建多款桌布，深色與淺色模式可分別設定，跟隨手機自動切換；也能從相簿選圖。
 - **手機介面**：Material Design 3，底部分為「連線 / 車機 / 診斷」三頁；深淺色跟隨手機，主色跟隨系統。
+- **多種車機協定**：同一個「啟動連線」同時等待 CarPlay、百度 CarLife、ICCOA CarLink 與 Android Auto 車機，先連上的協定會停掉其他協定的等待；投放結束後連線一起關閉。後三者為實驗性功能，見[路線圖](#路線圖)。
 - **多語言**：繁體中文、簡體中文、英文，可在 **車機設定 → 顯示 → 語言** 切換。
 - **車機畫面截圖**：在「診斷」頁一鍵把目前車機畫面存成 PNG（存到「下載/DroidCar」）。
 - **車機麥克風**：任何 App 開始錄音（語音搜尋、語音訊息、Gemini、WhatsApp / Telegram / 微信通話等）時，自動改用車機麥克風收音，結束後還原手機麥克風（已在 WinPlay 驗證，真車待測）。
@@ -83,9 +84,9 @@ DroidCar 是基於 [CarDeck](https://github.com/shaonialife/cardeck) 的改版�
 | 協定 | 車款 | 狀態 |
 | --- | --- | --- |
 | Apple CarPlay（無線） | 大多數車款、無線轉接盒 | ✅ 已支援 |
-| 百度 CarLife | 中國市場車款（豐田、本田、一汽／上汽大眾…） | 🚧 開發中（協定核心已完成） |
-| ICCOA CarLink（小米 CarWith、OPPO、vivo） | 較新的中國車款 | 📋 規劃中 |
-| Android Auto | 大多數車款 | 📋 規劃中（使用 Google 原廠接收端的車機可能拒絕非 Google 憑證） |
+| 百度 CarLife | 中國市場車款（豐田、本田、一汽／上汽大眾…） | 🧪 實驗性（無線連線已完成，尚未實車測試） |
+| ICCOA CarLink（小米 CarWith、OPPO、vivo） | 較新的中國車款 | 🧪 實驗性（已移植，尚未實車測試） |
+| Android Auto | 大多數車款 | 🧪 實驗性（USB 與無線，尚未實車測試；嚴格的車機需要 Google 憑證） |
 | SmartDeviceLink／Ford AppLink | Ford、Lincoln、部分豐田 | 🔍 評估中 |
 | 華為 HiCar、WeLink、亿连 | 中國車款、後裝車機 | ❌ 沒有公開規格 |
 
@@ -100,7 +101,7 @@ DroidCar 是基於 [CarDeck](https://github.com/shaonialife/cardeck) 的改版�
 
 - Android 12 以上的手機（「應用橫屏」功能需要 Android 14 以上）
 - 已安裝並啟動 [Shizuku](https://shizuku.rikka.app/)（以無線偵錯啟用，不需 root）。虛擬螢幕、觸控注入與聲音擷取都經由它完成，未就緒時無法連線
-- 支援無線 CarPlay 的車機，且手機已與車機完成藍牙配對
+- 支援無線 CarPlay 的車機，且手機已與車機完成藍牙配對；或支援百度 CarLife、ICCOA CarLink、Android Auto 的車機（實驗性）
 
 ## 使用方式
 
@@ -108,6 +109,17 @@ DroidCar 是基於 [CarDeck](https://github.com/shaonialife/cardeck) 的改版�
 2. 啟動 Shizuku，並在 DroidCar 主頁授權。
 3. 在車機上打開無線 CarPlay（配對模式），回到手機點 **啟動連線**。
 4. 連線後車機會顯示儀表板。車機相關設定可在手機「車機」頁或車機上的設定 App 調整。
+
+## 測試狀況
+
+DroidCar 目前主要在以下測試台上開發與驗證，真車測試仍在進行中：
+
+- **CarPlay**：ChairPlay（主要測試台，含儀表副螢幕與旋鈕）、WinPlay（Windows）、DiPlay（Android）
+- **Android Auto**：Android Studio 附帶的 Desktop Head Unit（DHU），以及 AARE 的桌面版車機（`adb forward tcp:5277 localabstract:aare_hu`）
+- **百度 CarLife**：[carlife_pc_tool](https://github.com/MeshHun/carlife_pc_tool)（區域網路模式）
+- **ICCOA CarLink**：目前沒有可用的無線測試台
+
+標示「尚未實車測試」的功能只在上述測試台驗證過。
 
 ## 從原始碼建置
 
@@ -141,7 +153,12 @@ adb install -r app/build/outputs/apk/standard/debug/app-standard-debug.apk
 
 ### 協定參考
 
-DroidCar 為獨立實作。以下專案僅用於對照協定事實與時序；GPL 授權或未聲明授權的專案，均未複製其程式碼。
+DroidCar 的 CarPlay 為獨立實作。部分其他協定的程式碼依授權移植，並保留原授權聲明（見 [NOTICE](NOTICE)）：
+
+- 百度 CarLife 與 ICCOA CarLink：移植自 [FT](https://github.com/OneAboveAll1964/ft-app)（Apache-2.0）
+- Android Auto：協定模組移植自 [AARE](https://github.com/prototux/AARE)（GPL-3.0），protobuf 定義來自 [aasdk](https://github.com/opencardev/aasdk)（GPL-3.0）
+
+以下專案僅用於對照協定事實與時序；除上列移植外，GPL 授權或未聲明授權的專案均未複製其程式碼。
 
 | 專案 | 角色 | 參考內容 |
 | --- | --- | --- |
@@ -152,6 +169,9 @@ DroidCar 為獨立實作。以下專案僅用於對照協定事實與時序；GP
 | [Nitsuya/AADisplay](https://github.com/Nitsuya/AADisplay)（GPL-3.0） | 虛擬屏啟動器 | 奧迪 MIB3 的 WiFi iAP2 隧道時序 |
 | [amineross/showcase](https://github.com/amineross/showcase)（GPL-3.0）、[wiomoc/iap2](https://github.com/wiomoc/iap2) | 接收端實作 | 交叉核對 iAP2 訊息清單 |
 | [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy)（Apache-2.0） | 螢幕鏡像 | 虛擬屏保持運作時關閉手機面板 |
+| [MeshHun/carlife_pc_tool](https://github.com/MeshHun/carlife_pc_tool) | CarLife 車機模擬器 | 車機端握手順序、測試台 |
+| [xhcoding1998/Carlink](https://github.com/xhcoding1998/Carlink) | ICCOA CarLink 接收端 | 無線網路類型、通道方向 |
+| [PiggyBackBayonet/MiAuto](https://github.com/PiggyBackBayonet/MiAuto)（AGPL-3.0） | ICCOA 車機端 | 真機行為紀錄 |
 
 ### 函式庫
 

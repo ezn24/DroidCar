@@ -204,7 +204,7 @@ object SessionController {
      * "Play music when connected": once the session's audio stream is live, press play unless something already plays. The play
      * key goes to the active media session, or to the app that played last (Android's media button resumption restarts it).
      */
-    private fun maybeAutoPlay(context: Context) {
+    internal fun maybeAutoPlay(context: Context) {
         if (!DisplayPrefs.autoPlayOnConnect(context)) return
         Bg.run("auto-play") {
             Thread.sleep(AUTO_PLAY_DELAY_MS)
@@ -221,6 +221,21 @@ object SessionController {
     /** Lets the car's audio pipeline open before the music starts (the first second would otherwise be lost). */
     private const val AUTO_PLAY_DELAY_MS = 1_500L
 
+    /**
+     * A projection ended (any protocol): pause what was playing so it does not continue on the phone speaker.
+     * Sent unless the media session is known to be paused already (no notification access = state unknown =
+     * pause anyway; PAUSE never starts anything).
+     */
+    fun pauseMusicAfterSession() {
+        if (io.github.ezn24.droidcar.media.MediaSessionsState.nowPlaying
+                ?.playing == false
+        ) {
+            return
+        }
+        appendLog("MEDIA: session ended - pausing playback")
+        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE)
+    }
+
     fun dispatchMediaKey(keyCode: Int) {
         val ctx = appContext ?: return
         val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -235,7 +250,7 @@ object SessionController {
      * (~30ms slower but never drops a key). The dock screen does not take part - cross-display focus needs Launcher-side work, see
      * docs/HID-KNOB.md.
      */
-    private fun injectNavigationKey(keyCode: Int) {
+    internal fun injectNavigationKey(keyCode: Int) {
         // Knob focus first: it frames dock / desktop / dashboard targets and enters apps on Confirm
         if (io.github.ezn24.droidcar.input.KnobFocus
                 .onKey(keyCode)
@@ -429,7 +444,7 @@ object SessionController {
      * Head-unit phone keys (HID Telephony page). Hook Switch answers a ringing call, Drop declines it or ends the
      * active one, Phone Mute toggles the mic. Logs carry the key and call phase only.
      */
-    private fun onPhoneKey(
+    internal fun onPhoneKey(
         context: Context,
         usage: Int,
     ) {
@@ -746,7 +761,22 @@ object SessionController {
      * Idempotent: with an existing session the BT components' start() short-circuits and never doubles up.
      */
     fun startConnection(context: Context) {
+        // A CarLife head unit is drawing the launcher: the virtual displays and audio capture are taken
+        if (io.github.ezn24.droidcar.carlife.CarLifeController.streaming ||
+            io.github.ezn24.droidcar.iccoa.IccoaController.streaming ||
+            io.github.ezn24.droidcar.aa.AndroidAutoController.streaming
+        ) {
+            appendLog("SESSION: a CarLife / ICCOA / Android Auto projection is running, not starting CarPlay")
+            return
+        }
         connectCancelled = false
+        // Same switch for every protocol: a CarLife head unit may answer this connection instead of a CarPlay one
+        io.github.ezn24.droidcar.carlife.CarLifeController
+            .start(context)
+        io.github.ezn24.droidcar.iccoa.IccoaController
+            .start(context)
+        io.github.ezn24.droidcar.aa.AndroidAutoController
+            .start(context)
         // The desktop's app list takes seconds to scan with hundreds of apps: do it while Bluetooth / Wi-Fi / pairing run
         io.github.ezn24.droidcar.launcher.VirtualLauncher
             .warmAppsCache(context)
@@ -817,11 +847,64 @@ object SessionController {
      * [byUser] = the user tapped "Disconnect" (or declined the disclaimer): nothing will be resumed, so the map task
      * parked on its virtual display is released too. Car-side ends keep it for [VirtualLauncher] to resume.
      */
+    @Volatile
+    private var keepOtherProtocols = false
+
+    /**
+     * A CarLife / ICCOA / Android Auto projection ended on the car's side. Like CarPlay's onEnded: unless the user
+     * wants to wait for the car to reconnect, the whole connection ends, so no protocol keeps waiting in the
+     * background (and the connection notification goes away).
+     */
+    fun onOtherProtocolEnded(
+        context: Context,
+        protocol: String,
+    ) {
+        if (DisplayPrefs.waitForReconnect(context)) {
+            appendLog("SESSION: $protocol projection ended - waiting for the car to reconnect (setting)")
+            return
+        }
+        appendLog("SESSION: $protocol projection ended - ending the connection")
+        disconnect(context)
+    }
+
+    /**
+     * Another protocol's head unit won (CarLife started projecting): end the CarPlay wait (Bluetooth, Wi-Fi join,
+     * pairing) without touching that protocol. Call it before the other protocol attaches its displays, because
+     * the teardown also resets touch routing and the dim cover.
+     */
+    fun stopCarPlayForOtherProtocol(
+        context: Context,
+        protocol: String,
+    ) {
+        if (isStreaming()) return
+        appendLog("SESSION: $protocol head unit connected - stopping the CarPlay wait")
+        keepOtherProtocols = true
+        try {
+            disconnect(context)
+        } finally {
+            keepOtherProtocols = false
+        }
+    }
+
     fun disconnect(
         context: Context,
         byUser: Boolean = false,
     ) {
         val hadProjection = CarPlayService.mediaProjection != null
+        // CarLife follows the same connect / disconnect switch; an internal CarPlay teardown leaves a running
+        // CarLife projection alone
+        if (!keepOtherProtocols && (byUser || !io.github.ezn24.droidcar.carlife.CarLifeController.streaming)) {
+            io.github.ezn24.droidcar.carlife.CarLifeController
+                .stop()
+        }
+        if (!keepOtherProtocols && (byUser || !io.github.ezn24.droidcar.iccoa.IccoaController.streaming)) {
+            io.github.ezn24.droidcar.iccoa.IccoaController
+                .stop()
+        }
+        if (!keepOtherProtocols && (byUser || !io.github.ezn24.droidcar.aa.AndroidAutoController.streaming)) {
+            io.github.ezn24.droidcar.aa.AndroidAutoController
+                .stop()
+        }
         if (byUser) {
             userEndedSession = true
             suppressAutoConnect("user disconnected")
@@ -3416,6 +3499,13 @@ object SessionController {
                                             // Dim cover / keep-awake take effect only once projection has really started (see ScreenDimmer.sessionActive):
                                             // at app launch only the touch probe is attached, avoiding "the session dropped long ago yet the phone dims a while later".
                                             if (ok) {
+                                                // CarPlay won: other protocols stop waiting
+                                                io.github.ezn24.droidcar.carlife.CarLifeController
+                                                    .stop()
+                                                io.github.ezn24.droidcar.iccoa.IccoaController
+                                                    .stop()
+                                                io.github.ezn24.droidcar.aa.AndroidAutoController
+                                                    .stop()
                                                 io.github.ezn24.droidcar.util.SessionHooks
                                                     .onConnected(context)
                                                 ScreenDimmer.setSessionActive(true)

@@ -51,8 +51,14 @@ object SupersamplePrefs {
         when (mode(context, component)) {
             MODE_ON -> true
             MODE_OFF -> false
-            else -> isPortraitActivity(context, component)
+            // WeChat's two-pane layout appears on the supersampled display (user test 2026-11-28, ChairPlay), so the tablet
+            // layout setting sends it there; an explicit per-app choice above still wins
+            else ->
+                isPortraitActivity(context, component) ||
+                    (component.packageName == WECHAT && ChatMode.enabled(context))
         }
+
+    private const val WECHAT = "com.tencent.mm"
 
     /** Auto detection: whether the launch Activity is portrait-locked (the form that gets letterboxed on a landscape app display). */
     fun isPortraitActivity(

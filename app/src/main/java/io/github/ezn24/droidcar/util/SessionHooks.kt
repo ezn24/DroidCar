@@ -105,6 +105,9 @@ object SessionHooks {
     fun onDisconnected(context: Context) {
         if (!connectedFired) return
         connectedFired = false
+        // Music that played to the car must not carry on from the phone speaker (user request 2026-11-27)
+        io.github.ezn24.droidcar.SessionController
+            .pauseMusicAfterSession()
         val app = context.applicationContext
         Bg.run("hook-disconnected") { fireAll(app, EVENT_DISCONNECTED) }
     }

@@ -181,6 +181,142 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    /** Android Auto certificate import: the certificate PEM first, then its private key. */
+    private var pendingAaCertPem: String? = null
+    private val aaCertPicker =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri == null) {
+                pendingAaCertPem = null
+                return@registerForActivityResult
+            }
+            io.github.ezn24.droidcar.util.Bg.run("aa-cert-import") {
+                val text =
+                    runCatching {
+                        contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+                    }.getOrNull()
+                runOnUiThread { onAaCertFile(text) }
+            }
+        }
+
+    private fun onAaCertFile(text: String?) {
+        val cert = pendingAaCertPem
+        if (text == null) {
+            pendingAaCertPem = null
+            aaCertResult(getString(R.string.aa_cert_import_failed, "read"))
+            return
+        }
+        if (cert == null) {
+            pendingAaCertPem = text
+            android.widget.Toast
+                .makeText(this, R.string.aa_cert_pick_key, android.widget.Toast.LENGTH_LONG)
+                .show()
+            aaCertPicker.launch(arrayOf("*/*"))
+            return
+        }
+        pendingAaCertPem = null
+        io.github.ezn24.droidcar.util.Bg.run("aa-cert-save") {
+            val result =
+                runCatching {
+                    io.github.ezn24.droidcar.aa.cert
+                        .CertificateStore(this)
+                        .importPem("imported", cert, text)
+                }
+            runOnUiThread {
+                aaCertResult(
+                    result.fold(
+                        { getString(R.string.aa_cert_import_done, it.subject) },
+                        { getString(R.string.aa_cert_import_failed, it.message ?: it.javaClass.simpleName) },
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun aaCertResult(message: String) {
+        DarkMessageDialog.show(
+            activity = this,
+            title = getString(R.string.aa_cert_title),
+            message = message,
+            actions = listOf(DarkMessageDialog.Action(getString(R.string.aa_cert_close)) {}),
+        )
+    }
+
+    /** The Android Auto certificates DroidCar can offer, with download and import. */
+    private fun showAaCertificates() {
+        io.github.ezn24.droidcar.util.Bg.run("aa-cert-list") {
+            val entries =
+                runCatching {
+                    io.github.ezn24.droidcar.aa.cert
+                        .CertificateStore(this)
+                        .entries()
+                }.getOrDefault(emptyList())
+            val fmt = java.text.DateFormat.getDateInstance()
+            val list =
+                entries.joinToString("\n") { e ->
+                    val kind =
+                        when {
+                            e.isGoogleIssued -> "Google · "
+                            e.selfSigned -> getString(R.string.aa_cert_self) + " · "
+                            else -> ""
+                        }
+                    "• " + kind + getString(R.string.aa_cert_until, fmt.format(e.notAfter))
+                }
+            runOnUiThread {
+                DarkMessageDialog.show(
+                    activity = this,
+                    title = getString(R.string.aa_cert_title),
+                    message = getString(R.string.aa_cert_explain) + "\n\n" + list,
+                    actions =
+                        listOf(
+                            DarkMessageDialog.Action(getString(R.string.aa_cert_close)) {},
+                            DarkMessageDialog.Action(getString(R.string.aa_cert_import)) {
+                                pendingAaCertPem = null
+                                android.widget.Toast
+                                    .makeText(this, R.string.aa_cert_pick_cert, android.widget.Toast.LENGTH_LONG)
+                                    .show()
+                                aaCertPicker.launch(arrayOf("*/*"))
+                            },
+                            DarkMessageDialog.Action(getString(R.string.aa_cert_download), DarkMessageDialog.Emphasis.PRIMARY) {
+                                downloadAaCertificate()
+                            },
+                        ),
+                )
+            }
+        }
+    }
+
+    private fun downloadAaCertificate() {
+        io.github.ezn24.droidcar.util.Bg.run("aa-cert-download") {
+            val result =
+                runCatching {
+                    val d =
+                        io.github.ezn24.droidcar.aa.cert.CertificateDownload
+                            .fetch()
+                    io.github.ezn24.droidcar.aa.cert
+                        .CertificateStore(this)
+                        .importDownloaded(d)
+                }
+            SessionController.appendLog(
+                "AA: certificate download " + if (result.isSuccess) "done" else "failed - ${result.exceptionOrNull()?.message}",
+            )
+            runOnUiThread {
+                aaCertResult(
+                    result.fold(
+                        {
+                            getString(
+                                R.string.aa_cert_download_done,
+                                java.text.DateFormat
+                                    .getDateInstance()
+                                    .format(it.notAfter),
+                            )
+                        },
+                        { getString(R.string.aa_cert_download_failed, it.message ?: it.javaClass.simpleName) },
+                    ),
+                )
+            }
+        }
+    }
+
     /** Continue starting the connection automatically after the Bluetooth permission is granted. */
     private val pendingStartAfterBtPermission =
         java.util.concurrent.atomic
@@ -1209,6 +1345,9 @@ class MainActivity : AppCompatActivity() {
         val s =
             when {
                 SessionController.videoSender?.isRunning == true -> HeroState.CONNECTED
+                io.github.ezn24.droidcar.carlife.CarLifeController.streaming -> HeroState.CONNECTED
+                io.github.ezn24.droidcar.iccoa.IccoaController.streaming -> HeroState.CONNECTED
+                io.github.ezn24.droidcar.aa.AndroidAutoController.streaming -> HeroState.CONNECTED
                 SessionController.isSessionRunning() || SessionController.sessionStarting.get() ->
                     HeroState.CONNECTING
                 else -> HeroState.IDLE
@@ -1242,6 +1381,7 @@ class MainActivity : AppCompatActivity() {
                         .text(R.string.screen_044)
             }
         }
+        maybeAskIccoaPin()
         updateConnectedSubline()
         updateHeroStats()
         updateAudioTag()
@@ -1255,12 +1395,35 @@ class MainActivity : AppCompatActivity() {
      */
     private fun updateHeroStats() {
         if (heroState != HeroState.CONNECTED) return
-        val sent = SessionController.videoSender?.framesSentTotal ?: 0
+        val carLife = io.github.ezn24.droidcar.carlife.CarLifeController
+        val iccoa = io.github.ezn24.droidcar.iccoa.IccoaController
+        val onCarPlay = SessionController.videoSender?.isRunning == true
+        val onCarLife = carLife.streaming && !onCarPlay
+        val onIccoa = iccoa.streaming && !onCarPlay && !onCarLife
+        val aa = io.github.ezn24.droidcar.aa.AndroidAutoController
+        val onAa = aa.streaming && !onCarPlay && !onCarLife && !onIccoa
+        val sent =
+            when {
+                onCarLife -> carLife.framesSent
+                onIccoa -> iccoa.framesSent
+                onAa -> aa.framesSent
+                else -> SessionController.videoSender?.framesSentTotal ?: 0
+            }
         if (sent < lastSentFrames) lastSentFrames = sent
         val fps = sent - lastSentFrames
         lastSentFrames = sent
         heroStats.text =
-            UiStrings.format(R.string.stream_stats, SessionController.activeScalePercent, fps, SessionController.activeTargetFps)
+            if (onCarLife || onIccoa || onAa) {
+                val target =
+                    when {
+                        onCarLife -> carLife.targetFps
+                        onIccoa -> iccoa.targetFps
+                        else -> aa.targetFps
+                    }
+                UiStrings.format(R.string.stream_stats, 100, fps, target)
+            } else {
+                UiStrings.format(R.string.stream_stats, SessionController.activeScalePercent, fps, SessionController.activeTargetFps)
+            }
     }
 
     private fun applyHeroState(s: HeroState) {
@@ -1375,19 +1538,68 @@ class MainActivity : AppCompatActivity() {
         ctaButton.isEnabled = true
     }
 
+    private var iccoaPinDialog: androidx.appcompat.app.AlertDialog? = null
+
+    /** An ICCOA head unit shows a 6-digit code: ask for it once per request (polled with the hero card). */
+    private fun maybeAskIccoaPin() {
+        val iccoa = io.github.ezn24.droidcar.iccoa.IccoaController
+        if (!iccoa.pinRequested) {
+            if (iccoaPinDialog?.isShowing == true) iccoaPinDialog?.dismiss()
+            iccoaPinDialog = null
+            return
+        }
+        if (iccoaPinDialog?.isShowing == true || !uiResumed) return
+        val field =
+            android.widget.EditText(this).apply {
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                filters = arrayOf(android.text.InputFilter.LengthFilter(6))
+                hint = "000000"
+                textSize = 24f
+                gravity = android.view.Gravity.CENTER
+                letterSpacing = 0.3f
+            }
+        iccoaPinDialog =
+            DarkMessageDialog.show(
+                activity = this,
+                title = getString(R.string.iccoa_pin_title),
+                message = iccoa.status?.takeIf { it.isNotBlank() } ?: getString(R.string.iccoa_msg_enter_code),
+                extra = field,
+                cancelable = false,
+                actions =
+                    listOf(
+                        DarkMessageDialog.Action(getString(R.string.iccoa_pin_cancel)) { iccoa.cancelPin() },
+                        DarkMessageDialog.Action(getString(R.string.iccoa_pin_connect), DarkMessageDialog.Emphasis.PRIMARY) {
+                            val pin = field.text.toString().trim()
+                            if (pin.length == 6) iccoa.submitPin(pin) else iccoa.cancelPin()
+                        },
+                    ),
+            )
+        field.requestFocus()
+    }
+
     private fun updateConnectedSubline() {
         if (heroState != HeroState.CONNECTED) return
         val elapsed = SystemClock.elapsedRealtime() - connectedAt
         val mm = elapsed / 60_000
         val ss = elapsed % 60_000 / 1_000
+        // CarLife has no car hotspot name to show: name the protocol instead
+        val onCarPlay = SessionController.videoSender?.isRunning == true
         val ssid =
-            ssidInput.text
-                .toString()
-                .trim()
-                .ifEmpty {
-                    UiStrings
-                        .text(R.string.ui_020)
-                }
+            if (!onCarPlay && io.github.ezn24.droidcar.carlife.CarLifeController.streaming) {
+                "Baidu CarLife"
+            } else if (!onCarPlay && io.github.ezn24.droidcar.iccoa.IccoaController.streaming) {
+                "ICCOA CarLink"
+            } else if (!onCarPlay && io.github.ezn24.droidcar.aa.AndroidAutoController.streaming) {
+                "Android Auto"
+            } else {
+                ssidInput.text
+                    .toString()
+                    .trim()
+                    .ifEmpty {
+                        UiStrings
+                            .text(R.string.ui_020)
+                    }
+            }
         heroSubline.text =
             String.format(
                 Locale.US,
@@ -3030,6 +3242,15 @@ class MainActivity : AppCompatActivity() {
         guide.findViewById<TextView>(R.id.menuDesc).text = getString(R.string.setup_menu_desc)
         guide.setOnClickListener { startActivity(Intent(this, io.github.ezn24.droidcar.setup.SetupActivity::class.java)) }
         list.addView(guide)
+        // Android Auto: certificates for head units that only accept Google's
+        val aaCert = layoutInflater.inflate(R.layout.item_phone_settings_menu, list, false)
+        aaCert.setBackgroundResource(ripple.resourceId)
+        (aaCert.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.topMargin = 0
+        aaCert.findViewById<ImageView>(R.id.menuIcon).setImageResource(R.drawable.ic_car)
+        aaCert.findViewById<TextView>(R.id.menuTitle).text = getString(R.string.aa_cert_title)
+        aaCert.findViewById<TextView>(R.id.menuDesc).text = getString(R.string.aa_cert_desc)
+        aaCert.setOnClickListener { showAaCertificates() }
+        list.addView(aaCert)
     }
 
     override fun onResume() {

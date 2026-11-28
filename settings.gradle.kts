@@ -22,3 +22,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "android-carplay"
 include(":app")
+include(":aap")
